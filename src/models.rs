@@ -36,6 +36,9 @@ impl Item {
                 self.fields.get(k).unwrap_or(&String::new())
             ));
         }
+        if self.fields.is_empty() && !self.text.is_empty() {
+            parts.push(format!("text={}", self.text));
+        }
         let mut imgs = self.image_urls.clone();
         imgs.sort();
         parts.push(imgs.join(","));

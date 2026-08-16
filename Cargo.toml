@@ -4,6 +4,11 @@ version = "0.1.0"
 edition = "2024"
 description = "HTTP/HTTPS data change detection with Telegram push"
 license = "MIT"
+default-run = "reading-steiner"
+
+[[bin]]
+name = "reading-steiner"
+path = "src/main.rs"
 
 [dependencies]
 anyhow = "1"

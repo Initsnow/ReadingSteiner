@@ -14,25 +14,25 @@ cargo build --release
 # 准备配置
 cp config.yaml config.local.yaml
 # 编辑 token / chat / sources 后启动 daemon
-./target/release/wwatch serve --config config.local.yaml
+./target/release/reading-steiner serve --config config.local.yaml
 # 另一个终端查看状态 / TUI
-./target/release/wwatch status --config config.local.yaml
-./target/release/wwatch tui --config config.local.yaml
+./target/release/reading-steiner status --config config.local.yaml
+./target/release/reading-steiner tui --config config.local.yaml
 ```
 
 ## CLI
 
 ```text
-wwatch serve                 # 前台跑 daemon（systemd 用）
-wwatch tui                   # 打开 TUI
-wwatch status [--json]       # 运行状态
-wwatch sources add <file>    # 添加监控项
-wwatch sources list          # 列出配置中的监控项
-wwatch check <id>            # 立即检测一次
-wwatch test-pipeline <id>    # 用最近快照试跑筛选流水线
-wwatch diff <event-id>       # 查看变更 diff
-wwatch notify test           # 发测试 Telegram 消息
-wwatch history <id>          # 变更历史
+reading-steiner serve                 # 前台跑 daemon（systemd 用）
+reading-steiner tui                   # 打开 TUI
+reading-steiner status [--json]       # 运行状态
+reading-steiner sources add <file>    # 添加监控项
+reading-steiner sources list          # 列出配置中的监控项
+reading-steiner check <id>            # 立即检测一次
+reading-steiner test-pipeline <id>    # 用最近快照试跑筛选流水线
+reading-steiner diff <event-id>       # 查看变更 diff
+reading-steiner notify test           # 发测试 Telegram 消息
+reading-steiner history <id>          # 变更历史
 ```
 
 ## 配置
@@ -83,6 +83,8 @@ sources:
       stable_id: id
       notify_on: [new, updated, removed]
 ```
+
+> 重要：ReadingSteiner 不是“直接 diff 原始 HTML”。每个 source 通过 `pipeline` 声明提取规则（`css_items` / `xpath` / `json_path` / `regex` / `auto_text` 等），Differ 只在提取后的 `Item` 上做 `item_set` / `raw_digest` / `text_sim` 比较。`auto_text` 只是整页文本模式的便捷选择；结构化页面请配置 `css_items` 或 `json_path`。
 
 ## camofox 接入
 

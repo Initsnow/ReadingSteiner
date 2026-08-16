@@ -633,4 +633,35 @@ mod tests {
         assert_eq!(out.items[0].stable_id, "a");
         assert_eq!(out.items[0].fields["title"], "A");
     }
+
+    #[test]
+    fn test_auto_text_fingerprint_tracks_text_changes() {
+        let pipeline = PipelineConfig {
+            extract: vec![ExtractConfig::AutoText],
+            normalize: vec![],
+            filter: FilterConfig::default(),
+        };
+        let make_doc = |text: &str| FetchedDocument {
+            final_url: "https://example.com".into(),
+            status: 200,
+            text: text.into(),
+            html: None,
+            images: vec![],
+            screenshot: None,
+            etag: None,
+            last_modified: None,
+            content_sha256: "x".into(),
+            normalized_fingerprint: "x".into(),
+            duration_ms: 0,
+            engine: "http".into(),
+            not_modified: false,
+        };
+        let first = run_pipeline(&make_doc("hello world"), &pipeline).unwrap();
+        let second = run_pipeline(&make_doc("hello world!"), &pipeline).unwrap();
+        assert_ne!(first.fingerprint, second.fingerprint);
+        assert_ne!(
+            first.items[0].fingerprint(&[]),
+            second.items[0].fingerprint(&[])
+        );
+    }
 }

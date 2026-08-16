@@ -46,15 +46,15 @@
 CLI 命令草案：
 
 ```text
-wwatch serve                 # 前台跑 daemon（systemd 用）
-wwatch tui                   # 打开 TUI
-wwatch status [--json]       # 运行状态
-wwatch sources add <file>    # 添加监控项
-wwatch check <id>            # 立即检测一次
-wwatch test-pipeline <id>    # 用最近快照试跑筛选流水线
-wwatch diff <event-id>       # 查看变更 diff
-wwatch notify test           # 发测试 Telegram 消息
-wwatch history <id>          # 变更历史
+reading-steiner serve                 # 前台跑 daemon（systemd 用）
+reading-steiner tui                   # 打开 TUI
+reading-steiner status [--json]       # 运行状态
+reading-steiner sources add <file>    # 添加监控项
+reading-steiner check <id>            # 立即检测一次
+reading-steiner test-pipeline <id>    # 用最近快照试跑筛选流水线
+reading-steiner diff <event-id>       # 查看变更 diff
+reading-steiner notify test           # 发测试 Telegram 消息
+reading-steiner history <id>          # 变更历史
 ```
 
 ---
@@ -523,7 +523,8 @@ compare:
 - 项目根目录：`ReadingSteiner/`
 - 当前版本：**v0.1.0**，Rust 可编译、可测试、clippy 零警告。
 - 已实现：CLI/TUI/daemon、SQLite、HTTP 与 camofox 抓取、提取筛选流水线、Differ、Telegram 推送、图片链路、Unix socket 控制面、NixOS flake/module、mock 契约测试、loadgen 压测工具。
-- 验证：`cargo test --all-targets` 通过（6 个测试），`cargo clippy --all-targets` 零警告，`loadgen 100 16` 冒烟通过。
+- CLI 命令统一为 `reading-steiner`（原 `wwatch` 已移除）。
+- 验证：`cargo test --all-targets` 通过（7 个测试），`cargo clippy --all-targets` 零警告，`loadgen 100 16` 冒烟通过。
 - 待外部环境验证：真实 camofox 实例 e2e、NixOS VM 集成测试、大规模容量目标（需在 Linux/NixOS 环境执行）。
 - 当前阶段：**M0–M5 代码与文档已完成**（真实外部依赖项需部署环境复验）。
 
@@ -535,3 +536,4 @@ compare:
 |---|---|---|---|
 | 2026-08-16 | 初始化开发计划 PLAN.md 与 AI 协作规则 | 人工 review | M0 尚未开始 |
 | 2026-08-16 | 完成 M0–M5 全部代码与文档：Rust 项目、CLI/TUI/daemon、SQLite、HTTP/camofox fetcher、流水线、Differ、Telegram、图片、控制面、NixOS flake/module、测试、loadgen | `cargo test --all-targets`、`cargo clippy --all-targets`、`loadgen 100 16` 冒烟通过 | 真实 camofox/NixOS VM/大容量压测需在部署环境复验 |
+| 2026-08-16 | CLI 命名统一为 `reading-steiner`（移除 `wwatch`）；修复 `auto_text` 指纹不包含文本导致整页监控失效的问题；在 config/README 中强化“提取规则 -> Item -> 比对”的结构化监控说明并补充 JSON API 示例 | `cargo test --all-targets`（7 个）、`cargo clippy --all-targets` 零警告 | 同步更新 PLAN.md CLI 草案与当前状态 |

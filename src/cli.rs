@@ -11,7 +11,8 @@ use crate::scheduler::{self, AppState};
 
 #[derive(Debug, Parser)]
 #[command(
-    name = "wwatch",
+    name = "reading-steiner",
+    bin_name = "reading-steiner",
     version,
     about = "ReadingSteiner - web/data change detection with Telegram push"
 )]
