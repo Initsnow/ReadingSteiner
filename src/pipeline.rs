@@ -65,7 +65,7 @@ fn apply_pipeline_stages(
     for norm in &pipeline.normalize {
         apply_normalize(items, norm, final_url)?;
     }
-    *items = filter_items(items.to_vec(), &pipeline.filter)?;
+    *items = filter_items(std::mem::take(items), &pipeline.filter)?;
     Ok(())
 }
 

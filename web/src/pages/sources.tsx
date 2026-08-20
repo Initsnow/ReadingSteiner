@@ -212,18 +212,12 @@ function formToSource(f: FormState, existing?: SourceConfig): SourceConfig {
       jitter_secs: f.jitter_secs || 5,
     },
     priority: f.priority || 0,
-    pipeline: f.useInline ? (f.pipeline || "default") : f.pipeline || "default",
+    pipeline: f.pipeline || "default",
     pipeline_config: pipelineConfig,
     compare: {
       ...base.compare,
-      // Structured content selector -> item_set 逐项比对；整页文本 -> 默认 raw_digest
-      mode: f.useInline
-        ? structured
-          ? "item_set"
-          : f.compareMode === "item_set"
-            ? "raw_digest"
-            : f.compareMode
-        : f.compareMode,
+      // 结构化内容选择器 -> 强制 item_set 逐项比对；其余情况尊重用户选择的比较模式
+      mode: f.useInline && structured ? "item_set" : f.compareMode,
       stable_id: f.stable_id,
       notify_on: f.notify_on
         .split(",")
@@ -325,9 +319,38 @@ export function SourcesPage() {
     setModalOpen(true)
   }
 
+  function validateInlineJson(): string | null {
+    if (!form.useInline) return null
+    const requiredFields: Array<[string, string]> = []
+    if (
+      form.extractType === "css_items" ||
+      form.extractType === "xpath" ||
+      form.extractType === "json_path" ||
+      form.extractType === "regex"
+    ) {
+      requiredFields.push(["extractFields", form.extractFields])
+    }
+    requiredFields.push(["normalizeJson", form.normalizeJson])
+    requiredFields.push(["filterJson", form.filterJson])
+    for (const [name, value] of requiredFields) {
+      if (!value.trim()) continue
+      try {
+        JSON.parse(value)
+      } catch {
+        return `${name} 不是合法的 JSON，请检查语法`
+      }
+    }
+    return null
+  }
+
   async function handleSave() {
     if (!form.id.trim() || !form.url.trim()) {
       setFormError("id 和 url 为必填项")
+      return
+    }
+    const jsonErr = validateInlineJson()
+    if (jsonErr) {
+      setFormError(jsonErr)
       return
     }
     setSaving(true)
