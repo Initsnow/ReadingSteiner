@@ -8,6 +8,7 @@ use tracing::{error, info};
 
 use crate::config::SourceConfig;
 use crate::error::{Error, Result};
+use crate::pipeline;
 use crate::scheduler::{self, AppState};
 
 #[cfg(not(unix))]
@@ -269,22 +270,26 @@ where
 
 async fn test_pipeline(state: &Arc<AppState>, source_id: &str) -> Result<Value> {
     let source = scheduler::get_live_source(state, source_id).await?;
-    let _pipeline_cfg = state
+    let pipeline_cfg = state
         .cfg
-        .pipeline(&source.pipeline)
-        .cloned()
+        .resolve_pipeline(&source)
         .ok_or_else(|| Error::config(format!("pipeline not found: {}", source.pipeline)))?;
     let db = state.db.lock().await;
     let snap = db
         .latest_snapshot(source_id)?
         .ok_or_else(|| Error::other(format!("no snapshot for source {source_id}")))?;
+    // Re-run the source's pipeline (content selector) on the latest snapshot's
+    // items so users can validate extract / normalize / filter rules against
+    // real data without re-fetching the page or creating a change event.
     let items: Vec<crate::models::Item> = serde_json::from_str(&snap.items_json)?;
+    let out = pipeline::rerun_on_items(&items, &pipeline_cfg)?;
     Ok(json!({
         "source_id": source_id,
-        "items": items,
-        "fingerprint": snap.normalized_fingerprint,
+        "items": out.items,
+        "fingerprint": out.fingerprint,
         "pipeline": source.pipeline,
-        "note": "test-pipeline uses latest snapshot items; use check to refresh raw content"
+        "inline_pipeline": source.pipeline_config.is_some(),
+        "note": "test-pipeline re-runs extract/normalize/filter on the latest snapshot; use check to refresh raw content"
     }))
 }
 

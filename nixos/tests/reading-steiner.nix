@@ -19,24 +19,6 @@ let
           - type: auto_text
         normalize: []
         filter: {}
-    sources:
-      - id: test-source
-        name: Test Source
-        enabled: true
-        tags: []
-        fetch:
-          engine: http
-          url: http://127.0.0.1:8080/page
-          timeout_secs: 5
-        schedule:
-          interval_secs: 1
-          jitter_secs: 0
-        priority: 0
-        pipeline: default
-        compare:
-          mode: raw_digest
-          stable_id: id
-          notify_on: [new, updated, removed]
   '';
 in
 pkgs.testers.runNixOSTest {
@@ -66,6 +48,31 @@ pkgs.testers.runNixOSTest {
     machine.wait_for_unit("telegram-mock.service")
     machine.wait_for_open_port(8080)
     machine.wait_for_open_port(8443)
+
+    # Add a monitoring source via CLI (sources are stored in SQLite, not config.yaml)
+    machine.succeed('''
+      cat > /tmp/source.yaml <<'EOF'
+      id: test-source
+      name: Test Source
+      enabled: true
+      tags: []
+      fetch:
+        engine: http
+        url: http://127.0.0.1:8080/page
+        timeout_secs: 5
+      schedule:
+        interval_secs: 1
+        jitter_secs: 0
+      priority: 0
+      pipeline: default
+      compare:
+        mode: raw_digest
+        stable_id: id
+        notify_on: [new, updated, removed]
+    EOF
+    reading-steiner sources add /tmp/source.yaml --config ${testConfig}
+    ''')
+
     machine.wait_until_succeeds(
       "journalctl -u reading-steiner-daemon -n 100 --no-pager | grep -q 'change detected'"
     )

@@ -22,9 +22,8 @@ pub struct AppState {
     pub cfg: Config,
     pub runtime: RuntimeConfig,
     pub db: Arc<Mutex<Db>>,
-    /// Live monitoring sources. This is the source of truth for the runtime:
-    /// seeded from config.yaml on first run, then kept in sync with the SQLite
-    /// `sources` table as sources are added / edited / deleted via the Web/CLI.
+    /// Live monitoring sources. Solely backed by the SQLite `sources` table,
+    /// kept in sync as sources are added / edited / deleted via the Web/CLI.
     pub sources: Mutex<Vec<SourceConfig>>,
     pub notifier: Option<Arc<TelegramNotifier>>,
     pub images: ImageDownloader,
@@ -48,20 +47,8 @@ impl AppState {
             }
         };
         let images = ImageDownloader::new(&runtime.media_dir, 10 * 1024 * 1024, false)?;
-        // SQLite is the source of truth for monitoring sources. On first run the
-        // DB is empty, so we seed it from config.yaml (the legacy/static location).
-        let sources = {
-            let existing = db.list_sources().unwrap_or_default();
-            if existing.is_empty() {
-                let seeded = cfg.sources.clone();
-                for s in &seeded {
-                    db.upsert_source(s)?;
-                }
-                seeded
-            } else {
-                existing
-            }
-        };
+        // SQLite is the source of truth for monitoring sources.
+        let sources = db.list_sources().unwrap_or_default();
         Ok(Self {
             cfg,
             runtime,
@@ -198,8 +185,7 @@ pub async fn check_source(state: &Arc<AppState>, source_id: &str) -> Result<()> 
     let source = get_live_source(state, source_id).await?;
     let pipeline_cfg = state
         .cfg
-        .pipeline(&source.pipeline)
-        .cloned()
+        .resolve_pipeline(&source)
         .ok_or_else(|| {
             crate::error::Error::config(format!("pipeline not found: {}", source.pipeline))
         })?;
@@ -448,8 +434,7 @@ pub async fn get_live_source(state: &Arc<AppState>, source_id: &str) -> Result<S
 pub async fn test_source(state: &Arc<AppState>, source: &SourceConfig) -> Result<Value> {
     let pipeline_cfg = state
         .cfg
-        .pipeline(&source.pipeline)
-        .cloned()
+        .resolve_pipeline(source)
         .ok_or_else(|| {
             crate::error::Error::config(format!("pipeline not found: {}", source.pipeline))
         })?;

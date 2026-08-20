@@ -2,7 +2,6 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use clap::{Parser, Subcommand};
-use tracing::info;
 
 use crate::config::Config;
 use crate::control::{self, ControlRequest, ControlResponse};
@@ -40,7 +39,7 @@ pub enum Command {
         #[arg(long, default_value = "config.yaml")]
         config: PathBuf,
     },
-    /// Add monitoring sources from a YAML file
+    /// Add monitoring sources from a YAML file (requires running daemon)
     Sources {
         #[command(subcommand)]
         action: SourcesAction,
@@ -133,7 +132,7 @@ pub async fn run(cli: Cli) -> Result<()> {
         }
         Command::Sources { action } => match action {
             SourcesAction::Add { file, config } => {
-                let mut cfg = Config::load(&config)?;
+                let cfg = Config::load(&config)?;
                 let text = std::fs::read_to_string(&file)?;
                 let sources: Vec<crate::config::SourceConfig> =
                     if text.trim_start().starts_with('-') {
@@ -142,26 +141,35 @@ pub async fn run(cli: Cli) -> Result<()> {
                         vec![serde_yaml::from_str(&text)?]
                     };
                 for source in sources {
-                    if cfg.sources.iter().any(|s| s.id == source.id) {
-                        return Err(Error::config(format!(
-                            "source {} already exists",
-                            source.id
-                        )));
+                    let resp = control::send_request(
+                        cfg.socket_path(),
+                        &ControlRequest::SourcesAdd {
+                            source: Box::new(source),
+                        },
+                    )
+                    .await?;
+                    if !resp.ok {
+                        return Err(Error::other(resp.error.unwrap_or_default()));
                     }
-                    cfg.sources.push(source);
+                    let id = resp
+                        .result
+                        .as_ref()
+                        .and_then(|r| r.get("source_id"))
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
+                    println!("added source: {id}");
                 }
-                cfg.save(&config)?;
-                info!(path = %config.display(), "sources added to config");
-                println!(
-                    "added {} source(s) to {}",
-                    cfg.sources.len(),
-                    config.display()
-                );
                 Ok(())
             }
             SourcesAction::List { config } => {
                 let cfg = Config::load(&config)?;
-                for s in &cfg.sources {
+                let resp = control::send_request(cfg.socket_path(), &ControlRequest::ListSources).await?;
+                if !resp.ok {
+                    return Err(Error::other(resp.error.unwrap_or_default()));
+                }
+                let sources: Vec<crate::config::SourceConfig> =
+                    serde_json::from_value(resp.result.unwrap_or_default())?;
+                for s in &sources {
                     println!(
                         "{:<24} {} {}",
                         s.id,

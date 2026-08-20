@@ -18,8 +18,12 @@ cd web && npm install && npm run build && cd ..
 
 # 准备配置
 cp config.yaml config.local.yaml
-# 编辑 token / chat / sources 后启动 daemon
+# 编辑 token / chat 后启动 daemon
 ./target/release/reading-steiner serve --config config.local.yaml
+
+# 在另一终端添加监控源（YAML 文件，需 daemon 已运行）
+./target/release/reading-steiner sources add source.yaml
+./target/release/reading-steiner sources list
 
 # 打开 Web 控制台
 # 浏览器访问 http://127.0.0.1:8901 （默认地址，可在 config.yaml 的 web.listen 修改）
@@ -39,7 +43,7 @@ web:
 ```
 
 - 页面：**仪表盘**（运行状态 / 引擎健康）、**监控源**（添加、编辑、删除、测试、立即检测、试跑流水线）、**变更事件**（列表与 diff 详情）。
-- 监控源存储在 SQLite（`state/reading-steiner.db` 的 `sources` 表），作为运行时唯一数据源：daemon 首次启动时从 `config.yaml` 的 `sources` 初始种子导入，之后通过 Web 控制台/CLI 的添加、编辑、删除操作即时生效，无需重启 daemon。
+- **监控源（source）只存在 SQLite（`state/reading-steiner.db` 的 `sources` 表）中**，是运行时唯一数据源。config.yaml 中**不包含** sources 配置——添加、编辑、删除监控源统一通过 Web 控制台或 CLI 操作，即时生效，无需重启 daemon。
 - 技术栈：React + TypeScript + Vite + Tailwind CSS + shadcn/ui。
 - 前端源码位于 [`web/`](./web/)，构建产物输出到 `web/dist`。
 - 开发调试：在 `web/` 下执行 `npm run dev`，Vite 会把 `/api` 代理到 `127.0.0.1:8901`。
@@ -51,8 +55,8 @@ web:
 reading-steiner serve                 # 前台跑 daemon（systemd 用），并启动 Web API + 静态资源
 reading-steiner web                   # 打印 Web 控制台地址
 reading-steiner status [--json]       # 运行状态
-reading-steiner sources add <file>    # 添加监控项
-reading-steiner sources list          # 列出配置中的监控项
+reading-steiner sources add <file>    # 添加监控源（YAML 文件，需先启动 daemon）
+reading-steiner sources list          # 列出监控源（需先启动 daemon）
 reading-steiner check <id>            # 立即检测一次
 reading-steiner test-pipeline <id>    # 用最近快照试跑筛选流水线
 reading-steiner diff <event-id>       # 查看变更 diff
@@ -62,7 +66,9 @@ reading-steiner history <id>          # 变更历史
 
 ## 配置
 
-见 [`config.yaml`](./config.yaml)。核心结构：
+见 [`config.yaml`](./config.yaml)。config.yaml 负责**全局配置**（state_dir、telegram、camofox、web）与**流水线模板**（pipelines），**不包含监控源（sources）定义**——监控源统一存于 SQLite，通过 Web 控制台或 CLI 管理。
+
+核心结构：
 
 ```yaml
 telegram:
@@ -89,27 +95,99 @@ pipelines:
     filter:
       include:
         - { op: gt, field: price, value: 0 }
-
-sources:
-  - id: shop-list
-    name: Shop List
-    fetch:
-      engine: http           # 或 camofox
-      url: https://example.com/list
-      wait:
-        selector: ".item"
-        timeout: 15000
-      tab_policy: reuse
-    schedule:
-      interval_secs: 60
-    pipeline: product_list
-    compare:
-      mode: item_set
-      stable_id: id
-      notify_on: [new, updated, removed]
 ```
 
-> 重要：ReadingSteiner 不是“直接 diff 原始 HTML”。每个 source 通过 `pipeline` 声明提取规则（`css_items` / `xpath` / `json_path` / `regex` / `auto_text` 等），Differ 只在提取后的 `Item` 上做 `item_set` / `raw_digest` / `text_sim` 比较。`auto_text` 只是整页文本模式的便捷选择；结构化页面请配置 `css_items` 或 `json_path`。
+### 监控源（source）
+
+监控源通过 **Web 控制台**或 **CLI**（`reading-steiner sources add <file>`）添加，核心字段：
+
+```yaml
+id: shop-list          # 唯一标识
+name: Shop List
+fetch:
+  engine: http         # 或 camofox
+  url: https://example.com/list
+schedule:
+  interval_secs: 60
+pipeline: product_list # 引用 config.yaml 中的 pipelines 模板（可选）
+compare:
+  mode: item_set       # 比较模式
+  stable_id: id        # 稳定字段
+  notify_on: [new, updated, removed]
+```
+
+### 内容选择器（内联 pipeline）
+
+除了引用 config.yaml 中命名好的 `pipelines` 模板，每个监控源还可以在 **Web 控制台添加/编辑弹窗里直接配置内联的“内容选择器”**（`pipeline_config`），把提取规则（extract）、规范化（normalize）与过滤（filter）直接写在监控源上，不再依赖外部模板：
+
+```yaml
+id: shop-list
+fetch:
+  engine: http
+  url: https://example.com/list
+schedule:
+  interval_secs: 60
+pipeline_config:          # 内联内容选择器，优先于 config.yaml 中的命名 pipeline
+  extract:
+    - type: css_items     # css_items / xpath / json_path / regex / auto_text ...
+      selector: ".product"
+      fields:
+        id:    { attr: data-id }
+        title: { selector: ".title" }
+        price: { selector: ".price" }
+  normalize:
+    - { type: trim, field: title }
+  filter:
+    include:
+      - { op: gt, field: price, value: 0 }
+compare:
+  mode: item_set
+  stable_id: id
+```
+
+- Web 控制台的“添加/编辑监控源”里勾选“使用内联选择器”，即可直接配置提取类型、选择器/路径与提取字段，无需手改 config.yaml。
+- 若未配置 `pipeline_config`，回退使用 `pipeline` 字段引用的命名模板；两者都缺则启动时报错。
+- 内联 `pipeline_config` 也会被 `test_source`（测试）与 `test-pipeline`（试跑流水线）使用。
+
+### 比较模式（compare.mode）
+
+`compare.mode` 决定 Differ 如何判定两轮快照之间的“变化”，支持三种：
+
+| 模式 | 说明 | 适用场景 |
+|---|---|---|
+| `item_set` | 按提取后的 **Item 集合**比较。需配合 `stable_id`，逐项对比稳定字段值是否新增 / 更新 / 移除。 | **推荐**。结构化页面（商品列表、文章列表、JSON API 等），变更语义清晰、误报最少。 |
+| `raw_digest` | 对原始抓取内容的 SHA-256 摘要做全量比较，内容有任何字节变化即视为“已变更”。 | 无需区分具体字段、只要知道“变没变”的整页监控。 |
+| `text_sim` | 基于提取后全文做**相似度**比较，相似度低于阈值判定为变更。 | 文本型页面，内容存在小幅噪声（如时间戳、随机广告）时用于容忍轻微差异。 |
+
+> 注意：`item_set` 是默认模式。结构化数据请优先用 `css_items` / `json_path` 提取字段并配合 `stable_id`，Differ 只会报告 Item 级差异，而不是 diff 原始 HTML。
+
+### 稳定字段（compare.stable_id）
+
+`stable_id` 指定 Item 中用于**跨轮次稳定识别同一条数据**的字段名（来自 pipeline 提取结果）。Differ 以 `stable_id` 的值作为 Item 的“主键”，在旧快照和新快照之间做集合配对：
+
+- 新快照中出现旧快照没有的 `stable_id` 值 → 判定为 **新增（new）**。
+- 旧快照中消失 → 判定为 **移除（removed）**。
+- 相同 `stable_id` 但其余字段的指纹（排除 `ignore_fields`）不同 → 判定为 **更新（updated）**。
+
+```yaml
+compare:
+  mode: item_set
+  stable_id: id       # 每条商品/文章的稳定唯一 ID，对应 pipeline 中提取的字段
+  ignore_fields: []   # 可选：比较时忽略的字段（如价格波动、点击量）
+```
+
+> 选错 `stable_id` 会直接导致误报：例如商品列表用 `title` 当稳定字段，一旦标题微调就会同时产生“移除+新增”两条事件。请选择一个内容不变但能唯一定位的字段。
+
+### 试跑流水线（test-pipeline）
+
+`reading-steiner test-pipeline <id>`（Web 控制台对应“试跑流水线”按钮）用于**在不抓取新内容、不产生变更事件的前提下**，用该监控源**最近一次快照**中的已提取 Item 重新跑一遍 pipeline 的 `filter` / `normalize` 阶段，返回最终落库前的 item 列表与指纹。
+
+用途：
+- 快速验证筛选规则（`filter`）写对了没有——比如 `price > 0` 是否真的过滤掉了不想要的条目。
+- 验证 normalize 规则（`trim` / `strip` / `abs_url`）对历史数据的效果。
+- 查看最终写入快照的指纹，用于排查“为什么这个 source 没有触发通知”。
+
+> 注意：`test-pipeline` 用的是**已有快照**，不会重新抓取网页。若想刷新原始内容后试跑，先执行 `reading-steiner check <id>`（或 Web 控制台的“立即检测”）再试跑。
 
 ## camofox 接入
 

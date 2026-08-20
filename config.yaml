@@ -90,25 +90,3 @@ pipelines:
     normalize: []
     filter:
       min_items: 0
-
-sources:
-  - id: example-page
-    name: Example Page
-    enabled: true
-    tags: [demo]
-    fetch:
-      engine: http
-      url: https://example.com
-      max_body_bytes: 5242880
-      timeout_secs: 30
-    schedule:
-      interval_secs: 60
-      jitter_secs: 5
-    priority: 0
-    pipeline: default
-    compare:
-      mode: item_set
-      stable_id: id
-      notify_on: [new, updated, removed]
-      confirm_count: 1
-      cooldown_secs: 0
