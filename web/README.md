@@ -5,7 +5,7 @@ React + TypeScript + Vite + Tailwind CSS + [shadcn/ui](https://ui.shadcn.com/) �
 ## 页面
 
 - **仪表盘**：运行状态、监控源数量、队列深度、引擎健康。
-- **监控源**：列出 source，支持「立即检测」「试跑流水线」。
+- **监控源**：列出 source，支持「立即检测」「测试」。
 - **变更事件**：事件列表与 diff 详情（旧数据 / 新数据）。
 
 ## 开发
@@ -41,6 +41,5 @@ npm run build
 | GET | `/api/events?limit=N` | 变更事件列表 |
 | GET | `/api/events/:id` | 单个事件详情 |
 | POST | `/api/check` | 立即检测 `{ source_id }` |
-| POST | `/api/test-pipeline` | 试跑流水线 `{ source_id }` |
 | GET | `/api/history?source_id=&limit=` | 变更历史 |
 | POST | `/api/notify-test` | 发送测试通知 `{ chat_id? }` |

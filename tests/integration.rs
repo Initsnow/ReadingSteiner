@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use chrono::Utc;
 use reading_steiner::config::{
-    CamofoxConfig, ChangeType, CompareConfig, CompareMode, Config, FetchConfig, PipelineConfig,
+    CamofoxConfig, ChangeType, Config, ExtractConfig, FetchConfig, ItemField, ItemSelector,
     SourceConfig,
 };
 use reading_steiner::db::Db;
@@ -35,7 +35,7 @@ fn test_db_schema_and_snapshot_roundtrip() {
 }
 
 #[test]
-fn test_differ_item_set_new_updated_removed() {
+fn test_differ_items_new_updated_removed() {
     let old_items = vec![
         Item {
             stable_id: "a".into(),
@@ -68,19 +68,38 @@ fn test_differ_item_set_new_updated_removed() {
             meta: HashMap::new(),
         },
     ];
-    let cmp = CompareConfig {
-        mode: CompareMode::ItemSet,
-        stable_id: "id".into(),
-        ignore_fields: vec![],
-        notify_on: vec![ChangeType::New, ChangeType::Updated, ChangeType::Removed],
-        confirm_count: 1,
-        cooldown_secs: 0,
-    };
-    let result = differ::diff("", "", &old_items, &new_items, &cmp);
+    // a 更新、c 新增、b 移除
+    let result = differ::diff("", "", &old_items, &new_items);
     assert!(result.changed);
     assert!(result.diff_summary.contains('+'));
     assert!(result.diff_summary.contains('~'));
     assert!(result.diff_summary.contains('-'));
+}
+
+#[test]
+fn test_differ_text_changed() {
+    let old_item = Item {
+        stable_id: "page".into(),
+        fields: HashMap::new(),
+        image_urls: vec![],
+        text: "hello".into(),
+        meta: HashMap::new(),
+    };
+    let new_item = Item {
+        stable_id: "page".into(),
+        fields: HashMap::new(),
+        image_urls: vec![],
+        text: "hello world".into(),
+        meta: HashMap::new(),
+    };
+    let result = differ::diff(
+        "fp-old",
+        "fp-new",
+        std::slice::from_ref(&old_item),
+        std::slice::from_ref(&new_item),
+    );
+    assert!(result.changed);
+    assert_eq!(result.change_type, Some(ChangeType::Updated));
 }
 
 #[tokio::test]
@@ -100,15 +119,7 @@ async fn test_http_fetcher_and_pipeline() {
         .mount(&server)
         .await;
 
-    let cfg = Config {
-        state_dir: "".into(),
-        media_dir: "".into(),
-        daemon: Default::default(),
-        web: Default::default(),
-        telegram: Default::default(),
-        camofox: Default::default(),
-        pipelines: HashMap::new(),
-    };
+    let cfg = Config::default();
     let fetcher = reading_steiner::fetcher::create_fetcher("http", &cfg).unwrap();
     let doc = fetcher
         .fetch(&FetchSpec {
@@ -125,36 +136,25 @@ async fn test_http_fetcher_and_pipeline() {
     assert_eq!(doc.status, 200);
     assert!(!doc.text.is_empty());
 
-    let pipeline = PipelineConfig {
-        extract: vec![reading_steiner::config::ExtractConfig::CssItems {
+    let extract = ExtractConfig::Items {
+        selector: ItemSelector::Css {
             selector: ".product".into(),
-            fields: HashMap::from([
-                (
-                    "id".into(),
-                    reading_steiner::config::FieldSelector {
-                        selector: None,
-                        attr: Some("data-id".into()),
-                        path: None,
-                        regex: None,
-                        group: None,
-                    },
-                ),
-                (
-                    "title".into(),
-                    reading_steiner::config::FieldSelector {
-                        selector: Some(".title".into()),
-                        attr: None,
-                        path: None,
-                        regex: None,
-                        group: None,
-                    },
-                ),
-            ]),
-        }],
-        normalize: vec![],
-        filter: Default::default(),
+        },
+        fields: vec![
+            ItemField {
+                name: "id".into(),
+                attr: Some("data-id".into()),
+                ..Default::default()
+            },
+            ItemField {
+                name: "title".into(),
+                selector: Some(".title".into()),
+                ..Default::default()
+            },
+        ],
+        dedupe_key: None,
     };
-    let out = pipeline::run_pipeline(&doc, &pipeline).unwrap();
+    let out = pipeline::run_pipeline(&doc, &extract).unwrap();
     assert_eq!(out.items.len(), 1);
     assert_eq!(out.items[0].stable_id, "1");
 }
@@ -263,97 +263,48 @@ fetch:
 schedule:
   interval_secs: 30
 priority: 0
-pipeline: default
-compare:
-  mode: item_set
+extract:
+  type: text
 "#,
     )
     .unwrap();
     assert_eq!(src.id, "s1");
     assert_eq!(src.schedule.interval_secs, 30);
+    assert_eq!(src.extract, ExtractConfig::Text);
 }
 
 #[test]
-fn test_resolve_pipeline_inline_wins_over_named() {
-    let named = PipelineConfig {
-        extract: vec![reading_steiner::config::ExtractConfig::AutoText],
-        normalize: vec![],
-        filter: Default::default(),
-    };
-    let mut cfg = Config {
-        state_dir: "".into(),
-        media_dir: "".into(),
-        daemon: Default::default(),
-        web: Default::default(),
-        telegram: Default::default(),
-        camofox: Default::default(),
-        pipelines: HashMap::from([("default".to_string(), named)]),
-    };
-
-    // 1) No inline pipeline -> falls back to named template.
-    let s1 = SourceConfig {
-        pipeline: "default".into(),
-        pipeline_config: None,
-        ..Default::default()
-    };
-    assert_eq!(
-        cfg.resolve_pipeline(&s1).unwrap().extract.len(),
-        1,
-        "named pipeline fallback"
-    );
-
-    // 2) Inline pipeline (content selector) wins.
-    let inline = PipelineConfig {
-        extract: vec![reading_steiner::config::ExtractConfig::CssItems {
-            selector: ".item".into(),
-            fields: HashMap::new(),
-        }],
-        normalize: vec![],
-        filter: Default::default(),
-    };
-    let s2 = SourceConfig {
-        pipeline: "default".into(),
-        pipeline_config: Some(inline.clone()),
-        ..Default::default()
-    };
-    let resolved = cfg.resolve_pipeline(&s2).unwrap();
-    assert!(matches!(
-        resolved.extract[0],
-        reading_steiner::config::ExtractConfig::CssItems { ref selector, .. } if selector == ".item"
-    ));
-
-    // 3) Named pipeline missing and no inline -> None.
-    cfg.pipelines.clear();
-    assert!(cfg.resolve_pipeline(&s1).is_none());
-}
-
-#[test]
-fn test_rerun_on_items_applies_normalize_and_filter() {
-    let items = vec![Item {
-        stable_id: "a".into(),
-        fields: HashMap::from([
-            ("title".into(), "  Hello  ".into()),
-            ("price".into(), " ¥100 ".into()),
-        ]),
-        image_urls: vec![],
-        text: String::new(),
-        meta: HashMap::new(),
-    }];
-    let pl = PipelineConfig {
-        extract: vec![],
-        normalize: vec![
-            reading_steiner::config::NormalizeConfig::Trim {
-                field: "title".into(),
-            },
-            reading_steiner::config::NormalizeConfig::Strip {
-                field: "price".into(),
-                chars: "¥ ".into(),
-            },
-        ],
-        filter: Default::default(),
-    };
-    let out = pipeline::rerun_on_items(&items, &pl).unwrap();
-    assert_eq!(out.items.len(), 1);
-    assert_eq!(out.items[0].fields["title"], "Hello");
-    assert_eq!(out.items[0].fields["price"], "100");
+fn test_extract_items_config_roundtrip() {
+    let src: SourceConfig = serde_yaml::from_str(
+        r#"
+id: s2
+name: S2
+fetch:
+  engine: http
+  url: https://example.com
+schedule:
+  interval_secs: 60
+extract:
+  type: items
+  selector:
+    kind: css
+    selector: ".product"
+  fields:
+    - { name: id, attr: data-id }
+"#,
+    )
+    .unwrap();
+    match &src.extract {
+        ExtractConfig::Items {
+            selector, fields, ..
+        } => {
+            assert!(matches!(
+                selector,
+                ItemSelector::Css { selector } if selector == ".product"
+            ));
+            assert_eq!(fields.len(), 1);
+            assert_eq!(fields[0].name, "id");
+        }
+        _ => panic!("expected items extract"),
+    }
 }

@@ -54,7 +54,6 @@ fn build_router(state: Arc<AppState>) -> Router {
         .route("/events", get(api_list_events))
         .route("/events/{id}", get(api_get_event))
         .route("/check", post(api_check))
-        .route("/test-pipeline", post(api_test_pipeline))
         .route("/history", get(api_history))
         .route("/notify-test", post(api_notify_test))
         .with_state(state);
@@ -182,22 +181,6 @@ async fn api_check(
         control::handle_request(
             &state,
             ControlRequest::Check {
-                source_id: body.source_id,
-            },
-        )
-        .await,
-    )
-    .await
-}
-
-async fn api_test_pipeline(
-    State(state): State<Arc<AppState>>,
-    Json(body): Json<SourceIdBody>,
-) -> (StatusCode, Json<Value>) {
-    json_response(
-        control::handle_request(
-            &state,
-            ControlRequest::TestPipeline {
                 source_id: body.source_id,
             },
         )
