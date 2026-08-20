@@ -29,6 +29,15 @@ pub enum ControlRequest {
     SourcesAdd {
         source: Box<SourceConfig>,
     },
+    SourcesUpdate {
+        source: Box<SourceConfig>,
+    },
+    SourcesDelete {
+        source_id: String,
+    },
+    TestSource {
+        source_id: String,
+    },
     TestPipeline {
         source_id: String,
     },
@@ -132,17 +141,14 @@ where
     Ok(())
 }
 
-pub(crate) async fn handle_request(
-    state: &Arc<AppState>,
-    req: ControlRequest,
-) -> ControlResponse {
+pub(crate) async fn handle_request(state: &Arc<AppState>, req: ControlRequest) -> ControlResponse {
     match req {
         ControlRequest::Status => {
             let s = state.status().await;
             ControlResponse::ok(serde_json::to_value(s).unwrap_or(json!(null)))
         }
         ControlRequest::ListSources => {
-            let sources = state.cfg.sources.clone();
+            let sources = state.sources.lock().await.clone();
             ControlResponse::ok(serde_json::to_value(sources).unwrap_or(json!([])))
         }
         ControlRequest::ListEvents { limit } => {
@@ -161,14 +167,53 @@ pub(crate) async fn handle_request(
             }
         }
         ControlRequest::SourcesAdd { source } => {
-            let mut cfg = state.cfg.clone();
-            if cfg.sources.iter().any(|s| s.id == source.id) {
+            let exists = state.sources.lock().await.iter().any(|s| s.id == source.id);
+            if exists {
                 return ControlResponse::err(format!("source {} already exists", source.id));
             }
-            cfg.sources.push(source.as_ref().clone());
             let db = state.db.lock().await;
-            match db.upsert_source(source.as_ref()) {
-                Ok(()) => ControlResponse::ok(json!({"source_id": source.id, "added": true})),
+            if let Err(e) = db.upsert_source(source.as_ref()) {
+                return ControlResponse::err(e.to_string());
+            }
+            drop(db);
+            state.sources.lock().await.push(source.as_ref().clone());
+            ControlResponse::ok(json!({ "source_id": source.id, "added": true }))
+        }
+        ControlRequest::SourcesUpdate { source } => {
+            let db = state.db.lock().await;
+            if let Err(e) = db.upsert_source(source.as_ref()) {
+                return ControlResponse::err(e.to_string());
+            }
+            drop(db);
+            {
+                let mut sources = state.sources.lock().await;
+                if let Some(s) = sources.iter_mut().find(|s| s.id == source.id) {
+                    *s = source.as_ref().clone();
+                } else {
+                    return ControlResponse::err(format!("source {} not found", source.id));
+                }
+            }
+            ControlResponse::ok(json!({ "source_id": source.id, "updated": true }))
+        }
+        ControlRequest::SourcesDelete { source_id } => {
+            let db = state.db.lock().await;
+            if let Err(e) = db.delete_source(&source_id) {
+                return ControlResponse::err(e.to_string());
+            }
+            drop(db);
+            {
+                let mut sources = state.sources.lock().await;
+                sources.retain(|s| s.id != source_id);
+            }
+            ControlResponse::ok(json!({ "source_id": source_id, "deleted": true }))
+        }
+        ControlRequest::TestSource { source_id } => {
+            let source = match scheduler::get_live_source(state, &source_id).await {
+                Ok(s) => s,
+                Err(e) => return ControlResponse::err(e.to_string()),
+            };
+            match scheduler::test_source(state, &source).await {
+                Ok(v) => ControlResponse::ok(v),
                 Err(e) => ControlResponse::err(e.to_string()),
             }
         }
@@ -224,11 +269,7 @@ where
 }
 
 async fn test_pipeline(state: &Arc<AppState>, source_id: &str) -> Result<Value> {
-    let source = state
-        .cfg
-        .source(source_id)
-        .cloned()
-        .ok_or_else(|| Error::other(format!("source not found: {source_id}")))?;
+    let source = scheduler::get_live_source(state, source_id).await?;
     let _pipeline_cfg = state
         .cfg
         .pipeline(&source.pipeline)

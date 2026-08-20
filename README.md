@@ -38,7 +38,8 @@ web:
   static_dir: web/dist
 ```
 
-- 页面：**仪表盘**（运行状态 / 引擎健康）、**监控源**（立即检测、试跑流水线）、**变更事件**（列表与 diff 详情）。
+- 页面：**仪表盘**（运行状态 / 引擎健康）、**监控源**（添加、编辑、删除、测试、立即检测、试跑流水线）、**变更事件**（列表与 diff 详情）。
+- 监控源存储在 SQLite（`state/reading-steiner.db` 的 `sources` 表），作为运行时唯一数据源：daemon 首次启动时从 `config.yaml` 的 `sources` 初始种子导入，之后通过 Web 控制台/CLI 的添加、编辑、删除操作即时生效，无需重启 daemon。
 - 技术栈：React + TypeScript + Vite + Tailwind CSS + shadcn/ui。
 - 前端源码位于 [`web/`](./web/)，构建产物输出到 `web/dist`。
 - 开发调试：在 `web/` 下执行 `npm run dev`，Vite 会把 `/api` 代理到 `127.0.0.1:8901`。

@@ -4,10 +4,11 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
+use serde_json::{Value, json};
 use tokio::sync::{Mutex, Semaphore};
 use tracing::{debug, error, info, warn};
 
-use crate::config::{ChangeType, Config, RuntimeConfig};
+use crate::config::{ChangeType, Config, RuntimeConfig, SourceConfig};
 use crate::db::Db;
 use crate::differ;
 use crate::error::Result;
@@ -21,6 +22,10 @@ pub struct AppState {
     pub cfg: Config,
     pub runtime: RuntimeConfig,
     pub db: Arc<Mutex<Db>>,
+    /// Live monitoring sources. This is the source of truth for the runtime:
+    /// seeded from config.yaml on first run, then kept in sync with the SQLite
+    /// `sources` table as sources are added / edited / deleted via the Web/CLI.
+    pub sources: Mutex<Vec<SourceConfig>>,
     pub notifier: Option<Arc<TelegramNotifier>>,
     pub images: ImageDownloader,
     pub running: AtomicBool,
@@ -43,10 +48,25 @@ impl AppState {
             }
         };
         let images = ImageDownloader::new(&runtime.media_dir, 10 * 1024 * 1024, false)?;
+        // SQLite is the source of truth for monitoring sources. On first run the
+        // DB is empty, so we seed it from config.yaml (the legacy/static location).
+        let sources = {
+            let existing = db.list_sources().unwrap_or_default();
+            if existing.is_empty() {
+                let seeded = cfg.sources.clone();
+                for s in &seeded {
+                    db.upsert_source(s)?;
+                }
+                seeded
+            } else {
+                existing
+            }
+        };
         Ok(Self {
             cfg,
             runtime,
             db: Arc::new(Mutex::new(db)),
+            sources: Mutex::new(sources),
             notifier,
             images,
             running: AtomicBool::new(false),
@@ -57,8 +77,7 @@ impl AppState {
     }
 
     pub async fn status(&self) -> DaemonStatus {
-        let db = self.db.lock().await;
-        let sources = db.list_sources().unwrap_or_default();
+        let sources = self.sources.lock().await;
         let enabled = sources.iter().filter(|s| s.enabled).count();
         let last_tick = *self.last_tick_at.lock().await;
         let engine_health = self.engine_health.lock().await.clone();
@@ -76,19 +95,15 @@ impl AppState {
 
 pub async fn run_daemon(state: Arc<AppState>) -> Result<()> {
     state.running.store(true, Ordering::Relaxed);
-    info!(
-        sources = state.cfg.sources.len(),
-        "ReadingSteiner daemon started"
-    );
+    let source_count = state.sources.lock().await.len();
+    info!(sources = source_count, "ReadingSteiner daemon started");
 
-    // Persist config sources so CLI/status can see them even if config changes later.
+    // Initialize schedule states for all live sources so they become due on first tick.
     {
         let db = state.db.lock().await;
-        for source in &state.cfg.sources {
-            db.upsert_source(source)?;
-        }
         let now = Utc::now();
-        for source in &state.cfg.sources {
+        let sources = state.sources.lock().await;
+        for source in sources.iter() {
             if db.get_schedule_state(&source.id)?.is_none() {
                 let due = now + chrono::Duration::seconds(1);
                 db.upsert_schedule_state(&ScheduleState {
@@ -118,7 +133,8 @@ pub async fn run_daemon(state: Arc<AppState>) -> Result<()> {
             let db = state.db.lock().await;
             let now = Utc::now();
             let mut due = Vec::new();
-            for source in &state.cfg.sources {
+            let sources = state.sources.lock().await;
+            for source in sources.iter() {
                 if !source.enabled {
                     continue;
                 }
@@ -179,11 +195,7 @@ pub async fn run_daemon(state: Arc<AppState>) -> Result<()> {
 }
 
 pub async fn check_source(state: &Arc<AppState>, source_id: &str) -> Result<()> {
-    let source = state
-        .cfg
-        .source(source_id)
-        .cloned()
-        .ok_or_else(|| crate::error::Error::other(format!("source not found: {source_id}")))?;
+    let source = get_live_source(state, source_id).await?;
     let pipeline_cfg = state
         .cfg
         .pipeline(&source.pipeline)
@@ -418,4 +430,51 @@ fn next_schedule(
         last_notified_fingerprint: None,
         last_notified_at: None,
     }
+}
+
+/// Fetch a live source from the in-memory store (SQLite-backed).
+pub async fn get_live_source(state: &Arc<AppState>, source_id: &str) -> Result<SourceConfig> {
+    let sources = state.sources.lock().await;
+    sources
+        .iter()
+        .find(|s| s.id == source_id)
+        .cloned()
+        .ok_or_else(|| crate::error::Error::other(format!("source not found: {source_id}")))
+}
+
+/// Test a monitoring source: fetch its URL and run the configured pipeline,
+/// returning the extracted items / fingerprint without persisting any snapshot
+/// or change event. Used by the Web console "测试监控源" action.
+pub async fn test_source(state: &Arc<AppState>, source: &SourceConfig) -> Result<Value> {
+    let pipeline_cfg = state
+        .cfg
+        .pipeline(&source.pipeline)
+        .cloned()
+        .ok_or_else(|| {
+            crate::error::Error::config(format!("pipeline not found: {}", source.pipeline))
+        })?;
+    let fetcher = fetcher::create_fetcher(&source.fetch.engine, &state.cfg)?;
+    let spec = FetchSpec {
+        fetch: source.fetch.clone(),
+        etag: None,
+        last_modified: None,
+        source_id: source.id.clone(),
+    };
+    let doc = fetcher.fetch(&spec).await?;
+    if doc.not_modified {
+        return Ok(json!({ "not_modified": true }));
+    }
+    let out = pipeline::run_pipeline(&doc, &pipeline_cfg)?;
+    Ok(json!({
+        "source_id": source.id,
+        "status": doc.status,
+        "final_url": doc.final_url,
+        "duration_ms": doc.duration_ms,
+        "engine": doc.engine,
+        "content_sha256": doc.content_sha256,
+        "fingerprint": out.fingerprint,
+        "text_len": doc.text.len(),
+        "items": out.items,
+        "pipeline": source.pipeline,
+    }))
 }

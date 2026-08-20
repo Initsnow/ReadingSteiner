@@ -155,6 +155,11 @@ impl Db {
         Ok(out)
     }
 
+    pub fn delete_source(&self, id: &str) -> Result<()> {
+        self.conn.execute("DELETE FROM sources WHERE id=?1", [id])?;
+        Ok(())
+    }
+
     pub fn get_source(&self, id: &str) -> Result<Option<SourceConfig>> {
         let json = self
             .conn

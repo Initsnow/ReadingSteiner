@@ -7,17 +7,17 @@
 use std::sync::Arc;
 
 use axum::{
-    Router,
+    Json, Router,
     extract::{Path, Query, State},
     http::StatusCode,
-    routing::{get, post},
-    Json,
+    routing::{get, post, put},
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
 use tower_http::services::{ServeDir, ServeFile};
 use tracing::info;
 
+use crate::config::SourceConfig;
 use crate::control::{self, ControlRequest, ControlResponse};
 use crate::error::Result;
 use crate::scheduler::AppState;
@@ -45,7 +45,12 @@ fn build_router(state: Arc<AppState>) -> Router {
 
     let api = Router::new()
         .route("/status", get(api_status))
-        .route("/sources", get(api_list_sources))
+        .route("/sources", get(api_list_sources).post(api_add_source))
+        .route(
+            "/sources/{id}",
+            put(api_update_source).delete(api_delete_source),
+        )
+        .route("/sources/{id}/test", post(api_test_source))
         .route("/events", get(api_list_events))
         .route("/events/{id}", get(api_get_event))
         .route("/check", post(api_check))
@@ -56,9 +61,7 @@ fn build_router(state: Arc<AppState>) -> Router {
 
     Router::new()
         .nest("/api", api)
-        .fallback_service(
-            ServeDir::new(&static_dir).not_found_service(ServeFile::new(index)),
-        )
+        .fallback_service(ServeDir::new(&static_dir).not_found_service(ServeFile::new(index)))
 }
 
 async fn json_response(resp: ControlResponse) -> (StatusCode, Json<Value>) {
@@ -81,6 +84,62 @@ async fn api_list_sources(State(state): State<Arc<AppState>>) -> (StatusCode, Js
     json_response(control::handle_request(&state, ControlRequest::ListSources).await).await
 }
 
+async fn api_add_source(
+    State(state): State<Arc<AppState>>,
+    Json(source): Json<SourceConfig>,
+) -> (StatusCode, Json<Value>) {
+    json_response(
+        control::handle_request(
+            &state,
+            ControlRequest::SourcesAdd {
+                source: Box::new(source),
+            },
+        )
+        .await,
+    )
+    .await
+}
+
+async fn api_update_source(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(source): Json<SourceConfig>,
+) -> (StatusCode, Json<Value>) {
+    // Keep the URL-provided id authoritative so a rename doesn't silently split a source.
+    let mut source = source;
+    source.id = id;
+    json_response(
+        control::handle_request(
+            &state,
+            ControlRequest::SourcesUpdate {
+                source: Box::new(source),
+            },
+        )
+        .await,
+    )
+    .await
+}
+
+async fn api_delete_source(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> (StatusCode, Json<Value>) {
+    json_response(
+        control::handle_request(&state, ControlRequest::SourcesDelete { source_id: id }).await,
+    )
+    .await
+}
+
+async fn api_test_source(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> (StatusCode, Json<Value>) {
+    json_response(
+        control::handle_request(&state, ControlRequest::TestSource { source_id: id }).await,
+    )
+    .await
+}
+
 #[derive(Deserialize)]
 struct ListEventsQuery {
     limit: Option<usize>,
@@ -91,8 +150,13 @@ async fn api_list_events(
     Query(params): Query<ListEventsQuery>,
 ) -> (StatusCode, Json<Value>) {
     json_response(
-        control::handle_request(&state, ControlRequest::ListEvents { limit: params.limit })
-            .await,
+        control::handle_request(
+            &state,
+            ControlRequest::ListEvents {
+                limit: params.limit,
+            },
+        )
+        .await,
     )
     .await
 }
@@ -115,8 +179,13 @@ async fn api_check(
     Json(body): Json<SourceIdBody>,
 ) -> (StatusCode, Json<Value>) {
     json_response(
-        control::handle_request(&state, ControlRequest::Check { source_id: body.source_id })
-            .await,
+        control::handle_request(
+            &state,
+            ControlRequest::Check {
+                source_id: body.source_id,
+            },
+        )
+        .await,
     )
     .await
 }
@@ -170,8 +239,13 @@ async fn api_notify_test(
     Json(body): Json<NotifyTestBody>,
 ) -> (StatusCode, Json<Value>) {
     json_response(
-        control::handle_request(&state, ControlRequest::NotifyTest { chat_id: body.chat_id })
-            .await,
+        control::handle_request(
+            &state,
+            ControlRequest::NotifyTest {
+                chat_id: body.chat_id,
+            },
+        )
+        .await,
     )
     .await
 }

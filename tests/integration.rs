@@ -104,6 +104,7 @@ async fn test_http_fetcher_and_pipeline() {
         state_dir: "".into(),
         media_dir: "".into(),
         daemon: Default::default(),
+        web: Default::default(),
         telegram: Default::default(),
         camofox: Default::default(),
         sources: vec![],
