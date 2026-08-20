@@ -119,7 +119,7 @@ pub async fn run_daemon(state: Arc<AppState>) -> Result<()> {
         let due = {
             let db = state.db.lock().await;
             let now = Utc::now();
-            let mut due = Vec::new();
+            let mut due: Vec<(i32, SourceConfig)> = Vec::new();
             let sources = state.sources.lock().await;
             for source in sources.iter() {
                 if !source.enabled {
@@ -141,14 +141,18 @@ pub async fn run_daemon(state: Arc<AppState>) -> Result<()> {
                     continue;
                 }
                 if sched.next_due_at <= now {
-                    due.push(source.clone());
+                    due.push((source.priority, source.clone()));
                 }
             }
+            // 按优先级从高到低排序（priority 越大越先处理）。
+            due.sort_by_key(|b| std::cmp::Reverse(b.0));
+            // 有界队列：每 tick 最多入队 queue_capacity 个任务，超出部分下个 tick 再处理。
+            due.truncate(state.runtime.queue_capacity.max(1));
             due
         };
 
         state.queue_depth.store(due.len(), Ordering::Relaxed);
-        for source in due {
+        for (_prio, source) in due {
             let state = state.clone();
             let semaphore = semaphore.clone();
             tokio::spawn(async move {
@@ -213,7 +217,7 @@ pub async fn check_source(state: &Arc<AppState>, source_id: &str) -> Result<()> 
         debug!(source = %source.id, "304 not modified");
         let db = state.db.lock().await;
         let prev = db.get_schedule_state(&source.id)?;
-        db.upsert_schedule_state(&next_schedule(&source, 0, None, prev.as_ref()))?;
+        db.upsert_schedule_state(&next_schedule(&source, 0, None, false, prev.as_ref()))?;
         return Ok(());
     }
 
@@ -258,7 +262,13 @@ pub async fn check_source(state: &Arc<AppState>, source_id: &str) -> Result<()> 
     if !diff_result.changed {
         let db = state.db.lock().await;
         let prev = db.get_schedule_state(&source.id)?;
-        db.upsert_schedule_state(&next_schedule(&source, 0, Some(Utc::now()), prev.as_ref()))?;
+        db.upsert_schedule_state(&next_schedule(
+            &source,
+            0,
+            Some(Utc::now()),
+            false,
+            prev.as_ref(),
+        ))?;
         debug!(source = %source.id, "no change");
         return Ok(());
     }
@@ -275,7 +285,13 @@ pub async fn check_source(state: &Arc<AppState>, source_id: &str) -> Result<()> 
                 .as_deref()
                 .is_some_and(|fp| fp == diff_result.dedupe_key.as_str())
         {
-            db.upsert_schedule_state(&next_schedule(&source, 0, Some(Utc::now()), Some(&sched)))?;
+            db.upsert_schedule_state(&next_schedule(
+                &source,
+                0,
+                Some(Utc::now()),
+                true,
+                Some(&sched),
+            ))?;
             debug!(source = %source.id, "duplicate change, suppressed");
             return Ok(());
         }
@@ -320,13 +336,9 @@ pub async fn check_source(state: &Arc<AppState>, source_id: &str) -> Result<()> 
             }
         }
         let prev = db.get_schedule_state(&source.id)?;
-        let mut sched = next_schedule(&source, 0, Some(Utc::now()), prev.as_ref());
+        let mut sched = next_schedule(&source, 0, Some(Utc::now()), true, prev.as_ref());
         sched.last_notified_fingerprint = Some(event.dedupe_key.clone());
         sched.last_notified_at = Some(Utc::now());
-        sched.consecutive_changes = prev
-            .as_ref()
-            .map(|p| p.consecutive_changes.saturating_add(1))
-            .unwrap_or(1);
         db.upsert_schedule_state(&sched)?;
     }
 
@@ -341,30 +353,61 @@ pub async fn check_source(state: &Arc<AppState>, source_id: &str) -> Result<()> 
     Ok(())
 }
 
+/// 一个轻量、无额外依赖的伪随机数（用于调度抖动）。
+/// 基于纳秒时钟与固定加权哈希，保证每次调用结果不同且分布尚可。
+fn rand_jitter() -> i64 {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    // 用大质数做简单混合，避免相邻时间戳序列化（低 4 位周期性）。
+    ((nanos as i64) ^ ((nanos >> 32) as i64)) & 0x7fff_ffff
+}
+
 /// 计算下一轮调度状态。
 ///
 /// - `failures`：连续失败次数（成功时为 0，会清除失败计数与退避）。
+/// - `last_success`：本次抓取是否成功（Some(时间)）——用于记录最后成功时间。
+/// - `had_change`：本次抓取是否检测到内容变化。用于正确维护连续变化计数：
+///   有变化时保留/递增；无变化时清零。**重复变化（被抑制）也视为"有变化"**，
+///   避免连续变化计数被意外清零。
 /// - `prev`：上一轮调度状态。用于**保留** `last_notified_*`，从而让
-///   基于指纹的重复告警抑制跨轮生效；同时保留连续变化计数。
+///   基于指纹的重复告警抑制跨轮生效。
 fn next_schedule(
     source: &crate::config::SourceConfig,
     failures: u32,
     last_success: Option<DateTime<Utc>>,
+    had_change: bool,
     prev: Option<&ScheduleState>,
 ) -> ScheduleState {
     let mut interval = source.schedule.interval_secs.max(1) as i64;
     if failures > 0 {
         interval = (interval as u64 * 2u64.pow(failures.min(6))).min(3600) as i64;
     }
-    // 无变化时清零连续变化计数；有变化时由调用方递增。
-    let consecutive_changes = if failures == 0 && last_success.is_some() {
-        0
+    // 应用随机抖动（jitter_secs），避免大量监控源在同一瞬间同时唤醒抢锁。
+    let jitter = source.schedule.jitter_secs as i64;
+    let next_due_at = if jitter > 0 {
+        // 抖动均匀分布在 [-jitter/2, +jitter/2]，围绕基础间隔上下浮动。
+        let spread = jitter / 2;
+        let offset = if spread > 0 {
+            (rand_jitter() % (spread * 2 + 1)) - spread
+        } else {
+            0
+        };
+        Utc::now() + chrono::Duration::seconds((interval + offset).max(1))
     } else {
-        prev.map(|p| p.consecutive_changes).unwrap_or(0)
+        Utc::now() + chrono::Duration::seconds(interval)
+    };
+    // 连续变化计数：本次有变化时保留/递增；无变化时清零。
+    let consecutive_changes = if had_change {
+        prev.map(|p| p.consecutive_changes.saturating_add(1))
+            .unwrap_or(1)
+    } else {
+        0
     };
     ScheduleState {
         source_id: source.id.clone(),
-        next_due_at: Utc::now() + chrono::Duration::seconds(interval),
+        next_due_at,
         consecutive_failures: failures,
         consecutive_changes,
         backoff_until: None,

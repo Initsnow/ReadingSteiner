@@ -68,6 +68,17 @@ reading-steiner history <id>          # 变更历史
 
 监控源通过 **Web 控制台**或 **CLI**（`reading-steiner sources add <file>`）添加，格式见 `src/config.rs::SourceConfig`。每个源只需配置：抓什么（fetch）、提取什么（extract，整页文本或结构化条目）、多久检测一次（schedule）。变更检测完全自动。
 
+**调度与队列参数**：
+- `schedule.interval_secs` + `schedule.jitter_secs`——每次调度在基础间隔上叠加随机抖动（均匀分布在 ±jitter/2），避免大量源同一瞬间同时唤醒抢锁。
+- `priority`——到期的源按优先级从高到低依次检测（数值越大越先处理）。
+- `daemon.queue_capacity`——每个轮询 tick 最多入队的检测任务数（有界队列，超出部分下个 tick 再处理），防止突发积压。
+- `daemon.concurrency`——并发检测的最大任务数（信号量）。
+
+**提取能力**：
+- 结构化条目（`extract.type: items`）的 JSONPath 选择器支持 `$.items[*].id`、`$.items[0].name` 等链式导航（`[*]` 通配、`[n]` 索引可出现在任意层级）。
+- HTTP 抓取会根据响应头 `Content-Type` 声明的 charset 解码（支持 GBK 等常见中文编码），避免非 UTF-8 页面乱码导致误判。
+- CSS 图片选择器仅对 HTML 内容生效，对 JSON/纯文本接口不会误解析。
+
 ### 图片通知（可选）
 
 检测到内容变化并推送 Telegram 时，可让通知附带页面图片。在 source 的 `extract` 里配置 `images` 图片选择器：

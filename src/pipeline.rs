@@ -67,10 +67,26 @@ fn collect_image_urls(
             dedupe_urls(urls)
         }
         Some(ImageSelector::Css { selector }) => {
+            // CSS 图片选择器仅适用于 HTML 内容。对 JSON/纯文本等非 HTML 内容
+            // 直接跳过，避免把文本当 HTML 解析产生无意义的匹配。
+            if !is_html_doc(doc) {
+                return Vec::new();
+            }
             let urls = collect_img_urls_from_doc(doc, selector);
             dedupe_urls(urls)
         }
     }
+}
+
+/// 判断抓取到的文档是否为 HTML 内容。
+/// 优先依据响应头 Content-Type；缺失时退化为对内容开头做启发式判断。
+fn is_html_doc(doc: &FetchedDocument) -> bool {
+    if let Some(ct) = doc.content_type.as_deref() {
+        let media = ct.split(';').next().unwrap_or("").trim().to_lowercase();
+        return media == "text/html" || media.ends_with("/xhtml+xml");
+    }
+    let text = doc.text.trim_start();
+    text.starts_with('<') || text.to_lowercase().starts_with("<!doctype html")
 }
 
 /// 从整页文档中按 CSS 选择器匹配图片元素，取其 `src`/`data-src` 等属性。
@@ -245,53 +261,104 @@ fn extract_json_path(doc: &FetchedDocument, path: &str, fields: &[ItemField]) ->
 }
 
 fn eval_json_path<'a>(value: &'a Value, path: &str) -> Result<Vec<&'a Value>> {
-    // Supports simple JSONPath: $.items[*], $.items, $['key'], and JSON pointer subset.
+    // 增强版 JSONPath：支持 `$.items[*].id`、`$.items[0].name`、`$.a.b` 等链式导航，
+    // 以及 `$['key']`、JSON Pointer 子集。`[*]` / `[n]` 可出现在任意层级。
     let trimmed = path.trim();
-    if trimmed == "$" {
+    if trimmed.is_empty() {
         return Ok(vec![value]);
     }
-    if let Some(rest) = trimmed.strip_prefix("$.") {
-        let mut cur = value;
-        for part in rest.split('.') {
-            let part = part
-                .trim_end_matches("[*]")
-                .trim_start_matches('[')
-                .trim_end_matches(']');
-            if part.is_empty() {
-                continue;
-            }
-            cur = cur
-                .get(part)
-                .ok_or_else(|| Error::other(format!("json path not found: {path}")))?;
-        }
-        return Ok(flatten_array(cur));
+    let rest = trimmed
+        .strip_prefix("$.")
+        .or_else(|| trimmed.strip_prefix('$'))
+        .unwrap_or(trimmed);
+    if rest.is_empty() {
+        return Ok(vec![value]);
     }
-    if let Some(rest) = trimmed.strip_prefix("$[") {
-        let key = rest.trim_end_matches(']').trim_matches('\'');
-        if let Some(arr) = value.as_array() {
-            if key == "*" {
-                return Ok(arr.iter().collect());
+    // 把 `a.b[0].c[*].d` 拆成若干步骤：字段访问（`a`、`b`）与下标（`[0]`、`[*]`）。
+    let steps = tokenize_path_steps(rest);
+    let mut cur: Vec<&'a Value> = vec![value];
+    for step in steps {
+        match step {
+            PathStep::Field(name) => {
+                cur = cur
+                    .into_iter()
+                    .filter_map(|v| v.get(&name))
+                    .collect::<Vec<_>>();
+                if cur.is_empty() {
+                    return Err(Error::other(format!("json path not found: {path}")));
+                }
             }
-            if let Ok(i) = key.parse::<usize>() {
-                return arr
-                    .get(i)
-                    .map(|v| vec![v])
-                    .ok_or_else(|| Error::other(format!("json path index out of bounds: {path}")));
+            PathStep::Index(i) => {
+                cur = cur.into_iter().filter_map(|v| v.get(i)).collect::<Vec<_>>();
+                if cur.is_empty() {
+                    return Err(Error::other(format!(
+                        "json path index out of bounds: {path}"
+                    )));
+                }
+            }
+            PathStep::Wildcard => {
+                cur = cur
+                    .into_iter()
+                    .flat_map(|v| match v {
+                        Value::Array(arr) => arr.iter().collect::<Vec<_>>(),
+                        Value::Object(map) => map.values().collect::<Vec<_>>(),
+                        _ => vec![v],
+                    })
+                    .collect::<Vec<_>>();
             }
         }
-        return value
-            .get(key)
-            .map(|v| flatten_array(v))
-            .ok_or_else(|| Error::other(format!("json path not found: {path}")));
     }
-    Err(Error::other(format!("unsupported json path: {path}")))
+    Ok(cur)
 }
 
-fn flatten_array(v: &Value) -> Vec<&Value> {
-    match v {
-        Value::Array(arr) => arr.iter().collect(),
-        _ => vec![v],
+enum PathStep {
+    Field(String),
+    Index(usize),
+    Wildcard,
+}
+
+/// 把 `a.b[0].c[*].d` 拆成 `Field(a), Field(b), Index(0), Field(c), Wildcard, Field(d)`。
+fn tokenize_path_steps(rest: &str) -> Vec<PathStep> {
+    let mut steps = Vec::new();
+    // 用 `[`、`]`、`.` 作为分隔符，保留括号内的内容以识别下标/通配。
+    let mut cur = String::new();
+    let mut chars = rest.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '.' => {
+                if !cur.is_empty() {
+                    steps.push(PathStep::Field(std::mem::take(&mut cur)));
+                }
+            }
+            '[' => {
+                if !cur.is_empty() {
+                    steps.push(PathStep::Field(std::mem::take(&mut cur)));
+                }
+                // 收集到 `]` 为止的括号内容。
+                let mut inner = String::new();
+                for c in chars.by_ref() {
+                    if c == ']' {
+                        break;
+                    }
+                    inner.push(c);
+                }
+                let inner = inner.trim().trim_matches('\'');
+                if inner == "*" {
+                    steps.push(PathStep::Wildcard);
+                } else if let Ok(i) = inner.parse::<usize>() {
+                    steps.push(PathStep::Index(i));
+                } else if !inner.is_empty() {
+                    // `['key']` 形式的字段访问。
+                    steps.push(PathStep::Field(inner.to_string()));
+                }
+            }
+            _ => cur.push(c),
+        }
     }
+    if !cur.is_empty() {
+        steps.push(PathStep::Field(cur));
+    }
+    steps
 }
 
 fn scalar_to_string(v: &Value) -> String {
@@ -381,6 +448,7 @@ mod tests {
             normalized_fingerprint: "x".into(),
             duration_ms: 0,
             engine: "http".into(),
+            content_type: Some("text/html; charset=utf-8".into()),
             not_modified: false,
         }
     }
@@ -495,5 +563,28 @@ mod tests {
         assert!(out.items[0].fields.contains_key("text"));
         assert!(out.items[0].fields["text"].contains("First"));
         assert_ne!(out.items[0].fingerprint(&[]), out.items[1].fingerprint(&[]));
+    }
+
+    #[test]
+    fn test_json_path_chain_wildcard_field() {
+        // 增强后的 JSONPath 支持 `$.items[*].id` 链式导航。
+        let json = r#"{"items":[{"id":"a","name":"A"},{"id":"b","name":"B"}]}"#;
+        let binding = serde_json::from_str(json).unwrap();
+        let matches = eval_json_path(&binding, "$.items[*].id").unwrap();
+        let ids: Vec<String> = matches
+            .iter()
+            .filter_map(|v| v.as_str())
+            .map(String::from)
+            .collect();
+        assert_eq!(ids, vec!["a", "b"]);
+    }
+
+    #[test]
+    fn test_json_path_index_then_field() {
+        let json = r#"{"items":[{"name":"first"},{"name":"second"}]}"#;
+        let binding = serde_json::from_str(json).unwrap();
+        let matches = eval_json_path(&binding, "$.items[1].name").unwrap();
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].as_str(), Some("second"));
     }
 }
