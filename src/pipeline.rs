@@ -74,6 +74,13 @@ fn extract_css(
     let mut items = Vec::new();
     for (idx, el) in html.select(&selector).enumerate() {
         let mut item_fields = HashMap::new();
+        if fields.is_empty() {
+            // 未配置字段时捕获元素完整文本，确保内容变化可被检测
+            item_fields.insert(
+                "text".to_string(),
+                el.text().collect::<Vec<_>>().join(" ").trim().to_string(),
+            );
+        }
         for f in fields {
             let value = extract_css_field(&el, f);
             item_fields.insert(f.name.clone(), value);
@@ -361,5 +368,30 @@ mod tests {
         assert_eq!(out.items.len(), 2);
         assert_eq!(out.items[0].stable_id, "a");
         assert_eq!(out.items[0].fields["title"], "A");
+    }
+
+    #[test]
+    fn test_css_items_without_fields_captures_text() {
+        // 未配置字段时，应捕获每个条目的完整文本，确保内容变化可被检测。
+        let extract = ExtractConfig::Items {
+            selector: ItemSelector::Css {
+                selector: ".item".into(),
+            },
+            fields: vec![],
+            dedupe_key: None,
+        };
+        let html = r#"<html><body>
+            <div class="item"><h2>First</h2><p>alpha</p></div>
+            <div class="item"><h2>Second</h2><p>beta</p></div>
+        </body></html>"#;
+        let out = run_pipeline(&doc(html), &extract).unwrap();
+        assert_eq!(out.items.len(), 2);
+        // 条目正文应被捕获，且两个条目的指纹不同。
+        assert!(out.items[0].fields.contains_key("text"));
+        assert!(out.items[0].fields["text"].contains("First"));
+        assert_ne!(
+            out.items[0].fingerprint(&[]),
+            out.items[1].fingerprint(&[])
+        );
     }
 }

@@ -232,8 +232,6 @@ pub struct ItemField {
     pub selector: Option<String>,
     pub attr: Option<String>,
     pub path: Option<String>,
-    pub regex: Option<String>,
-    pub group: Option<usize>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

@@ -63,8 +63,6 @@ export interface ItemField {
   selector?: string
   attr?: string
   path?: string
-  regex?: string
-  group?: number
 }
 
 export interface TestSourceResult {
