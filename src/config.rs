@@ -14,7 +14,6 @@ pub struct Config {
     pub web: WebConfig,
     pub telegram: TelegramConfig,
     pub camofox: CamofoxConfig,
-    pub sources: Vec<SourceConfig>,
     pub pipelines: HashMap<String, PipelineConfig>,
 }
 
@@ -48,10 +47,6 @@ impl Config {
         } else {
             self.daemon.socket_path.clone()
         }
-    }
-
-    pub fn source(&self, id: &str) -> Option<&SourceConfig> {
-        self.sources.iter().find(|s| s.id == id)
     }
 
     pub fn pipeline(&self, id: &str) -> Option<&PipelineConfig> {

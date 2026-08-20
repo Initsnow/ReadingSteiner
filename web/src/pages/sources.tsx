@@ -289,7 +289,7 @@ export function SourcesPage() {
       {sources.length === 0 ? (
         <Card>
           <CardContent className="py-10 text-center text-sm text-muted-foreground">
-            暂无监控源。点击右上角「添加监控源」创建，或从 config.yaml 初始种子导入。
+            暂无监控源。点击右上角「添加监控源」创建。
           </CardContent>
         </Card>
       ) : (

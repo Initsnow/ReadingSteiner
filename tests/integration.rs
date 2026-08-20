@@ -107,7 +107,6 @@ async fn test_http_fetcher_and_pipeline() {
         web: Default::default(),
         telegram: Default::default(),
         camofox: Default::default(),
-        sources: vec![],
         pipelines: HashMap::new(),
     };
     let fetcher = reading_steiner::fetcher::create_fetcher("http", &cfg).unwrap();
