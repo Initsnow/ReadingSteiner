@@ -167,44 +167,43 @@ pub(crate) async fn handle_request(state: &Arc<AppState>, req: ControlRequest) -
             }
         }
         ControlRequest::SourcesAdd { source } => {
-            let exists = state.sources.lock().await.iter().any(|s| s.id == source.id);
-            if exists {
+            // 将存在性检查、DB 写入、内存 push 放进同一次 sources 锁内完成，
+            // 避免并发添加相同 id 时因检查与 push 分处两次锁而产生重复条目（TOCTOU）。
+            // 锁获取顺序统一为 db → sources，与调度器 run_daemon 保持一致以避免死锁。
+            let db = state.db.lock().await;
+            let mut sources = state.sources.lock().await;
+            if sources.iter().any(|s| s.id == source.id) {
                 return ControlResponse::err(format!("source {} already exists", source.id));
             }
-            let db = state.db.lock().await;
             if let Err(e) = db.upsert_source(source.as_ref()) {
                 return ControlResponse::err(e.to_string());
             }
-            drop(db);
-            state.sources.lock().await.push(source.as_ref().clone());
+            sources.push(source.as_ref().clone());
             ControlResponse::ok(json!({ "source_id": source.id, "added": true }))
         }
         ControlRequest::SourcesUpdate { source } => {
+            // 先校验存在性再写库，避免更新不存在的 id 时 upsert_source 插入新行，
+            // 导致 DB 被写入却返回 not found，DB 与内存 sources 列表不一致。
             let db = state.db.lock().await;
+            let mut sources = state.sources.lock().await;
+            if !sources.iter().any(|s| s.id == source.id) {
+                return ControlResponse::err(format!("source {} not found", source.id));
+            }
             if let Err(e) = db.upsert_source(source.as_ref()) {
                 return ControlResponse::err(e.to_string());
             }
-            drop(db);
-            {
-                let mut sources = state.sources.lock().await;
-                if let Some(s) = sources.iter_mut().find(|s| s.id == source.id) {
-                    *s = source.as_ref().clone();
-                } else {
-                    return ControlResponse::err(format!("source {} not found", source.id));
-                }
+            if let Some(s) = sources.iter_mut().find(|s| s.id == source.id) {
+                *s = source.as_ref().clone();
             }
             ControlResponse::ok(json!({ "source_id": source.id, "updated": true }))
         }
         ControlRequest::SourcesDelete { source_id } => {
             let db = state.db.lock().await;
+            let mut sources = state.sources.lock().await;
             if let Err(e) = db.delete_source(&source_id) {
                 return ControlResponse::err(e.to_string());
             }
-            drop(db);
-            {
-                let mut sources = state.sources.lock().await;
-                sources.retain(|s| s.id != source_id);
-            }
+            sources.retain(|s| s.id != source_id);
             ControlResponse::ok(json!({ "source_id": source_id, "deleted": true }))
         }
         ControlRequest::TestSource { source_id } => {
