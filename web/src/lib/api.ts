@@ -27,9 +27,12 @@ export interface SourceConfig {
     engine: string
     url: string
     method: string
+    headers?: Record<string, string>
     max_body_bytes?: number
     timeout_secs?: number
+    wait?: { selector?: string; timeout?: number }
     tab_policy?: string
+    evaluate?: string
     screenshot?: boolean
   }
   schedule: {
@@ -46,6 +49,20 @@ export interface SourceConfig {
     confirm_count?: number
     cooldown_secs?: number
   }
+}
+
+export interface TestSourceResult {
+  source_id: string
+  status?: number
+  final_url?: string
+  duration_ms?: number
+  engine?: string
+  content_sha256?: string
+  fingerprint?: string
+  text_len?: number
+  items?: Array<{ stable_id: string; fields: Record<string, string>; image_urls: string[]; text: string }>
+  pipeline?: string
+  not_modified?: boolean
 }
 
 export interface ChangeEvent {
@@ -76,6 +93,28 @@ export const api = {
   status: () => request<DaemonStatus>("/api/status"),
 
   listSources: () => request<SourceConfig[]>("/api/sources"),
+
+  addSource: (source: SourceConfig) =>
+    request<{ source_id: string; added: boolean }>("/api/sources", {
+      method: "POST",
+      body: JSON.stringify(source),
+    }),
+
+  updateSource: (id: string, source: SourceConfig) =>
+    request<{ source_id: string; updated: boolean }>(`/api/sources/${encodeURIComponent(id)}`, {
+      method: "PUT",
+      body: JSON.stringify(source),
+    }),
+
+  deleteSource: (id: string) =>
+    request<{ source_id: string; deleted: boolean }>(`/api/sources/${encodeURIComponent(id)}`, {
+      method: "DELETE",
+    }),
+
+  testSource: (id: string) =>
+    request<TestSourceResult>(`/api/sources/${encodeURIComponent(id)}/test`, {
+      method: "POST",
+    }),
 
   listEvents: (limit = 50) =>
     request<ChangeEvent[]>(`/api/events?limit=${limit}`),

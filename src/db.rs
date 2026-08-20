@@ -155,6 +155,20 @@ impl Db {
         Ok(out)
     }
 
+    pub fn delete_source(&self, id: &str) -> Result<()> {
+        let conn = &self.conn;
+        let deleted = conn.execute("DELETE FROM sources WHERE id=?1", [id])?;
+        if deleted > 0 {
+            // 级联清理该监控源的所有关联数据（watchpoint_id == source id），
+            // 避免 schedule_state / snapshots / change_events 成为孤儿数据，
+            // 防止同 id 重新添加时旧快照指纹导致首次检测被误判为“无变化”。
+            conn.execute("DELETE FROM schedule_state WHERE source_id=?1", [id])?;
+            conn.execute("DELETE FROM snapshots WHERE watchpoint_id=?1", [id])?;
+            conn.execute("DELETE FROM change_events WHERE watchpoint_id=?1", [id])?;
+        }
+        Ok(())
+    }
+
     pub fn get_source(&self, id: &str) -> Result<Option<SourceConfig>> {
         let json = self
             .conn

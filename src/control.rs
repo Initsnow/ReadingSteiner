@@ -29,6 +29,15 @@ pub enum ControlRequest {
     SourcesAdd {
         source: Box<SourceConfig>,
     },
+    SourcesUpdate {
+        source: Box<SourceConfig>,
+    },
+    SourcesDelete {
+        source_id: String,
+    },
+    TestSource {
+        source_id: String,
+    },
     TestPipeline {
         source_id: String,
     },
@@ -132,17 +141,14 @@ where
     Ok(())
 }
 
-pub(crate) async fn handle_request(
-    state: &Arc<AppState>,
-    req: ControlRequest,
-) -> ControlResponse {
+pub(crate) async fn handle_request(state: &Arc<AppState>, req: ControlRequest) -> ControlResponse {
     match req {
         ControlRequest::Status => {
             let s = state.status().await;
             ControlResponse::ok(serde_json::to_value(s).unwrap_or(json!(null)))
         }
         ControlRequest::ListSources => {
-            let sources = state.cfg.sources.clone();
+            let sources = state.sources.lock().await.clone();
             ControlResponse::ok(serde_json::to_value(sources).unwrap_or(json!([])))
         }
         ControlRequest::ListEvents { limit } => {
@@ -161,14 +167,52 @@ pub(crate) async fn handle_request(
             }
         }
         ControlRequest::SourcesAdd { source } => {
-            let mut cfg = state.cfg.clone();
-            if cfg.sources.iter().any(|s| s.id == source.id) {
+            // 将存在性检查、DB 写入、内存 push 放进同一次 sources 锁内完成，
+            // 避免并发添加相同 id 时因检查与 push 分处两次锁而产生重复条目（TOCTOU）。
+            // 锁获取顺序统一为 db → sources，与调度器 run_daemon 保持一致以避免死锁。
+            let db = state.db.lock().await;
+            let mut sources = state.sources.lock().await;
+            if sources.iter().any(|s| s.id == source.id) {
                 return ControlResponse::err(format!("source {} already exists", source.id));
             }
-            cfg.sources.push(source.as_ref().clone());
+            if let Err(e) = db.upsert_source(source.as_ref()) {
+                return ControlResponse::err(e.to_string());
+            }
+            sources.push(source.as_ref().clone());
+            ControlResponse::ok(json!({ "source_id": source.id, "added": true }))
+        }
+        ControlRequest::SourcesUpdate { source } => {
+            // 先校验存在性再写库，避免更新不存在的 id 时 upsert_source 插入新行，
+            // 导致 DB 被写入却返回 not found，DB 与内存 sources 列表不一致。
             let db = state.db.lock().await;
-            match db.upsert_source(source.as_ref()) {
-                Ok(()) => ControlResponse::ok(json!({"source_id": source.id, "added": true})),
+            let mut sources = state.sources.lock().await;
+            if !sources.iter().any(|s| s.id == source.id) {
+                return ControlResponse::err(format!("source {} not found", source.id));
+            }
+            if let Err(e) = db.upsert_source(source.as_ref()) {
+                return ControlResponse::err(e.to_string());
+            }
+            if let Some(s) = sources.iter_mut().find(|s| s.id == source.id) {
+                *s = source.as_ref().clone();
+            }
+            ControlResponse::ok(json!({ "source_id": source.id, "updated": true }))
+        }
+        ControlRequest::SourcesDelete { source_id } => {
+            let db = state.db.lock().await;
+            let mut sources = state.sources.lock().await;
+            if let Err(e) = db.delete_source(&source_id) {
+                return ControlResponse::err(e.to_string());
+            }
+            sources.retain(|s| s.id != source_id);
+            ControlResponse::ok(json!({ "source_id": source_id, "deleted": true }))
+        }
+        ControlRequest::TestSource { source_id } => {
+            let source = match scheduler::get_live_source(state, &source_id).await {
+                Ok(s) => s,
+                Err(e) => return ControlResponse::err(e.to_string()),
+            };
+            match scheduler::test_source(state, &source).await {
+                Ok(v) => ControlResponse::ok(v),
                 Err(e) => ControlResponse::err(e.to_string()),
             }
         }
@@ -224,11 +268,7 @@ where
 }
 
 async fn test_pipeline(state: &Arc<AppState>, source_id: &str) -> Result<Value> {
-    let source = state
-        .cfg
-        .source(source_id)
-        .cloned()
-        .ok_or_else(|| Error::other(format!("source not found: {source_id}")))?;
+    let source = scheduler::get_live_source(state, source_id).await?;
     let _pipeline_cfg = state
         .cfg
         .pipeline(&source.pipeline)
