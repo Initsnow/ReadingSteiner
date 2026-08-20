@@ -272,3 +272,88 @@ compare:
     assert_eq!(src.id, "s1");
     assert_eq!(src.schedule.interval_secs, 30);
 }
+
+#[test]
+fn test_resolve_pipeline_inline_wins_over_named() {
+    let named = PipelineConfig {
+        extract: vec![reading_steiner::config::ExtractConfig::AutoText],
+        normalize: vec![],
+        filter: Default::default(),
+    };
+    let mut cfg = Config {
+        state_dir: "".into(),
+        media_dir: "".into(),
+        daemon: Default::default(),
+        web: Default::default(),
+        telegram: Default::default(),
+        camofox: Default::default(),
+        pipelines: HashMap::from([("default".to_string(), named)]),
+    };
+
+    // 1) No inline pipeline -> falls back to named template.
+    let s1 = SourceConfig {
+        pipeline: "default".into(),
+        pipeline_config: None,
+        ..Default::default()
+    };
+    assert_eq!(
+        cfg.resolve_pipeline(&s1).unwrap().extract.len(),
+        1,
+        "named pipeline fallback"
+    );
+
+    // 2) Inline pipeline (content selector) wins.
+    let inline = PipelineConfig {
+        extract: vec![reading_steiner::config::ExtractConfig::CssItems {
+            selector: ".item".into(),
+            fields: HashMap::new(),
+        }],
+        normalize: vec![],
+        filter: Default::default(),
+    };
+    let s2 = SourceConfig {
+        pipeline: "default".into(),
+        pipeline_config: Some(inline.clone()),
+        ..Default::default()
+    };
+    let resolved = cfg.resolve_pipeline(&s2).unwrap();
+    assert!(matches!(
+        resolved.extract[0],
+        reading_steiner::config::ExtractConfig::CssItems { ref selector, .. } if selector == ".item"
+    ));
+
+    // 3) Named pipeline missing and no inline -> None.
+    cfg.pipelines.clear();
+    assert!(cfg.resolve_pipeline(&s1).is_none());
+}
+
+#[test]
+fn test_rerun_on_items_applies_normalize_and_filter() {
+    let items = vec![Item {
+        stable_id: "a".into(),
+        fields: HashMap::from([
+            ("title".into(), "  Hello  ".into()),
+            ("price".into(), " ¥100 ".into()),
+        ]),
+        image_urls: vec![],
+        text: String::new(),
+        meta: HashMap::new(),
+    }];
+    let pl = PipelineConfig {
+        extract: vec![],
+        normalize: vec![
+            reading_steiner::config::NormalizeConfig::Trim {
+                field: "title".into(),
+            },
+            reading_steiner::config::NormalizeConfig::Strip {
+                field: "price".into(),
+                chars: "¥ ".into(),
+            },
+        ],
+        filter: Default::default(),
+    };
+    let out = pipeline::rerun_on_items(&items, &pl).unwrap();
+    assert_eq!(out.items.len(), 1);
+    assert_eq!(out.items[0].fields["title"], "Hello");
+    assert_eq!(out.items[0].fields["price"], "100");
+}

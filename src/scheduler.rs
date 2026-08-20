@@ -185,8 +185,7 @@ pub async fn check_source(state: &Arc<AppState>, source_id: &str) -> Result<()> 
     let source = get_live_source(state, source_id).await?;
     let pipeline_cfg = state
         .cfg
-        .pipeline(&source.pipeline)
-        .cloned()
+        .resolve_pipeline(&source)
         .ok_or_else(|| {
             crate::error::Error::config(format!("pipeline not found: {}", source.pipeline))
         })?;
@@ -435,8 +434,7 @@ pub async fn get_live_source(state: &Arc<AppState>, source_id: &str) -> Result<S
 pub async fn test_source(state: &Arc<AppState>, source: &SourceConfig) -> Result<Value> {
     let pipeline_cfg = state
         .cfg
-        .pipeline(&source.pipeline)
-        .cloned()
+        .resolve_pipeline(source)
         .ok_or_else(|| {
             crate::error::Error::config(format!("pipeline not found: {}", source.pipeline))
         })?;

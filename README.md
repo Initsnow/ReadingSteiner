@@ -109,12 +109,45 @@ fetch:
   url: https://example.com/list
 schedule:
   interval_secs: 60
-pipeline: product_list # 引用 config.yaml 中的 pipelines 模板
+pipeline: product_list # 引用 config.yaml 中的 pipelines 模板（可选）
 compare:
   mode: item_set       # 比较模式
   stable_id: id        # 稳定字段
   notify_on: [new, updated, removed]
 ```
+
+### 内容选择器（内联 pipeline）
+
+除了引用 config.yaml 中命名好的 `pipelines` 模板，每个监控源还可以在 **Web 控制台添加/编辑弹窗里直接配置内联的“内容选择器”**（`pipeline_config`），把提取规则（extract）、规范化（normalize）与过滤（filter）直接写在监控源上，不再依赖外部模板：
+
+```yaml
+id: shop-list
+fetch:
+  engine: http
+  url: https://example.com/list
+schedule:
+  interval_secs: 60
+pipeline_config:          # 内联内容选择器，优先于 config.yaml 中的命名 pipeline
+  extract:
+    - type: css_items     # css_items / xpath / json_path / regex / auto_text ...
+      selector: ".product"
+      fields:
+        id:    { attr: data-id }
+        title: { selector: ".title" }
+        price: { selector: ".price" }
+  normalize:
+    - { type: trim, field: title }
+  filter:
+    include:
+      - { op: gt, field: price, value: 0 }
+compare:
+  mode: item_set
+  stable_id: id
+```
+
+- Web 控制台的“添加/编辑监控源”里勾选“使用内联选择器”，即可直接配置提取类型、选择器/路径与提取字段，无需手改 config.yaml。
+- 若未配置 `pipeline_config`，回退使用 `pipeline` 字段引用的命名模板；两者都缺则启动时报错。
+- 内联 `pipeline_config` 也会被 `test_source`（测试）与 `test-pipeline`（试跑流水线）使用。
 
 ### 比较模式（compare.mode）
 

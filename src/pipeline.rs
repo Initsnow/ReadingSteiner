@@ -33,11 +33,7 @@ pub fn run_pipeline(doc: &FetchedDocument, pipeline: &PipelineConfig) -> Result<
         });
     }
 
-    for norm in &pipeline.normalize {
-        apply_normalize(&mut items, norm, &doc.final_url)?;
-    }
-
-    items = filter_items(items, &pipeline.filter)?;
+    apply_pipeline_stages(&mut items, pipeline, &doc.final_url)?;
 
     let fingerprint = compute_fingerprint(&items, &doc.text);
     Ok(PipelineOutput {
@@ -45,6 +41,32 @@ pub fn run_pipeline(doc: &FetchedDocument, pipeline: &PipelineConfig) -> Result<
         fingerprint,
         text: doc.text.clone(),
     })
+}
+
+/// Re-run the normalize / filter stages of a pipeline on an already-extracted
+/// set of items. Used by "test-pipeline": validation runs the content selector
+/// against the latest snapshot's items without re-fetching the page.
+pub fn rerun_on_items(items: &[Item], pipeline: &PipelineConfig) -> Result<PipelineOutput> {
+    let mut items = items.to_vec();
+    apply_pipeline_stages(&mut items, pipeline, "")?;
+    let fingerprint = compute_fingerprint(&items, "");
+    Ok(PipelineOutput {
+        items,
+        fingerprint,
+        text: String::new(),
+    })
+}
+
+fn apply_pipeline_stages(
+    items: &mut Vec<Item>,
+    pipeline: &PipelineConfig,
+    final_url: &str,
+) -> Result<()> {
+    for norm in &pipeline.normalize {
+        apply_normalize(items, norm, final_url)?;
+    }
+    *items = filter_items(items.to_vec(), &pipeline.filter)?;
+    Ok(())
 }
 
 fn extract_items(doc: &FetchedDocument, extract: &ExtractConfig) -> Result<Vec<Item>> {

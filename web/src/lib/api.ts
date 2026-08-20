@@ -41,6 +41,7 @@ export interface SourceConfig {
   }
   priority: number
   pipeline: string
+  pipeline_config?: PipelineConfig | null
   compare: {
     mode: string
     stable_id?: string
@@ -50,6 +51,52 @@ export interface SourceConfig {
     cooldown_secs?: number
   }
 }
+
+export interface PipelineConfig {
+  extract: ExtractConfig[]
+  normalize: NormalizeConfig[]
+  filter?: FilterConfig
+}
+
+export type ExtractConfig =
+  | { type: "css_items"; selector: string; fields?: Record<string, FieldSelector> }
+  | { type: "xpath"; selector: string; fields?: Record<string, FieldSelector> }
+  | { type: "json_path"; path: string; fields?: Record<string, FieldSelector> }
+  | { type: "regex"; pattern: string; fields?: Record<string, FieldSelector> }
+  | { type: "auto_text" }
+  | { type: "auto_images" }
+  | { type: "camofox_images" }
+
+export interface FieldSelector {
+  selector?: string
+  attr?: string
+  path?: string
+  regex?: string
+  group?: number
+}
+
+export type NormalizeConfig =
+  | { type: "trim"; field: string }
+  | { type: "strip"; field: string; chars?: string }
+  | { type: "abs_url"; field: string; base?: string }
+  | { type: "lowercase"; field: string }
+  | { type: "replace"; field: string; pattern: string; with?: string }
+
+export interface FilterConfig {
+  include?: Condition[]
+  exclude?: Condition[]
+  drop_duplicate?: { key: string }
+  min_items?: number
+}
+
+export type Condition =
+  | { op: "eq"; field: string; value: string }
+  | { op: "ne"; field: string; value: string }
+  | { op: "gt"; field: string; value: number }
+  | { op: "lt"; field: string; value: number }
+  | { op: "regex"; field: string; pattern: string }
+  | { op: "glob"; field: string; pattern: string }
+  | { op: "contains"; field: string; value: string }
 
 export interface TestSourceResult {
   source_id: string

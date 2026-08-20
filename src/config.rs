@@ -52,6 +52,16 @@ impl Config {
     pub fn pipeline(&self, id: &str) -> Option<&PipelineConfig> {
         self.pipelines.get(id)
     }
+
+    /// Resolve the effective pipeline for a source: an inline pipeline (content
+    /// selector) configured directly on the source wins; otherwise fall back to
+    /// a named pipeline template from config.yaml.
+    pub fn resolve_pipeline(&self, source: &SourceConfig) -> Option<PipelineConfig> {
+        if let Some(p) = &source.pipeline_config {
+            return Some(p.clone());
+        }
+        self.pipeline(&source.pipeline).cloned()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -124,6 +134,11 @@ pub struct SourceConfig {
     pub schedule: ScheduleConfig,
     pub priority: i32,
     pub pipeline: String,
+    /// Inline pipeline (content selector: extract / normalize / filter) that
+    /// overrides the named `pipeline` template from config.yaml. When set, the
+    /// source is fully self-contained and editable from the Web console.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pipeline_config: Option<PipelineConfig>,
     pub compare: CompareConfig,
 }
 
@@ -138,6 +153,7 @@ impl Default for SourceConfig {
             schedule: ScheduleConfig::default(),
             priority: 0,
             pipeline: "default".to_string(),
+            pipeline_config: None,
             compare: CompareConfig::default(),
         }
     }

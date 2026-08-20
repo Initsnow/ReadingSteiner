@@ -13,6 +13,7 @@ import {
   AlertCircle,
 } from "lucide-react"
 import { api, type SourceConfig, type TestSourceResult } from "@/lib/api"
+import type { PipelineConfig, ExtractConfig, FieldSelector } from "@/lib/api"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import {
@@ -40,6 +41,13 @@ interface FormState {
   compareMode: string
   stable_id: string
   notify_on: string
+  // inline pipeline (content selector)
+  useInline: boolean
+  extractType: string
+  extractSelector: string
+  extractFields: string
+  normalizeJson: string
+  filterJson: string
 }
 
 function emptyForm(): FormState {
@@ -59,10 +67,57 @@ function emptyForm(): FormState {
     compareMode: "item_set",
     stable_id: "id",
     notify_on: "new,updated,removed",
+    useInline: true,
+    extractType: "auto_text",
+    extractSelector: "",
+    extractFields: "{}",
+    normalizeJson: "[]",
+    filterJson: "{}",
+  }
+}
+
+const EXTRACT_LABELS: Record<string, string> = {
+  auto_text: "auto_text（整页文本）",
+  auto_images: "auto_images（页面图片）",
+  camofox_images: "camofox_images（浏览器图片）",
+  css_items: "css_items（CSS 选择器）",
+  xpath: "xpath（XPath 选择器）",
+  json_path: "json_path（JSON 路径）",
+  regex: "regex（正则）",
+}
+
+function extractToForm(s: SourceConfig): { extractType: string; extractSelector: string; extractFields: string } {
+  const ex = s.pipeline_config?.extract?.[0]
+  if (!ex) {
+    return { extractType: "auto_text", extractSelector: "", extractFields: "{}" }
+  }
+  switch (ex.type) {
+    case "css_items":
+    case "xpath":
+      return {
+        extractType: ex.type,
+        extractSelector: (ex as { selector: string }).selector,
+        extractFields: JSON.stringify((ex as { fields?: Record<string, unknown> }).fields ?? {}, null, 2),
+      }
+    case "json_path":
+      return {
+        extractType: ex.type,
+        extractSelector: (ex as { path: string }).path,
+        extractFields: JSON.stringify((ex as { fields?: Record<string, unknown> }).fields ?? {}, null, 2),
+      }
+    case "regex":
+      return {
+        extractType: ex.type,
+        extractSelector: (ex as { pattern: string }).pattern,
+        extractFields: JSON.stringify((ex as { fields?: Record<string, unknown> }).fields ?? {}, null, 2),
+      }
+    default:
+      return { extractType: ex.type, extractSelector: "", extractFields: "{}" }
   }
 }
 
 function sourceToForm(s: SourceConfig): FormState {
+  const ex = extractToForm(s)
   return {
     id: s.id,
     name: s.name,
@@ -79,11 +134,62 @@ function sourceToForm(s: SourceConfig): FormState {
     compareMode: s.compare.mode,
     stable_id: s.compare.stable_id ?? "id",
     notify_on: (s.compare.notify_on ?? []).join(","),
+    useInline: !!s.pipeline_config,
+    extractType: ex.extractType,
+    extractSelector: ex.extractSelector,
+    extractFields: ex.extractFields,
+    normalizeJson: JSON.stringify(s.pipeline_config?.normalize ?? [], null, 2),
+    filterJson: JSON.stringify(s.pipeline_config?.filter ?? {}, null, 2),
+  }
+}
+
+function buildInlinePipeline(f: FormState): PipelineConfig | null {
+  let extract: ExtractConfig[]
+  switch (f.extractType) {
+    case "css_items":
+    case "xpath": {
+      const fields = safeJsonParse<Record<string, FieldSelector>>(f.extractFields) ?? {}
+      extract = [{ type: f.extractType, selector: f.extractSelector, fields }]
+      break
+    }
+    case "json_path": {
+      const fields = safeJsonParse<Record<string, FieldSelector>>(f.extractFields) ?? {}
+      extract = [{ type: "json_path", path: f.extractSelector, fields }]
+      break
+    }
+    case "regex": {
+      const fields = safeJsonParse<Record<string, FieldSelector>>(f.extractFields) ?? {}
+      extract = [{ type: "regex", pattern: f.extractSelector, fields }]
+      break
+    }
+    case "auto_images":
+      extract = [{ type: "auto_images" }]
+      break
+    case "camofox_images":
+      extract = [{ type: "camofox_images" }]
+      break
+    default:
+      extract = [{ type: "auto_text" }]
+  }
+  return {
+    extract,
+    normalize: safeJsonParse(f.normalizeJson) ?? [],
+    filter: safeJsonParse(f.filterJson) ?? {},
+  }
+}
+
+function safeJsonParse<T>(text: string): T | null {
+  try {
+    return JSON.parse(text) as T
+  } catch {
+    return null
   }
 }
 
 function formToSource(f: FormState, existing?: SourceConfig): SourceConfig {
   const base = existing ?? ({} as SourceConfig)
+  const pipelineConfig = f.useInline ? buildInlinePipeline(f) : null
+  const structured = f.useInline && f.extractType !== "auto_text" && f.extractType !== "auto_images" && f.extractType !== "camofox_images"
   return {
     ...base,
     id: f.id.trim(),
@@ -106,10 +212,18 @@ function formToSource(f: FormState, existing?: SourceConfig): SourceConfig {
       jitter_secs: f.jitter_secs || 5,
     },
     priority: f.priority || 0,
-    pipeline: f.pipeline || "default",
+    pipeline: f.useInline ? (f.pipeline || "default") : f.pipeline || "default",
+    pipeline_config: pipelineConfig,
     compare: {
       ...base.compare,
-      mode: f.compareMode,
+      // Structured content selector -> item_set 逐项比对；整页文本 -> 默认 raw_digest
+      mode: f.useInline
+        ? structured
+          ? "item_set"
+          : f.compareMode === "item_set"
+            ? "raw_digest"
+            : f.compareMode
+        : f.compareMode,
       stable_id: f.stable_id,
       notify_on: f.notify_on
         .split(",")
@@ -476,13 +590,116 @@ export function SourcesPage() {
                 />
               </Field>
 
-              <Field label="流水线 (pipeline)">
+              <Field label="流水线 (pipeline)" className="col-span-1">
                 <input
                   className={inputCls}
                   value={form.pipeline}
+                  disabled={form.useInline}
+                  placeholder="default"
                   onChange={(e) => setForm({ ...form, pipeline: e.target.value })}
                 />
               </Field>
+              <Field label="内容选择器" className="col-span-1">
+                <label className="flex h-9 items-center gap-2 text-sm">
+                  <input
+                    type="checkbox"
+                    checked={form.useInline}
+                    onChange={(e) =>
+                      setForm({ ...form, useInline: e.target.checked })
+                    }
+                  />
+                  使用内联选择器（在本页直接配置提取规则）
+                </label>
+              </Field>
+
+              {form.useInline && (
+                <div className="col-span-2 space-y-4 rounded-md border bg-muted/30 p-3">
+                  <div className="grid grid-cols-2 gap-4">
+                    <Field label="提取类型 (extract type)">
+                      <select
+                        className={inputCls}
+                        value={form.extractType}
+                        onChange={(e) =>
+                          setForm({
+                            ...form,
+                            extractType: e.target.value,
+                            extractSelector: "",
+                          })
+                        }
+                      >
+                        {Object.entries(EXTRACT_LABELS).map(([v, label]) => (
+                          <option key={v} value={v}>
+                            {label}
+                          </option>
+                        ))}
+                      </select>
+                    </Field>
+                    <Field label={
+                      form.extractType === "json_path"
+                        ? "JSON 路径 (path)"
+                        : form.extractType === "regex"
+                          ? "正则 (pattern)"
+                          : "CSS/XPath 选择器 (selector)"
+                    }>
+                      <input
+                        className={inputCls}
+                        value={form.extractSelector}
+                        placeholder={
+                          form.extractType === "json_path"
+                            ? "$.data.items[*]"
+                            : form.extractType === "regex"
+                              ? "(?P<id>\\d+)"
+                              : ".item"
+                        }
+                        onChange={(e) =>
+                          setForm({ ...form, extractSelector: e.target.value })
+                        }
+                      />
+                    </Field>
+                  </div>
+
+                  {(form.extractType === "css_items" ||
+                    form.extractType === "xpath" ||
+                    form.extractType === "json_path" ||
+                    form.extractType === "regex") && (
+                    <Field label={`提取字段 (fields，JSON，如 {"id":{"attr":"data-id"}})`}>
+                      <textarea
+                        rows={3}
+                        className={`${inputCls} font-mono text-xs`}
+                        value={form.extractFields}
+                        placeholder='{"id":{"attr":"data-id"},"title":{"selector":".title"}}'
+                        onChange={(e) =>
+                          setForm({ ...form, extractFields: e.target.value })
+                        }
+                      />
+                    </Field>
+                  )}
+
+                  <Field label={`normalize（JSON 数组，如 [{"type":"trim","field":"title"}]）`}>
+                    <textarea
+                      rows={2}
+                      className={`${inputCls} font-mono text-xs`}
+                      value={form.normalizeJson}
+                      onChange={(e) =>
+                        setForm({ ...form, normalizeJson: e.target.value })
+                      }
+                    />
+                  </Field>
+                  <Field label={`filter（JSON 对象，如 {"include":[{"op":"gt","field":"price","value":0}]}）`}>
+                    <textarea
+                      rows={2}
+                      className={`${inputCls} font-mono text-xs`}
+                      value={form.filterJson}
+                      onChange={(e) =>
+                        setForm({ ...form, filterJson: e.target.value })
+                      }
+                    />
+                  </Field>
+                  <p className="text-xs text-muted-foreground">
+                    配置结构化选择器（css_items / xpath / json_path / regex）后，变更检测会自动按提取到的条目（item_set + stable_id）比对，不再需要手选比较模式。
+                  </p>
+                </div>
+              )}
               <Field label="优先级 (priority)">
                 <input
                   type="number"
@@ -517,13 +734,19 @@ export function SourcesPage() {
                 <select
                   className={inputCls}
                   value={form.compareMode}
+                  disabled={
+                    form.useInline &&
+                    form.extractType !== "auto_text" &&
+                    form.extractType !== "auto_images" &&
+                    form.extractType !== "camofox_images"
+                  }
                   onChange={(e) =>
                     setForm({ ...form, compareMode: e.target.value })
                   }
                 >
-                  <option value="item_set">item_set</option>
-                  <option value="raw_digest">raw_digest</option>
-                  <option value="text_sim">text_sim</option>
+                  <option value="item_set">item_set（按提取条目比对）</option>
+                  <option value="raw_digest">raw_digest（整页指纹）</option>
+                  <option value="text_sim">text_sim（文本相似度）</option>
                 </select>
               </Field>
               <Field label="稳定字段 (stable_id)">
