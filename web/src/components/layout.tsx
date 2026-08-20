@@ -1,7 +1,6 @@
 import { NavLink, Outlet, useLocation } from "react-router-dom"
 import {
   Activity,
-  LayoutDashboard,
   Radio,
   ScrollText,
   Boxes,
@@ -10,7 +9,6 @@ import { cn } from "@/lib/utils"
 import { Badge } from "@/components/ui/badge"
 
 const nav = [
-  { to: "/dashboard", label: "仪表盘", icon: LayoutDashboard },
   { to: "/sources", label: "监控源", icon: Radio },
   { to: "/events", label: "变更事件", icon: ScrollText },
 ]

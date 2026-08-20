@@ -8,16 +8,6 @@ export interface ApiEnvelope<T = unknown> {
   error: string | null
 }
 
-export interface DaemonStatus {
-  running: boolean
-  version: string
-  sources: number
-  enabled_sources: number
-  queue_depth: number
-  last_tick_at: string | null
-  engine_health: Record<string, boolean>
-}
-
 export interface SourceConfig {
   id: string
   name: string
@@ -103,8 +93,6 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 }
 
 export const api = {
-  status: () => request<DaemonStatus>("/api/status"),
-
   listSources: () => request<SourceConfig[]>("/api/sources"),
 
   addSource: (source: SourceConfig) =>
