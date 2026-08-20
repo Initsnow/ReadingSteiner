@@ -34,14 +34,21 @@ export interface SourceConfig {
   extract: ExtractConfig
 }
 
+// 图片选择器：如何挑选要随变更通知附带的图片。
+export type ImageSelector =
+  | { kind: "none" }
+  | { kind: "items" }
+  | { kind: "css"; selector: string }
+
 // 内容提取方式
 export type ExtractConfig =
-  | { type: "text" }
+  | { type: "text"; images?: ImageSelector }
   | {
       type: "items"
       selector: ItemSelector
       fields?: ItemField[]
       dedupe_key?: string
+      images?: ImageSelector
     }
 
 export type ItemSelector =

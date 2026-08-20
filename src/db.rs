@@ -10,7 +10,7 @@ use crate::models::{
     ChangeEvent, MediaCacheEntry, NotificationRecord, ScheduleState, SnapshotRecord,
 };
 
-const SCHEMA_VERSION: i64 = 3;
+const SCHEMA_VERSION: i64 = 4;
 
 pub struct Db {
     conn: Connection,
@@ -41,7 +41,7 @@ impl Db {
     }
 
     fn migrate(&self) -> Result<()> {
-        let v: i64 = self
+        let mut v: i64 = self
             .conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))?;
         if v < 1 {
@@ -76,6 +76,7 @@ impl Db {
                     diff_summary TEXT NOT NULL,
                     fingerprint TEXT NOT NULL,
                     dedupe_key TEXT NOT NULL,
+                    image_urls_json TEXT NOT NULL DEFAULT '[]',
                     detected_at TEXT NOT NULL
                 );
                 CREATE INDEX IF NOT EXISTS idx_events_watchpoint ON change_events(watchpoint_id, id DESC);
@@ -112,6 +113,7 @@ impl Db {
             )?;
             self.conn
                 .pragma_update(None, "user_version", SCHEMA_VERSION)?;
+            v = SCHEMA_VERSION;
             info!(version = SCHEMA_VERSION, "database schema initialized");
         }
         if (1..3).contains(&v) {
@@ -125,7 +127,15 @@ impl Db {
             sql.push_str("ALTER TABLE schedule_state ADD COLUMN last_notified_at TEXT;");
             self.conn.execute_batch(&sql)?;
             self.conn.pragma_update(None, "user_version", 3)?;
+            v = 3;
             info!("database schema migrated to v3");
+        }
+        if v < 4 {
+            self.conn.execute_batch(
+                "ALTER TABLE change_events ADD COLUMN image_urls_json TEXT NOT NULL DEFAULT '[]';",
+            )?;
+            self.conn.pragma_update(None, "user_version", 4)?;
+            info!("database schema migrated to v4");
         }
         Ok(())
     }
@@ -229,8 +239,8 @@ impl Db {
 
     pub fn insert_change_event(&self, ev: &ChangeEvent) -> Result<i64> {
         self.conn.execute(
-            "INSERT INTO change_events(watchpoint_id, change_type, old_items_json, new_items_json, diff_summary, fingerprint, dedupe_key, detected_at)
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
+            "INSERT INTO change_events(watchpoint_id, change_type, old_items_json, new_items_json, diff_summary, fingerprint, dedupe_key, image_urls_json, detected_at)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)",
             params![
                 ev.watchpoint_id,
                 serde_json::to_string(&ev.change_type)?,
@@ -239,6 +249,7 @@ impl Db {
                 ev.diff_summary,
                 ev.fingerprint,
                 ev.dedupe_key,
+                ev.image_urls_json,
                 ev.detected_at.to_rfc3339()
             ],
         )?;
@@ -248,7 +259,7 @@ impl Db {
     pub fn get_change_event(&self, id: i64) -> Result<Option<ChangeEvent>> {
         self.conn
             .query_row(
-                "SELECT id, watchpoint_id, change_type, old_items_json, new_items_json, diff_summary, fingerprint, dedupe_key, detected_at
+                "SELECT id, watchpoint_id, change_type, old_items_json, new_items_json, diff_summary, fingerprint, dedupe_key, image_urls_json, detected_at
                  FROM change_events WHERE id=?1",
                 [id],
                 |r| {
@@ -261,7 +272,8 @@ impl Db {
                         diff_summary: r.get(5)?,
                         fingerprint: r.get(6)?,
                         dedupe_key: r.get(7)?,
-                        detected_at: parse_ts(&r.get::<_, String>(8)?),
+                        image_urls_json: r.get(8)?,
+                        detected_at: parse_ts(&r.get::<_, String>(9)?),
                     })
                 },
             )
@@ -275,10 +287,10 @@ impl Db {
         limit: usize,
     ) -> Result<Vec<ChangeEvent>> {
         let sql = if let Some(_wp) = watchpoint_id {
-            "SELECT id, watchpoint_id, change_type, old_items_json, new_items_json, diff_summary, fingerprint, dedupe_key, detected_at
+            "SELECT id, watchpoint_id, change_type, old_items_json, new_items_json, diff_summary, fingerprint, dedupe_key, image_urls_json, detected_at
              FROM change_events WHERE watchpoint_id=?1 ORDER BY id DESC LIMIT ?2"
         } else {
-            "SELECT id, watchpoint_id, change_type, old_items_json, new_items_json, diff_summary, fingerprint, dedupe_key, detected_at
+            "SELECT id, watchpoint_id, change_type, old_items_json, new_items_json, diff_summary, fingerprint, dedupe_key, image_urls_json, detected_at
              FROM change_events ORDER BY id DESC LIMIT ?1"
         };
         let mut stmt = self.conn.prepare(sql)?;
@@ -469,7 +481,8 @@ fn map_event(r: &rusqlite::Row<'_>) -> rusqlite::Result<ChangeEvent> {
         diff_summary: r.get(5)?,
         fingerprint: r.get(6)?,
         dedupe_key: r.get(7)?,
-        detected_at: parse_ts(&r.get::<_, String>(8)?),
+        image_urls_json: r.get(8)?,
+        detected_at: parse_ts(&r.get::<_, String>(9)?),
     })
 }
 

@@ -25,10 +25,8 @@ impl Item {
         let mut keys: Vec<&String> = self.fields.keys().collect();
         keys.sort();
         for k in keys {
-            if ignore_fields
-                .iter()
-                .any(|ig| ig == k || k.starts_with(ig.as_str()))
-            {
+            // 只做精确匹配，避免 `price` 误伤 `price2` 之类的前缀碰撞。
+            if ignore_fields.iter().any(|ig| ig == k) {
                 continue;
             }
             parts.push(format!(
@@ -100,6 +98,8 @@ pub struct ChangeEvent {
     pub diff_summary: String,
     pub fingerprint: String,
     pub dedupe_key: String,
+    /// 本次变更要随通知附带的图片 URL（JSON 数组，供 notifier 读取并发送）。
+    pub image_urls_json: String,
     pub detected_at: DateTime<Utc>,
 }
 

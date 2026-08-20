@@ -8,10 +8,13 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tracing::warn;
 
+use tokio::sync::Mutex;
+
 use crate::config::TelegramConfig;
 use crate::db::Db;
 use crate::error::{Error, Result};
-use crate::models::{ChangeEvent, Item, MediaCacheEntry};
+use crate::images::ImageDownloader;
+use crate::models::{ChangeEvent, ImageRef, Item, MediaCacheEntry};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct SendMessageResponse {
@@ -115,22 +118,27 @@ impl TelegramNotifier {
         image_entries: &[MediaCacheEntry],
     ) -> Result<Vec<i64>> {
         let text = render_event_message(event, new_items);
-        let mut ids = vec![self.send_message(chat_id, &text).await?];
+        let max = self.cfg.max_images_per_event.max(1);
+        let entries: Vec<_> = image_entries.iter().take(max).collect();
 
-        if !image_entries.is_empty() {
-            let max = self.cfg.max_images_per_event.max(1);
-            let entries: Vec<_> = image_entries.iter().take(max).collect();
-            if entries.len() == 1 {
-                if let Some(id) = self.send_photo(chat_id, entries[0], &text).await? {
-                    ids.push(id);
-                }
-            } else if entries.len() > 1
-                && let Some(group_ids) = self.send_media_group(chat_id, &entries).await?
-            {
+        // 有图片时，把文案作为第一张图片的说明一起发送，避免重复发一条纯文本。
+        if entries.len() == 1 {
+            let mut ids = Vec::new();
+            if let Some(id) = self.send_photo(chat_id, entries[0], &text).await? {
+                ids.push(id);
+            }
+            return Ok(ids);
+        }
+        if entries.len() > 1 {
+            let mut ids = Vec::new();
+            if let Some(group_ids) = self.send_media_group(chat_id, &entries, &text).await? {
                 ids.extend(group_ids);
             }
+            return Ok(ids);
         }
-        Ok(ids)
+
+        // 无图片：直接发纯文本。
+        Ok(vec![self.send_message(chat_id, &text).await?])
     }
 
     async fn send_photo(
@@ -191,55 +199,77 @@ impl TelegramNotifier {
         &self,
         chat_id: &str,
         entries: &[&MediaCacheEntry],
+        caption: &str,
     ) -> Result<Option<Vec<i64>>> {
+        // 只上传缺少 telegram_file_id 的本地文件；已上传过的直接用 file_id。
         let mut media = Vec::new();
+        let mut form = Form::new().text("chat_id", chat_id.to_string());
+        let mut needs_multipart = false;
         for entry in entries {
-            let item = if let Some(fid) = &entry.telegram_file_id {
-                json!({
+            // 用 `media.is_empty()` 判断是否为最终媒体组的首张图：
+            // 首图承载文案，避免被 file_id / 缺失文件跳过时文案丢失。
+            let is_first = media.is_empty();
+            if let Some(fid) = &entry.telegram_file_id {
+                if is_first {
+                    media.push(json!({
+                        "type": "photo",
+                        "media": fid,
+                        "caption": caption,
+                        "parse_mode": "HTML"
+                    }));
+                } else {
+                    media.push(json!({ "type": "photo", "media": fid }));
+                }
+                continue;
+            }
+            let path = Path::new(&entry.file_path);
+            if !path.exists() {
+                continue;
+            }
+            let bytes = tokio::fs::read(path).await?;
+            let attach = format!("photo_{}", entry.sha256);
+            let part = Part::bytes(bytes)
+                .file_name(
+                    path.file_name()
+                        .and_then(|s| s.to_str())
+                        .unwrap_or("image.bin")
+                        .to_string(),
+                )
+                .mime_str(&entry.mime)
+                .unwrap_or_else(|_| Part::bytes(Vec::new()));
+            form = form.part(attach.clone(), part);
+            if is_first {
+                media.push(json!({
                     "type": "photo",
-                    "media": fid,
-                })
+                    "media": format!("attach://{attach}"),
+                    "caption": caption,
+                    "parse_mode": "HTML"
+                }));
             } else {
-                let path = Path::new(&entry.file_path);
-                if !path.exists() {
-                    continue;
-                }
-                let bytes = tokio::fs::read(path).await?;
-                let part = Part::bytes(bytes)
-                    .file_name(
-                        path.file_name()
-                            .and_then(|s| s.to_str())
-                            .unwrap_or("image.bin")
-                            .to_string(),
-                    )
-                    .mime_str(&entry.mime)
-                    .unwrap_or_else(|_| Part::bytes(Vec::new()));
-                let form = Form::new()
-                    .text("chat_id", chat_id.to_string())
-                    .text(
-                        "media",
-                        serde_json::to_string(&media).unwrap_or_else(|_| "[]".to_string()),
-                    )
-                    .part(format!("photo_{}", entry.sha256), part);
-                // This branch is intentionally not used for multipart groups in v1;
-                // fall back to individual sends below.
-                let url = format!("{}/bot{}/sendMediaGroup", self.api_base(), self.token);
-                let resp = self.client.post(&url).multipart(form).send().await?;
-                let body: SendMediaGroupResponse = resp.json().await?;
-                if body.ok {
-                    return Ok(Some(
-                        body.result.into_iter().map(|r| r.message_id).collect(),
-                    ));
-                }
-                return Err(Error::Other(
-                    "telegram sendMediaGroup returned ok=false".into(),
-                ));
-            };
-            media.push(item);
+                media.push(json!({ "type": "photo", "media": format!("attach://{attach}") }));
+            }
+            needs_multipart = true;
         }
         if media.is_empty() {
             return Ok(None);
         }
+
+        if needs_multipart {
+            let url = format!("{}/bot{}/sendMediaGroup", self.api_base(), self.token);
+            let form = form.text("media", serde_json::to_string(&media)?);
+            let resp = self.client.post(&url).multipart(form).send().await?;
+            let body: SendMediaGroupResponse = resp.json().await?;
+            if !body.ok {
+                return Err(Error::Other(
+                    "telegram sendMediaGroup returned ok=false".into(),
+                ));
+            }
+            return Ok(Some(
+                body.result.into_iter().map(|r| r.message_id).collect(),
+            ));
+        }
+
+        // 全部是已上传的 file_id：直接用 JSON。
         let url = format!("{}/bot{}/sendMediaGroup", self.api_base(), self.token);
         let resp = self
             .client
@@ -301,23 +331,50 @@ fn html_escape(s: &str) -> String {
 }
 
 pub async fn process_outbox(
-    db: &Db,
+    db: &Mutex<Db>,
+    images: &ImageDownloader,
     notifier: &TelegramNotifier,
     chat_id_override: Option<&str>,
 ) -> Result<usize> {
-    let pending = db.pending_notifications(50)?;
+    let pending = { db.lock().await.pending_notifications(50)? };
     let mut sent = 0usize;
     for notif in pending {
-        let Some(event) = db.get_change_event(notif.event_id)? else {
-            db.update_notification_status(notif.id, "failed", "[]")?;
-            continue;
+        let (event, new_items) = {
+            let db = db.lock().await;
+            let Some(event) = db.get_change_event(notif.event_id)? else {
+                db.update_notification_status(notif.id, "failed", "[]")?;
+                continue;
+            };
+            let new_items: Vec<Item> =
+                serde_json::from_str(&event.new_items_json).unwrap_or_default();
+            (event, new_items)
         };
-        let new_items: Vec<Item> = serde_json::from_str(&event.new_items_json).unwrap_or_default();
+        // 读取事件关联的图片 URL，下载/取缓存后随通知发送。
+        let image_urls: Vec<String> =
+            serde_json::from_str(&event.image_urls_json).unwrap_or_default();
+        let mut entries = Vec::new();
+        for url in &image_urls {
+            let image_ref = ImageRef {
+                canonical_url: url.clone(),
+                alt: String::new(),
+                width: None,
+                height: None,
+            };
+            // 单个图片下载/解析失败仅跳过该图，不中断整批通知。
+            if let Ok(Some(entry)) = images.ensure(db, &image_ref).await {
+                entries.push(entry);
+            }
+        }
         let chat_id = chat_id_override.unwrap_or(&notif.chat_id);
-        match notifier.send_event(chat_id, &event, &new_items, &[]).await {
+        match notifier
+            .send_event(chat_id, &event, &new_items, &entries)
+            .await
+        {
             Ok(ids) => {
                 let ids_json = serde_json::to_string(&ids)?;
-                db.update_notification_status(notif.id, "sent", &ids_json)?;
+                db.lock()
+                    .await
+                    .update_notification_status(notif.id, "sent", &ids_json)?;
                 sent += 1;
             }
             Err(e) => {
@@ -328,9 +385,13 @@ pub async fn process_outbox(
                 } else {
                     Some(Utc::now() + chrono::Duration::seconds(30 * attempts as i64))
                 };
-                db.mark_notification_retry(notif.id, attempts, next_retry)?;
+                db.lock()
+                    .await
+                    .mark_notification_retry(notif.id, attempts, next_retry)?;
                 if attempts >= 5 {
-                    db.update_notification_status(notif.id, "failed", "[]")?;
+                    db.lock()
+                        .await
+                        .update_notification_status(notif.id, "failed", "[]")?;
                 }
             }
         }

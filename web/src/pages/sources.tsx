@@ -11,7 +11,14 @@ import {
   CheckCircle2,
   AlertCircle,
 } from "lucide-react"
-import { api, type SourceConfig, type TestSourceResult, type ExtractConfig, type ItemField } from "@/lib/api"
+import {
+  api,
+  type SourceConfig,
+  type TestSourceResult,
+  type ExtractConfig,
+  type ItemField,
+  type ImageSelector,
+} from "@/lib/api"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import {
@@ -39,6 +46,9 @@ interface FormState {
   selectorKind: "css" | "json_path"
   selector: string
   fieldsJson: string
+  // 图片选择器
+  imageKind: "none" | "items" | "css"
+  imageSelector: string
 }
 
 function emptyForm(): FormState {
@@ -57,15 +67,32 @@ function emptyForm(): FormState {
     selectorKind: "css",
     selector: "",
     fieldsJson: "[]",
+    imageKind: "none",
+    imageSelector: "",
   }
+}
+
+function imageToForm(image: ImageSelector | undefined): {
+  imageKind: "none" | "items" | "css"
+  imageSelector: string
+} {
+  if (!image || image.kind === "none") return { imageKind: "none", imageSelector: "" }
+  if (image.kind === "items") return { imageKind: "items", imageSelector: "" }
+  return { imageKind: "css", imageSelector: image.selector }
 }
 
 function extractToForm(extract: ExtractConfig | undefined): Pick<
   FormState,
-  "extractType" | "selectorKind" | "selector" | "fieldsJson"
+  "extractType" | "selectorKind" | "selector" | "fieldsJson" | "imageKind" | "imageSelector"
 > {
   if (!extract || extract.type === "text") {
-    return { extractType: "text", selectorKind: "css", selector: "", fieldsJson: "[]" }
+    return {
+      extractType: "text",
+      selectorKind: "css",
+      selector: "",
+      fieldsJson: "[]",
+      ...imageToForm(extract?.type === "text" ? extract.images : undefined),
+    }
   }
   const s = extract.selector
   return {
@@ -73,6 +100,7 @@ function extractToForm(extract: ExtractConfig | undefined): Pick<
     selectorKind: s.kind,
     selector: s.kind === "css" ? s.selector : (s as { path: string }).path,
     fieldsJson: JSON.stringify(extract.fields ?? [], null, 2),
+    ...imageToForm(extract.images),
   }
 }
 
@@ -93,9 +121,15 @@ function sourceToForm(s: SourceConfig): FormState {
   }
 }
 
+function buildImageSelector(f: FormState): ImageSelector | undefined {
+  if (f.imageKind === "none") return undefined
+  if (f.imageKind === "items") return { kind: "items" }
+  return { kind: "css", selector: f.imageSelector.trim() }
+}
+
 function buildExtract(f: FormState): ExtractConfig {
   if (f.extractType === "text") {
-    return { type: "text" }
+    return { type: "text", images: buildImageSelector(f) }
   }
   return {
     type: "items",
@@ -104,6 +138,7 @@ function buildExtract(f: FormState): ExtractConfig {
         ? { kind: "css", selector: f.selector.trim() }
         : { kind: "json_path", path: f.selector.trim() },
     fields: safeJsonParse<ItemField[]>(f.fieldsJson) ?? [],
+    images: buildImageSelector(f),
   }
 }
 
@@ -567,6 +602,47 @@ export function SourcesPage() {
                   </p>
                 </div>
               )}
+
+              {/* 图片通知：选择要随变更通知附带的图片 */}
+              <Field label="通知附带图片" className="col-span-2">
+                <div className="rounded-md border bg-muted/30 p-3">
+                  <div className="grid grid-cols-2 gap-4">
+                    <Field label="图片来源">
+                      <select
+                        className={inputCls}
+                        value={form.imageKind}
+                        onChange={(e) =>
+                          setForm({
+                            ...form,
+                            imageKind: e.target.value as "none" | "items" | "css",
+                          })
+                        }
+                      >
+                        <option value="none">不附带图片</option>
+                        {form.extractType === "items" && (
+                          <option value="items">条目的图片（结构化提取）</option>
+                        )}
+                        <option value="css">按 CSS 选择器</option>
+                      </select>
+                    </Field>
+                    {form.imageKind === "css" && (
+                      <Field label="图片 CSS 选择器">
+                        <input
+                          className={inputCls}
+                          value={form.imageSelector}
+                          placeholder=".cover img 或 img.product-thumb"
+                          onChange={(e) =>
+                            setForm({ ...form, imageSelector: e.target.value })
+                          }
+                        />
+                      </Field>
+                    )}
+                  </div>
+                  <p className="mt-2 text-xs text-muted-foreground">
+                    页面变化时，选中的图片会随 Telegram 通知一并发送（最多受 telegram.max_images_per_event 限制）。CSS 选择器可匹配 &lt;img&gt; 或其容器元素。
+                  </p>
+                </div>
+              </Field>
 
               <Field label="超时（秒）">
                 <input
