@@ -170,8 +170,9 @@ pub async fn run_daemon(state: Arc<AppState>) -> Result<()> {
 
         // Drain notification outbox periodically.
         if let Some(notifier) = state.notifier.clone() {
-            let db_guard = state.db.lock().await;
-            if let Err(e) = notifier::process_outbox(&db_guard, &notifier, None).await {
+            let db = state.db.clone();
+            let images = state.images.clone();
+            if let Err(e) = notifier::process_outbox(&db, &images, &notifier, None).await {
                 warn!(error = %e, "outbox processing failed");
             }
         }
@@ -211,7 +212,8 @@ pub async fn check_source(state: &Arc<AppState>, source_id: &str) -> Result<()> 
     if doc.not_modified {
         debug!(source = %source.id, "304 not modified");
         let db = state.db.lock().await;
-        db.upsert_schedule_state(&next_schedule(&source, 0, None))?;
+        let prev = db.get_schedule_state(&source.id)?;
+        db.upsert_schedule_state(&next_schedule(&source, 0, None, prev.as_ref()))?;
         return Ok(());
     }
 
@@ -252,14 +254,18 @@ pub async fn check_source(state: &Arc<AppState>, source_id: &str) -> Result<()> 
         .await
         .insert(source.fetch.engine.clone(), true);
 
+    // 连续无变化时清零连续变化计数。
     if !diff_result.changed {
         let db = state.db.lock().await;
-        db.upsert_schedule_state(&next_schedule(&source, 0, Some(Utc::now())))?;
+        let prev = db.get_schedule_state(&source.id)?;
+        db.upsert_schedule_state(&next_schedule(&source, 0, Some(Utc::now()), prev.as_ref()))?;
         debug!(source = %source.id, "no change");
         return Ok(());
     }
 
-    // 用指纹去重：同一轮内容变化只通知一次，避免重复告警。
+    // 用指纹去重：同一内容指纹（同一轮变化）只通知一次，避免重复告警。
+    // 通过保留 last_notified_fingerprint（跨轮不清空）实现：
+    // 即使内容在多个指纹间振荡，只要目标指纹已经通知过，就不重复轰炸。
     {
         let db = state.db.lock().await;
         let sched = db.get_schedule_state(&source.id)?;
@@ -269,7 +275,7 @@ pub async fn check_source(state: &Arc<AppState>, source_id: &str) -> Result<()> 
                 .as_deref()
                 .is_some_and(|fp| fp == diff_result.dedupe_key.as_str())
         {
-            db.upsert_schedule_state(&next_schedule(&source, 0, Some(Utc::now())))?;
+            db.upsert_schedule_state(&next_schedule(&source, 0, Some(Utc::now()), Some(&sched)))?;
             debug!(source = %source.id, "duplicate change, suppressed");
             return Ok(());
         }
@@ -284,24 +290,12 @@ pub async fn check_source(state: &Arc<AppState>, source_id: &str) -> Result<()> 
         diff_summary: diff_result.diff_summary,
         fingerprint: diff_result.fingerprint,
         dedupe_key: diff_result.dedupe_key,
+        image_urls_json: serde_json::to_string(&out.image_urls)?,
         detected_at: Utc::now(),
     };
 
-    let mut image_entries = Vec::new();
-    for img in &out.items {
-        for url in &img.image_urls {
-            let image_ref = crate::models::ImageRef {
-                canonical_url: url.clone(),
-                alt: img.fields.get("alt").cloned().unwrap_or_default(),
-                width: None,
-                height: None,
-            };
-            if let Some(entry) = state.images.ensure(&state.db, &image_ref).await? {
-                image_entries.push(entry);
-            }
-        }
-    }
-
+    // 图片下载不阻塞检测：把挑选出的图片 URL 存入事件，
+    // 由 notifier 在发送通知时按需下载/取缓存（见 process_outbox）。
     let event_id;
     {
         let db = state.db.lock().await;
@@ -325,9 +319,14 @@ pub async fn check_source(state: &Arc<AppState>, source_id: &str) -> Result<()> 
                 db.insert_notification(&notif)?;
             }
         }
-        let mut sched = next_schedule(&source, 0, Some(Utc::now()));
+        let prev = db.get_schedule_state(&source.id)?;
+        let mut sched = next_schedule(&source, 0, Some(Utc::now()), prev.as_ref());
         sched.last_notified_fingerprint = Some(event.dedupe_key.clone());
         sched.last_notified_at = Some(Utc::now());
+        sched.consecutive_changes = prev
+            .as_ref()
+            .map(|p| p.consecutive_changes.saturating_add(1))
+            .unwrap_or(1);
         db.upsert_schedule_state(&sched)?;
     }
 
@@ -342,24 +341,36 @@ pub async fn check_source(state: &Arc<AppState>, source_id: &str) -> Result<()> 
     Ok(())
 }
 
+/// 计算下一轮调度状态。
+///
+/// - `failures`：连续失败次数（成功时为 0，会清除失败计数与退避）。
+/// - `prev`：上一轮调度状态。用于**保留** `last_notified_*`，从而让
+///   基于指纹的重复告警抑制跨轮生效；同时保留连续变化计数。
 fn next_schedule(
     source: &crate::config::SourceConfig,
     failures: u32,
     last_success: Option<DateTime<Utc>>,
+    prev: Option<&ScheduleState>,
 ) -> ScheduleState {
     let mut interval = source.schedule.interval_secs.max(1) as i64;
     if failures > 0 {
         interval = (interval as u64 * 2u64.pow(failures.min(6))).min(3600) as i64;
     }
+    // 无变化时清零连续变化计数；有变化时由调用方递增。
+    let consecutive_changes = if failures == 0 && last_success.is_some() {
+        0
+    } else {
+        prev.map(|p| p.consecutive_changes).unwrap_or(0)
+    };
     ScheduleState {
         source_id: source.id.clone(),
         next_due_at: Utc::now() + chrono::Duration::seconds(interval),
         consecutive_failures: failures,
-        consecutive_changes: 0,
+        consecutive_changes,
         backoff_until: None,
         last_success_at: last_success,
-        last_notified_fingerprint: None,
-        last_notified_at: None,
+        last_notified_fingerprint: prev.and_then(|p| p.last_notified_fingerprint.clone()),
+        last_notified_at: prev.and_then(|p| p.last_notified_at),
     }
 }
 

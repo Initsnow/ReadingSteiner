@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use scraper::{Html, Selector};
 use serde_json::Value;
 
-use crate::config::{ExtractConfig, ItemField, ItemSelector};
+use crate::config::{ExtractConfig, ImageSelector, ItemField, ItemSelector};
 use crate::error::{Error, Result};
 use crate::models::{FetchedDocument, Item};
 
@@ -12,6 +12,8 @@ pub struct PipelineOutput {
     pub items: Vec<Item>,
     pub fingerprint: String,
     pub text: String,
+    /// 本次变更要随通知附带的图片 URL（按图片选择器挑选，去重后保留顺序）。
+    pub image_urls: Vec<String>,
 }
 
 /// 从抓取到的文档中提取监控内容，返回条目列表与内容指纹。
@@ -19,27 +21,86 @@ pub struct PipelineOutput {
 /// - `Text`：把整页文本作为单一条目，指纹跟随文本变化。
 /// - `Items`：按选择器提取若干条目，自动对比条目的增 / 改 / 删。
 pub fn run_pipeline(doc: &FetchedDocument, extract: &ExtractConfig) -> Result<PipelineOutput> {
-    let items = match extract {
-        ExtractConfig::Text => vec![whole_page_item(doc)],
+    let (items, image_selector) = match extract {
+        ExtractConfig::Text { images } => (vec![whole_page_item(doc)], images.as_ref()),
         ExtractConfig::Items {
             selector,
             fields,
             dedupe_key,
+            images,
         } => {
             let mut items = extract_items(doc, selector, fields)?;
             if let Some(key) = dedupe_key {
                 items = dedupe_items(items, key);
             }
-            items
+            (items, images.as_ref())
         }
     };
 
     let fingerprint = compute_fingerprint(&items, &doc.text);
+    let image_urls = collect_image_urls(doc, &items, image_selector);
     Ok(PipelineOutput {
         items,
         fingerprint,
         text: doc.text.clone(),
+        image_urls,
     })
+}
+
+/// 按图片选择器挑选本次要随通知附带的图片 URL。
+///
+/// - `None` / `None` 选择器：不收集图片。
+/// - `Items`：收集条目提取时自动带出的图片。
+/// - `Css { selector }`：用 CSS 选择器从整页匹配图片元素。
+fn collect_image_urls(
+    doc: &FetchedDocument,
+    items: &[Item],
+    selector: Option<&ImageSelector>,
+) -> Vec<String> {
+    match selector {
+        None | Some(ImageSelector::None) => Vec::new(),
+        Some(ImageSelector::Items) => {
+            let mut urls = Vec::new();
+            for item in items {
+                urls.extend(item.image_urls.iter().cloned());
+            }
+            dedupe_urls(urls)
+        }
+        Some(ImageSelector::Css { selector }) => {
+            let urls = collect_img_urls_from_doc(doc, selector);
+            dedupe_urls(urls)
+        }
+    }
+}
+
+/// 从整页文档中按 CSS 选择器匹配图片元素，取其 `src`/`data-src` 等属性。
+fn collect_img_urls_from_doc(doc: &FetchedDocument, selector_str: &str) -> Vec<String> {
+    let html = Html::parse_document(&doc.text);
+    let Ok(selector) = Selector::parse(selector_str) else {
+        return Vec::new();
+    };
+    let mut urls = Vec::new();
+    for el in html.select(&selector) {
+        // 元素本身是 <img>：取 src/data-src；否则取其内部的 <img>。
+        if el.value().name() == "img" {
+            for attr in ["src", "data-src", "data-lazy-src"] {
+                if let Some(v) = el.value().attr(attr) {
+                    urls.push(v.to_string());
+                    break;
+                }
+            }
+        } else {
+            urls.extend(collect_img_urls_from_element(&el));
+        }
+    }
+    urls
+}
+
+fn dedupe_urls(urls: Vec<String>) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    urls.into_iter()
+        .filter(|u| seen.insert(u.clone()))
+        .collect()
 }
 
 fn whole_page_item(doc: &FetchedDocument) -> Item {
@@ -326,15 +387,15 @@ mod tests {
 
     #[test]
     fn test_text_extract() {
-        let out = run_pipeline(&doc("hello world"), &ExtractConfig::Text).unwrap();
+        let out = run_pipeline(&doc("hello world"), &ExtractConfig::Text { images: None }).unwrap();
         assert_eq!(out.items.len(), 1);
         assert_eq!(out.items[0].text, "hello world");
     }
 
     #[test]
     fn test_text_fingerprint_tracks_changes() {
-        let a = run_pipeline(&doc("hello world"), &ExtractConfig::Text).unwrap();
-        let b = run_pipeline(&doc("hello world!"), &ExtractConfig::Text).unwrap();
+        let a = run_pipeline(&doc("hello world"), &ExtractConfig::Text { images: None }).unwrap();
+        let b = run_pipeline(&doc("hello world!"), &ExtractConfig::Text { images: None }).unwrap();
         assert_ne!(a.fingerprint, b.fingerprint);
     }
 
@@ -357,6 +418,7 @@ mod tests {
                 },
             ],
             dedupe_key: None,
+            images: None,
         };
         let out = run_pipeline(
             &doc(
@@ -371,6 +433,48 @@ mod tests {
     }
 
     #[test]
+    fn test_text_with_css_image_selector() {
+        // 整页文本模式下，可通过图片选择器挑选要附带的图片。
+        let html = r#"<html><body><div class="cover"><img src="/a.jpg"></div>
+            <p>content</p><img src="/b.png" data-src="/b2.png"></body></html>"#;
+        let extract = ExtractConfig::Text {
+            images: Some(ImageSelector::Css {
+                selector: ".cover img".into(),
+            }),
+        };
+        let out = run_pipeline(&doc(html), &extract).unwrap();
+        assert_eq!(out.items.len(), 1);
+        assert_eq!(out.image_urls, vec!["/a.jpg"]);
+    }
+
+    #[test]
+    fn test_text_without_image_selector_has_no_images() {
+        let out = run_pipeline(&doc("plain"), &ExtractConfig::Text { images: None }).unwrap();
+        assert!(out.image_urls.is_empty());
+    }
+
+    #[test]
+    fn test_items_image_selector_collects_item_images() {
+        // Items 模式下用 `images: items` 收集条目自动带出的图片。
+        let extract = ExtractConfig::Items {
+            selector: ItemSelector::Css {
+                selector: ".item".into(),
+            },
+            fields: vec![],
+            dedupe_key: None,
+            images: Some(ImageSelector::Items),
+        };
+        let html = r#"<html><body>
+            <div class="item"><img src="/1.jpg"></div>
+            <div class="item"><img src="/2.jpg"><img src="/1.jpg"></div>
+        </body></html>"#;
+        let out = run_pipeline(&doc(html), &extract).unwrap();
+        assert_eq!(out.items.len(), 2);
+        // 去重后保留顺序。
+        assert_eq!(out.image_urls, vec!["/1.jpg", "/2.jpg"]);
+    }
+
+    #[test]
     fn test_css_items_without_fields_captures_text() {
         // 未配置字段时，应捕获每个条目的完整文本，确保内容变化可被检测。
         let extract = ExtractConfig::Items {
@@ -379,6 +483,7 @@ mod tests {
             },
             fields: vec![],
             dedupe_key: None,
+            images: None,
         };
         let html = r#"<html><body>
             <div class="item"><h2>First</h2><p>alpha</p></div>
@@ -389,9 +494,6 @@ mod tests {
         // 条目正文应被捕获，且两个条目的指纹不同。
         assert!(out.items[0].fields.contains_key("text"));
         assert!(out.items[0].fields["text"].contains("First"));
-        assert_ne!(
-            out.items[0].fingerprint(&[]),
-            out.items[1].fingerprint(&[])
-        );
+        assert_ne!(out.items[0].fingerprint(&[]), out.items[1].fingerprint(&[]));
     }
 }

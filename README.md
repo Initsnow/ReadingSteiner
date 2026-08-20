@@ -68,6 +68,52 @@ reading-steiner history <id>          # 变更历史
 
 监控源通过 **Web 控制台**或 **CLI**（`reading-steiner sources add <file>`）添加，格式见 `src/config.rs::SourceConfig`。每个源只需配置：抓什么（fetch）、提取什么（extract，整页文本或结构化条目）、多久检测一次（schedule）。变更检测完全自动。
 
+### 图片通知（可选）
+
+检测到内容变化并推送 Telegram 时，可让通知附带页面图片。在 source 的 `extract` 里配置 `images` 图片选择器：
+
+```yaml
+# 整页文本监控 + 用 CSS 选择器挑选图片
+id: blog
+name: Blog
+fetch:
+  engine: http
+  url: https://example.com
+schedule:
+  interval_secs: 300
+extract:
+  type: text
+  images:
+    kind: css
+    selector: ".cover img"   # 匹配 <img> 或其容器元素
+```
+
+```yaml
+# 结构化条目监控 + 发送条目里提取到的图片
+id: shop
+name: Shop
+fetch:
+  engine: http
+  url: https://example.com/list
+schedule:
+  interval_secs: 60
+extract:
+  type: items
+  selector:
+    kind: css
+    selector: ".product"
+  images:
+    kind: items
+```
+
+`images` 取值：
+
+- `kind: none`（默认）——不附带图片。
+- `kind: items`——发送结构化条目提取时自动带出的图片（仅适用于 `type: items`）。
+- `kind: css` + `selector`——用 CSS 选择器从页面挑选图片元素（取其 `src`/`data-src`）。
+
+同一事件最多发送的图片数由 `telegram.max_images_per_event` 控制（默认 10）。图片在本地 `media_dir` 缓存，重复图片自动去重。
+
 ## camofox 接入
 
 1. 单独部署 camofox-browser（Docker / Node / 远程实例）。

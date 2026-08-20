@@ -153,6 +153,7 @@ async fn test_http_fetcher_and_pipeline() {
             },
         ],
         dedupe_key: None,
+        images: None,
     };
     let out = pipeline::run_pipeline(&doc, &extract).unwrap();
     assert_eq!(out.items.len(), 1);
@@ -251,6 +252,29 @@ async fn test_camofox_contract_with_mock() {
 }
 
 #[test]
+fn test_item_fingerprint_ignore_fields_exact_match() {
+    // ignore_fields 只做精确匹配，避免 `price` 误伤 `price2`。
+    let item = Item {
+        stable_id: "i1".into(),
+        fields: HashMap::from([
+            ("price".into(), "10".into()),
+            ("price2".into(), "20".into()),
+            ("title".into(), "x".into()),
+        ]),
+        image_urls: vec![],
+        text: String::new(),
+        meta: HashMap::new(),
+    };
+    let fp_ignored = item.fingerprint(&["price".into()]);
+    // 忽略 price 后，price2 仍在指纹中。
+    assert!(fp_ignored.contains("price2=20"));
+    assert!(!fp_ignored.contains("price=10"));
+    // 忽略 price2 与忽略 price 的结果不同。
+    let fp_ignored2 = item.fingerprint(&["price2".into()]);
+    assert_ne!(fp_ignored, fp_ignored2);
+}
+
+#[test]
 fn test_config_roundtrip() {
     let src: SourceConfig = serde_yaml::from_str(
         r#"
@@ -270,7 +294,7 @@ extract:
     .unwrap();
     assert_eq!(src.id, "s1");
     assert_eq!(src.schedule.interval_secs, 30);
-    assert_eq!(src.extract, ExtractConfig::Text);
+    assert_eq!(src.extract, ExtractConfig::Text { images: None });
 }
 
 #[test]

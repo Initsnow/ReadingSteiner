@@ -11,6 +11,7 @@ use crate::db::Db;
 use crate::error::{Error, Result};
 use crate::models::{ImageRef, MediaCacheEntry};
 
+#[derive(Clone)]
 pub struct ImageDownloader {
     client: Client,
     media_dir: PathBuf,

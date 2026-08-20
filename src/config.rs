@@ -196,13 +196,17 @@ impl Default for ScheduleConfig {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ExtractConfig {
     /// 整页文本监控（默认）。直接把页面（或接口返回的文本）作为比对内容，
     /// 有任何变化即视为变更。适合文章、纯文本页面、整页指纹监控。
-    #[default]
-    Text,
+    Text {
+        /// 可选图片选择器：从页面中挑选要随通知附带的图片。
+        /// 缺省时不附带图片。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        images: Option<ImageSelector>,
+    },
     /// 结构化条目监控。从页面 / JSON 中按规则提取出若干「条目」，
     /// 自动对比条目的新增 / 更新 / 移除，无需配置稳定字段。
     Items {
@@ -212,7 +216,34 @@ pub enum ExtractConfig {
         /// 条目排序前的去重键模板（可选）。可用 {{字段}} 占位符。
         #[serde(default, skip_serializing_if = "Option::is_none")]
         dedupe_key: Option<String>,
+        /// 可选图片选择器：控制如何挑选随通知附带的图片。
+        /// 缺省时沿用条目提取时自动收集的图片（等价于 items）。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        images: Option<ImageSelector>,
     },
+}
+
+/// 图片通知链路：如何从页面 / 条目中挑选要随变更通知附带的图片。
+///
+/// - `items`：收集结构化条目提取时自动带出的 `image_urls`。
+/// - `css { selector }`：用 CSS 选择器从整页匹配 `<img>`，取其 `src`/`data-src`。
+/// - `none`（默认）：不附带图片。
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ImageSelector {
+    /// 不附带图片（默认）。
+    #[default]
+    None,
+    /// 收集结构化条目提取时自动带出的图片。
+    Items,
+    /// 用 CSS 选择器从页面匹配图片元素，取其 `src`/`data-src` 等属性。
+    Css { selector: String },
+}
+
+impl Default for ExtractConfig {
+    fn default() -> Self {
+        ExtractConfig::Text { images: None }
+    }
 }
 
 /// 结构化条目提取的选择器。按内容类型自动区分：
