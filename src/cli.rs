@@ -50,12 +50,6 @@ pub enum Command {
         #[arg(long, default_value = "config.yaml")]
         config: PathBuf,
     },
-    /// Test pipeline with the latest snapshot
-    TestPipeline {
-        id: String,
-        #[arg(long, default_value = "config.yaml")]
-        config: PathBuf,
-    },
     /// Show a change event diff
     Diff {
         event_id: i64,
@@ -163,7 +157,8 @@ pub async fn run(cli: Cli) -> Result<()> {
             }
             SourcesAction::List { config } => {
                 let cfg = Config::load(&config)?;
-                let resp = control::send_request(cfg.socket_path(), &ControlRequest::ListSources).await?;
+                let resp =
+                    control::send_request(cfg.socket_path(), &ControlRequest::ListSources).await?;
                 if !resp.ok {
                     return Err(Error::other(resp.error.unwrap_or_default()));
                 }
@@ -185,16 +180,6 @@ pub async fn run(cli: Cli) -> Result<()> {
             let resp =
                 control::send_request(cfg.socket_path(), &ControlRequest::Check { source_id: id })
                     .await?;
-            print_response(&resp, false);
-            Ok(())
-        }
-        Command::TestPipeline { id, config } => {
-            let cfg = Config::load(&config)?;
-            let resp = control::send_request(
-                cfg.socket_path(),
-                &ControlRequest::TestPipeline { source_id: id },
-            )
-            .await?;
             print_response(&resp, false);
             Ok(())
         }

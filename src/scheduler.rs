@@ -183,12 +183,7 @@ pub async fn run_daemon(state: Arc<AppState>) -> Result<()> {
 
 pub async fn check_source(state: &Arc<AppState>, source_id: &str) -> Result<()> {
     let source = get_live_source(state, source_id).await?;
-    let pipeline_cfg = state
-        .cfg
-        .resolve_pipeline(&source)
-        .ok_or_else(|| {
-            crate::error::Error::config(format!("pipeline not found: {}", source.pipeline))
-        })?;
+    let extract_cfg = source.extract.clone();
 
     let (prev_etag, prev_lm, prev_fp, prev_items_json) = {
         let db = state.db.lock().await;
@@ -220,7 +215,7 @@ pub async fn check_source(state: &Arc<AppState>, source_id: &str) -> Result<()> 
         return Ok(());
     }
 
-    let out = pipeline::run_pipeline(&doc, &pipeline_cfg)?;
+    let out = pipeline::run_pipeline(&doc, &extract_cfg)?;
 
     let old_items: Vec<Item> = prev_items_json
         .as_deref()
@@ -232,7 +227,6 @@ pub async fn check_source(state: &Arc<AppState>, source_id: &str) -> Result<()> 
         &out.fingerprint,
         &old_items,
         &out.items,
-        &source.compare,
     );
 
     let snapshot = SnapshotRecord {
@@ -264,69 +258,20 @@ pub async fn check_source(state: &Arc<AppState>, source_id: &str) -> Result<()> 
         debug!(source = %source.id, "no change");
         return Ok(());
     }
-    if !source
-        .compare
-        .notify_on
-        .contains(&diff_result.change_type.unwrap_or(ChangeType::Updated))
+
+    // 用指纹去重：同一轮内容变化只通知一次，避免重复告警。
     {
         let db = state.db.lock().await;
-        db.upsert_schedule_state(&next_schedule(&source, 0, Some(Utc::now())))?;
-        info!(source = %source.id, change_type = ?diff_result.change_type, "change suppressed by notify_on");
-        return Ok(());
-    }
-
-    // Consecutive-confirm noise gate: only notify after N consecutive changes.
-    let confirm_count = source.compare.confirm_count.max(1);
-    if confirm_count > 1 {
-        let db = state.db.lock().await;
-        let mut sched = db.get_schedule_state(&source.id)?.unwrap_or(ScheduleState {
-            source_id: source.id.clone(),
-            next_due_at: Utc::now(),
-            consecutive_failures: 0,
-            consecutive_changes: 0,
-            backoff_until: None,
-            last_success_at: Some(Utc::now()),
-            last_notified_fingerprint: None,
-            last_notified_at: None,
-        });
-        sched.consecutive_changes += 1;
-        if sched.consecutive_changes < confirm_count as u32 {
-            sched.next_due_at =
-                Utc::now() + chrono::Duration::seconds(source.schedule.interval_secs.max(1) as i64);
-            sched.consecutive_failures = 0;
-            db.upsert_schedule_state(&sched)?;
-            info!(
-                source = %source.id,
-                consecutive = sched.consecutive_changes,
-                confirm_count,
-                "change observed but below confirmation threshold"
-            );
-            return Ok(());
-        }
-    }
-
-    // Fingerprint cooldown: suppress the same dedupe key repeatedly within the cooldown window.
-    if source.compare.cooldown_secs > 0 {
-        let db = state.db.lock().await;
         let sched = db.get_schedule_state(&source.id)?;
-        if let Some(sched) = sched {
-            let within_cooldown = sched
-                .last_notified_at
-                .map(|t| {
-                    Utc::now().signed_duration_since(t).num_seconds()
-                        < source.compare.cooldown_secs as i64
-                })
-                .unwrap_or(false);
-            if within_cooldown
-                && sched
-                    .last_notified_fingerprint
-                    .as_deref()
-                    .is_some_and(|fp| fp == diff_result.dedupe_key.as_str())
-            {
-                db.upsert_schedule_state(&next_schedule(&source, 0, Some(Utc::now())))?;
-                info!(source = %source.id, "change suppressed by fingerprint cooldown");
-                return Ok(());
-            }
+        if let Some(sched) = sched
+            && sched
+                .last_notified_fingerprint
+                .as_deref()
+                .is_some_and(|fp| fp == diff_result.dedupe_key.as_str())
+        {
+            db.upsert_schedule_state(&next_schedule(&source, 0, Some(Utc::now())))?;
+            debug!(source = %source.id, "duplicate change, suppressed");
+            return Ok(());
         }
     }
 
@@ -432,12 +377,7 @@ pub async fn get_live_source(state: &Arc<AppState>, source_id: &str) -> Result<S
 /// returning the extracted items / fingerprint without persisting any snapshot
 /// or change event. Used by the Web console "测试监控源" action.
 pub async fn test_source(state: &Arc<AppState>, source: &SourceConfig) -> Result<Value> {
-    let pipeline_cfg = state
-        .cfg
-        .resolve_pipeline(source)
-        .ok_or_else(|| {
-            crate::error::Error::config(format!("pipeline not found: {}", source.pipeline))
-        })?;
+    let extract_cfg = source.extract.clone();
     let fetcher = fetcher::create_fetcher(&source.fetch.engine, &state.cfg)?;
     let spec = FetchSpec {
         fetch: source.fetch.clone(),
@@ -449,7 +389,7 @@ pub async fn test_source(state: &Arc<AppState>, source: &SourceConfig) -> Result
     if doc.not_modified {
         return Ok(json!({ "not_modified": true }));
     }
-    let out = pipeline::run_pipeline(&doc, &pipeline_cfg)?;
+    let out = pipeline::run_pipeline(&doc, &extract_cfg)?;
     Ok(json!({
         "source_id": source.id,
         "status": doc.status,
@@ -460,6 +400,5 @@ pub async fn test_source(state: &Arc<AppState>, source: &SourceConfig) -> Result
         "fingerprint": out.fingerprint,
         "text_len": doc.text.len(),
         "items": out.items,
-        "pipeline": source.pipeline,
     }))
 }

@@ -14,7 +14,6 @@ pub struct Config {
     pub web: WebConfig,
     pub telegram: TelegramConfig,
     pub camofox: CamofoxConfig,
-    pub pipelines: HashMap<String, PipelineConfig>,
 }
 
 impl Config {
@@ -47,20 +46,6 @@ impl Config {
         } else {
             self.daemon.socket_path.clone()
         }
-    }
-
-    pub fn pipeline(&self, id: &str) -> Option<&PipelineConfig> {
-        self.pipelines.get(id)
-    }
-
-    /// Resolve the effective pipeline for a source: an inline pipeline (content
-    /// selector) configured directly on the source wins; otherwise fall back to
-    /// a named pipeline template from config.yaml.
-    pub fn resolve_pipeline(&self, source: &SourceConfig) -> Option<PipelineConfig> {
-        if let Some(p) = &source.pipeline_config {
-            return Some(p.clone());
-        }
-        self.pipeline(&source.pipeline).cloned()
     }
 }
 
@@ -122,6 +107,9 @@ pub struct CamofoxConfig {
     pub pool_size: usize,
 }
 
+/// 一个监控源。核心只有三件事：抓什么（fetch）、提取什么（extract）、
+/// 何时检测（schedule）。不再有「流水线 / 比较模式 / 稳定字段」这些复杂概念，
+/// 变更检测完全由提取结果驱动。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct SourceConfig {
@@ -133,13 +121,9 @@ pub struct SourceConfig {
     pub fetch: FetchConfig,
     pub schedule: ScheduleConfig,
     pub priority: i32,
-    pub pipeline: String,
-    /// Inline pipeline (content selector: extract / normalize / filter) that
-    /// overrides the named `pipeline` template from config.yaml. When set, the
-    /// source is fully self-contained and editable from the Web console.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub pipeline_config: Option<PipelineConfig>,
-    pub compare: CompareConfig,
+    /// 内容提取方式。决定「把抓到的内容变成什么拿来比对」。
+    #[serde(default)]
+    pub extract: ExtractConfig,
 }
 
 impl Default for SourceConfig {
@@ -152,9 +136,7 @@ impl Default for SourceConfig {
             fetch: FetchConfig::default(),
             schedule: ScheduleConfig::default(),
             priority: 0,
-            pipeline: "default".to_string(),
-            pipeline_config: None,
-            compare: CompareConfig::default(),
+            extract: ExtractConfig::default(),
         }
     }
 }
@@ -214,45 +196,44 @@ impl Default for ScheduleConfig {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
-pub struct CompareConfig {
-    pub mode: CompareMode,
-    pub stable_id: String,
-    #[serde(default)]
-    pub ignore_fields: Vec<String>,
-    #[serde(default)]
-    pub notify_on: Vec<ChangeType>,
-    #[serde(default = "default_confirm_count")]
-    pub confirm_count: usize,
-    #[serde(default)]
-    pub cooldown_secs: u64,
-}
-
-fn default_confirm_count() -> usize {
-    1
-}
-
-impl Default for CompareConfig {
-    fn default() -> Self {
-        Self {
-            mode: CompareMode::ItemSet,
-            stable_id: "id".to_string(),
-            ignore_fields: Vec::new(),
-            notify_on: vec![ChangeType::New, ChangeType::Updated, ChangeType::Removed],
-            confirm_count: 1,
-            cooldown_secs: 0,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(rename_all = "snake_case")]
-pub enum CompareMode {
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ExtractConfig {
+    /// 整页文本监控（默认）。直接把页面（或接口返回的文本）作为比对内容，
+    /// 有任何变化即视为变更。适合文章、纯文本页面、整页指纹监控。
     #[default]
-    ItemSet,
-    RawDigest,
-    TextSim,
+    Text,
+    /// 结构化条目监控。从页面 / JSON 中按规则提取出若干「条目」，
+    /// 自动对比条目的新增 / 更新 / 移除，无需配置稳定字段。
+    Items {
+        selector: ItemSelector,
+        #[serde(default)]
+        fields: Vec<ItemField>,
+        /// 条目排序前的去重键模板（可选）。可用 {{字段}} 占位符。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        dedupe_key: Option<String>,
+    },
+}
+
+/// 结构化条目提取的选择器。按内容类型自动区分：
+/// HTML 用 CSS/XPath，JSON 用 JSONPath。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ItemSelector {
+    Css { selector: String },
+    JsonPath { path: String },
+}
+
+/// 条目中的单个字段提取规则。
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+#[serde(default)]
+pub struct ItemField {
+    pub name: String,
+    pub selector: Option<String>,
+    pub attr: Option<String>,
+    pub path: Option<String>,
+    pub regex: Option<String>,
+    pub group: Option<usize>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -261,107 +242,6 @@ pub enum ChangeType {
     New,
     Updated,
     Removed,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-#[serde(default)]
-pub struct PipelineConfig {
-    #[serde(default)]
-    pub extract: Vec<ExtractConfig>,
-    #[serde(default)]
-    pub normalize: Vec<NormalizeConfig>,
-    #[serde(default)]
-    pub filter: FilterConfig,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum ExtractConfig {
-    CssItems {
-        selector: String,
-        #[serde(default)]
-        fields: HashMap<String, FieldSelector>,
-    },
-    Xpath {
-        selector: String,
-        #[serde(default)]
-        fields: HashMap<String, FieldSelector>,
-    },
-    JsonPath {
-        path: String,
-        #[serde(default)]
-        fields: HashMap<String, FieldSelector>,
-    },
-    Regex {
-        pattern: String,
-        #[serde(default)]
-        fields: HashMap<String, FieldSelector>,
-    },
-    AutoText,
-    AutoImages,
-    CamofoxImages,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-#[serde(default)]
-pub struct FieldSelector {
-    pub selector: Option<String>,
-    pub attr: Option<String>,
-    pub path: Option<String>,
-    pub regex: Option<String>,
-    pub group: Option<usize>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum NormalizeConfig {
-    Strip {
-        field: String,
-        chars: String,
-    },
-    Trim {
-        field: String,
-    },
-    AbsUrl {
-        field: String,
-        base: String,
-    },
-    Lowercase {
-        field: String,
-    },
-    Replace {
-        field: String,
-        pattern: String,
-        with: String,
-    },
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-#[serde(default)]
-pub struct FilterConfig {
-    #[serde(default)]
-    pub include: Vec<Condition>,
-    #[serde(default)]
-    pub exclude: Vec<Condition>,
-    pub drop_duplicate: Option<DropDuplicate>,
-    pub min_items: Option<usize>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "op", rename_all = "snake_case")]
-pub enum Condition {
-    Eq { field: String, value: String },
-    Ne { field: String, value: String },
-    Gt { field: String, value: f64 },
-    Lt { field: String, value: f64 },
-    Regex { field: String, pattern: String },
-    Glob { field: String, pattern: String },
-    Contains { field: String, value: String },
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DropDuplicate {
-    pub key: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]

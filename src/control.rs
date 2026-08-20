@@ -8,7 +8,6 @@ use tracing::{error, info};
 
 use crate::config::SourceConfig;
 use crate::error::{Error, Result};
-use crate::pipeline;
 use crate::scheduler::{self, AppState};
 
 #[cfg(not(unix))]
@@ -37,9 +36,6 @@ pub enum ControlRequest {
         source_id: String,
     },
     TestSource {
-        source_id: String,
-    },
-    TestPipeline {
         source_id: String,
     },
     Diff {
@@ -217,12 +213,6 @@ pub(crate) async fn handle_request(state: &Arc<AppState>, req: ControlRequest) -
                 Err(e) => ControlResponse::err(e.to_string()),
             }
         }
-        ControlRequest::TestPipeline { source_id } => {
-            match test_pipeline(state, &source_id).await {
-                Ok(v) => ControlResponse::ok(v),
-                Err(e) => ControlResponse::err(e.to_string()),
-            }
-        }
         ControlRequest::Diff { event_id } => {
             let db = state.db.lock().await;
             match db.get_change_event(event_id) {
@@ -266,31 +256,6 @@ where
     writer.write_all(line.as_bytes()).await?;
     writer.write_all(b"\n").await?;
     Ok(())
-}
-
-async fn test_pipeline(state: &Arc<AppState>, source_id: &str) -> Result<Value> {
-    let source = scheduler::get_live_source(state, source_id).await?;
-    let pipeline_cfg = state
-        .cfg
-        .resolve_pipeline(&source)
-        .ok_or_else(|| Error::config(format!("pipeline not found: {}", source.pipeline)))?;
-    let db = state.db.lock().await;
-    let snap = db
-        .latest_snapshot(source_id)?
-        .ok_or_else(|| Error::other(format!("no snapshot for source {source_id}")))?;
-    // Re-run the source's pipeline (content selector) on the latest snapshot's
-    // items so users can validate extract / normalize / filter rules against
-    // real data without re-fetching the page or creating a change event.
-    let items: Vec<crate::models::Item> = serde_json::from_str(&snap.items_json)?;
-    let out = pipeline::rerun_on_items(&items, &pipeline_cfg)?;
-    Ok(json!({
-        "source_id": source_id,
-        "items": out.items,
-        "fingerprint": out.fingerprint,
-        "pipeline": source.pipeline,
-        "inline_pipeline": source.pipeline_config.is_some(),
-        "note": "test-pipeline re-runs extract/normalize/filter on the latest snapshot; use check to refresh raw content"
-    }))
 }
 
 #[cfg(unix)]

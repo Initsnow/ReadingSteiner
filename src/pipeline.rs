@@ -1,12 +1,9 @@
 use std::collections::HashMap;
 
-use regex::Regex;
 use scraper::{Html, Selector};
 use serde_json::Value;
 
-use crate::config::{
-    Condition, ExtractConfig, FieldSelector, FilterConfig, NormalizeConfig, PipelineConfig,
-};
+use crate::config::{ExtractConfig, ItemField, ItemSelector};
 use crate::error::{Error, Result};
 use crate::models::{FetchedDocument, Item};
 
@@ -17,23 +14,25 @@ pub struct PipelineOutput {
     pub text: String,
 }
 
-pub fn run_pipeline(doc: &FetchedDocument, pipeline: &PipelineConfig) -> Result<PipelineOutput> {
-    let mut items = Vec::new();
-    for extract in &pipeline.extract {
-        let mut extracted = extract_items(doc, extract)?;
-        items.append(&mut extracted);
-    }
-    if pipeline.extract.is_empty() {
-        items.push(Item {
-            stable_id: "page".to_string(),
-            fields: HashMap::new(),
-            image_urls: doc.images.iter().map(|i| i.canonical_url.clone()).collect(),
-            text: doc.text.clone(),
-            meta: HashMap::new(),
-        });
-    }
-
-    apply_pipeline_stages(&mut items, pipeline, &doc.final_url)?;
+/// 从抓取到的文档中提取监控内容，返回条目列表与内容指纹。
+///
+/// - `Text`：把整页文本作为单一条目，指纹跟随文本变化。
+/// - `Items`：按选择器提取若干条目，自动对比条目的增 / 改 / 删。
+pub fn run_pipeline(doc: &FetchedDocument, extract: &ExtractConfig) -> Result<PipelineOutput> {
+    let items = match extract {
+        ExtractConfig::Text => vec![whole_page_item(doc)],
+        ExtractConfig::Items {
+            selector,
+            fields,
+            dedupe_key,
+        } => {
+            let mut items = extract_items(doc, selector, fields)?;
+            if let Some(key) = dedupe_key {
+                items = dedupe_items(items, key);
+            }
+            items
+        }
+    };
 
     let fingerprint = compute_fingerprint(&items, &doc.text);
     Ok(PipelineOutput {
@@ -43,68 +42,31 @@ pub fn run_pipeline(doc: &FetchedDocument, pipeline: &PipelineConfig) -> Result<
     })
 }
 
-/// Re-run the normalize / filter stages of a pipeline on an already-extracted
-/// set of items. Used by "test-pipeline": validation runs the content selector
-/// against the latest snapshot's items without re-fetching the page.
-pub fn rerun_on_items(items: &[Item], pipeline: &PipelineConfig) -> Result<PipelineOutput> {
-    let mut items = items.to_vec();
-    apply_pipeline_stages(&mut items, pipeline, "")?;
-    let fingerprint = compute_fingerprint(&items, "");
-    Ok(PipelineOutput {
-        items,
-        fingerprint,
-        text: String::new(),
-    })
-}
-
-fn apply_pipeline_stages(
-    items: &mut Vec<Item>,
-    pipeline: &PipelineConfig,
-    final_url: &str,
-) -> Result<()> {
-    for norm in &pipeline.normalize {
-        apply_normalize(items, norm, final_url)?;
+fn whole_page_item(doc: &FetchedDocument) -> Item {
+    Item {
+        stable_id: "page".to_string(),
+        fields: HashMap::new(),
+        image_urls: Vec::new(),
+        text: doc.text.clone(),
+        meta: HashMap::new(),
     }
-    *items = filter_items(std::mem::take(items), &pipeline.filter)?;
-    Ok(())
 }
 
-fn extract_items(doc: &FetchedDocument, extract: &ExtractConfig) -> Result<Vec<Item>> {
-    match extract {
-        ExtractConfig::CssItems { selector, fields } => extract_css(doc, selector, fields),
-        ExtractConfig::Xpath { selector, fields } => extract_xpath(doc, selector, fields),
-        ExtractConfig::JsonPath { path, fields } => extract_json_path(doc, path, fields),
-        ExtractConfig::Regex { pattern, fields } => extract_regex(doc, pattern, fields),
-        ExtractConfig::AutoText => Ok(vec![Item {
-            stable_id: "page".to_string(),
-            fields: HashMap::new(),
-            image_urls: doc.images.iter().map(|i| i.canonical_url.clone()).collect(),
-            text: doc.text.clone(),
-            meta: HashMap::new(),
-        }]),
-        ExtractConfig::AutoImages => Ok(extract_images_from_html(doc)),
-        ExtractConfig::CamofoxImages => Ok(doc
-            .images
-            .iter()
-            .enumerate()
-            .map(|(i, img)| Item {
-                stable_id: format!("image-{i}"),
-                fields: HashMap::from([
-                    ("src".to_string(), img.canonical_url.clone()),
-                    ("alt".to_string(), img.alt.clone()),
-                ]),
-                image_urls: vec![img.canonical_url.clone()],
-                text: img.alt.clone(),
-                meta: HashMap::new(),
-            })
-            .collect()),
+fn extract_items(
+    doc: &FetchedDocument,
+    selector: &ItemSelector,
+    fields: &[ItemField],
+) -> Result<Vec<Item>> {
+    match selector {
+        ItemSelector::Css { selector } => extract_css(doc, selector, fields),
+        ItemSelector::JsonPath { path } => extract_json_path(doc, path, fields),
     }
 }
 
 fn extract_css(
     doc: &FetchedDocument,
     selector_str: &str,
-    fields: &HashMap<String, FieldSelector>,
+    fields: &[ItemField],
 ) -> Result<Vec<Item>> {
     let html = Html::parse_document(&doc.text);
     let selector = Selector::parse(selector_str)
@@ -112,9 +74,9 @@ fn extract_css(
     let mut items = Vec::new();
     for (idx, el) in html.select(&selector).enumerate() {
         let mut item_fields = HashMap::new();
-        for (name, fs) in fields {
-            let value = extract_field_from_element(&el, fs);
-            item_fields.insert(name.clone(), value);
+        for f in fields {
+            let value = extract_css_field(&el, f);
+            item_fields.insert(f.name.clone(), value);
         }
         let stable_id = item_fields
             .get("id")
@@ -137,13 +99,13 @@ fn extract_css(
     Ok(items)
 }
 
-fn extract_field_from_element(el: &scraper::ElementRef<'_>, fs: &FieldSelector) -> String {
-    if let Some(attr) = &fs.attr
+fn extract_css_field(el: &scraper::ElementRef<'_>, f: &ItemField) -> String {
+    if let Some(attr) = &f.attr
         && let Some(v) = el.value().attr(attr)
     {
         return v.to_string();
     }
-    if let Some(sel) = &fs.selector
+    if let Some(sel) = &f.selector
         && let Ok(selector) = Selector::parse(sel)
         && let Some(inner) = el.select(&selector).next()
     {
@@ -171,62 +133,7 @@ fn collect_img_urls_from_element(el: &scraper::ElementRef<'_>) -> Vec<String> {
     urls
 }
 
-fn extract_xpath(
-    doc: &FetchedDocument,
-    selector_str: &str,
-    fields: &HashMap<String, FieldSelector>,
-) -> Result<Vec<Item>> {
-    let package = sxd_document::parser::parse(&doc.text)
-        .map_err(|e| Error::config(format!("invalid HTML for xpath: {e}")))?;
-    let document = package.as_document();
-    let context = sxd_xpath::Context::new();
-    let factory = sxd_xpath::Factory::new();
-    let xpath = factory
-        .build(selector_str)
-        .map_err(|e| Error::config(format!("invalid xpath '{selector_str}': {e}")))?
-        .ok_or_else(|| Error::config(format!("xpath '{selector_str}' compiled to nothing")))?;
-    let value = xpath
-        .evaluate(&context, document.root())
-        .map_err(|e| Error::config(format!("xpath evaluate error: {e}")))?;
-    let mut items = Vec::new();
-    if let sxd_xpath::Value::Nodeset(nodes) = value {
-        for (idx, node) in nodes.document_order().into_iter().enumerate() {
-            let mut item_fields = HashMap::new();
-            for (name, fs) in fields {
-                let val = xpath_field(&node, fs);
-                item_fields.insert(name.clone(), val);
-            }
-            let stable_id = item_fields
-                .get("id")
-                .cloned()
-                .unwrap_or_else(|| format!("xpath-{idx}"));
-            items.push(Item {
-                stable_id,
-                fields: item_fields,
-                image_urls: Vec::new(),
-                text: String::new(),
-                meta: HashMap::new(),
-            });
-        }
-    }
-    Ok(items)
-}
-
-fn xpath_field(node: &sxd_xpath::nodeset::Node, fs: &FieldSelector) -> String {
-    if let Some(attr) = &fs.attr
-        && let sxd_xpath::nodeset::Node::Element(el) = node
-        && let Some(v) = el.attribute_value(attr.as_str())
-    {
-        return v.to_string();
-    }
-    node.string_value().trim().to_string()
-}
-
-fn extract_json_path(
-    doc: &FetchedDocument,
-    path: &str,
-    fields: &HashMap<String, FieldSelector>,
-) -> Result<Vec<Item>> {
+fn extract_json_path(doc: &FetchedDocument, path: &str, fields: &[ItemField]) -> Result<Vec<Item>> {
     let value: Value = serde_json::from_str(&doc.text)?;
     let matches = eval_json_path(&value, path)?;
     let mut items = Vec::new();
@@ -239,19 +146,19 @@ fn extract_json_path(
                 }
             }
         } else {
-            for (name, fs) in fields {
-                let val = if let Some(p) = &fs.path {
+            for f in fields {
+                let val = if let Some(p) = &f.path {
                     eval_json_path(v, p)
                         .ok()
                         .and_then(|v| v.first().cloned())
                         .map(scalar_to_string)
                         .unwrap_or_default()
                 } else if let Some(obj) = v.as_object() {
-                    obj.get(name).map(scalar_to_string).unwrap_or_default()
+                    obj.get(&f.name).map(scalar_to_string).unwrap_or_default()
                 } else {
                     String::new()
                 };
-                item_fields.insert(name.clone(), val);
+                item_fields.insert(f.name.clone(), val);
             }
         }
         let stable_id = item_fields
@@ -362,229 +269,17 @@ fn extract_image_urls_from_json(v: &Value) -> Vec<String> {
     out
 }
 
-fn extract_regex(
-    doc: &FetchedDocument,
-    pattern: &str,
-    fields: &HashMap<String, FieldSelector>,
-) -> Result<Vec<Item>> {
-    let re = Regex::new(pattern)
-        .map_err(|e| Error::config(format!("invalid regex '{pattern}': {e}")))?;
-    let mut items = Vec::new();
-    for (idx, caps) in re.captures_iter(&doc.text).enumerate() {
-        let mut item_fields = HashMap::new();
-        for (name, fs) in fields {
-            let value = if let Some(grp) = fs.group {
-                caps.get(grp)
-                    .map(|m| m.as_str().to_string())
-                    .unwrap_or_default()
-            } else if let Some(regex) = &fs.regex {
-                Regex::new(regex)
-                    .ok()
-                    .and_then(|r| r.captures(caps.get(0).map(|m| m.as_str()).unwrap_or_default()))
-                    .and_then(|c| c.get(1))
-                    .map(|m| m.as_str().to_string())
-                    .unwrap_or_default()
-            } else {
-                caps.get(0)
-                    .map(|m| m.as_str().to_string())
-                    .unwrap_or_default()
-            };
-            item_fields.insert(name.clone(), value);
-        }
-        let stable_id = item_fields
-            .get("id")
-            .cloned()
-            .unwrap_or_else(|| format!("regex-{idx}"));
-        items.push(Item {
-            stable_id,
-            fields: item_fields,
-            image_urls: Vec::new(),
-            text: caps
-                .get(0)
-                .map(|m| m.as_str().to_string())
-                .unwrap_or_default(),
-            meta: HashMap::new(),
-        });
-    }
-    Ok(items)
-}
-
-fn extract_images_from_html(doc: &FetchedDocument) -> Vec<Item> {
-    let html = Html::parse_document(&doc.text);
-    let mut items = Vec::new();
-    if let Ok(sel) = Selector::parse("img") {
-        for (idx, el) in html.select(&sel).enumerate() {
-            let mut src = String::new();
-            for attr in ["src", "data-src", "data-lazy-src"] {
-                if let Some(v) = el.value().attr(attr) {
-                    src = v.to_string();
-                    break;
-                }
-            }
-            if src.is_empty() {
-                continue;
-            }
-            let alt = el.value().attr("alt").unwrap_or("").to_string();
-            items.push(Item {
-                stable_id: format!("img-{idx}"),
-                fields: HashMap::from([
-                    ("src".to_string(), src.clone()),
-                    ("alt".to_string(), alt.clone()),
-                ]),
-                image_urls: vec![src],
-                text: alt,
-                meta: HashMap::new(),
-            });
-        }
-    }
-    items
-}
-
-fn apply_normalize(items: &mut [Item], norm: &NormalizeConfig, final_url: &str) -> Result<()> {
-    match norm {
-        NormalizeConfig::Strip { field, chars } => {
-            for item in items {
-                if let Some(v) = item.fields.get_mut(field) {
-                    *v = v.trim_matches(|c| chars.contains(c)).to_string();
-                }
-            }
-        }
-        NormalizeConfig::Trim { field } => {
-            for item in items {
-                if let Some(v) = item.fields.get_mut(field) {
-                    *v = v.trim().to_string();
-                }
-            }
-        }
-        NormalizeConfig::AbsUrl { field, base } => {
-            let base = base.replace("{{final_url}}", final_url);
-            for item in items {
-                if let Some(v) = item.fields.get_mut(field)
-                    && let Ok(resolved) = resolve_url(&base, v)
-                {
-                    *v = resolved;
-                }
-                for url in &mut item.image_urls {
-                    if let Ok(resolved) = resolve_url(&base, url) {
-                        *url = resolved;
-                    }
-                }
-            }
-        }
-        NormalizeConfig::Lowercase { field } => {
-            for item in items {
-                if let Some(v) = item.fields.get_mut(field) {
-                    *v = v.to_lowercase();
-                }
-            }
-        }
-        NormalizeConfig::Replace {
-            field,
-            pattern,
-            with,
-        } => {
-            let re = Regex::new(pattern)
-                .map_err(|e| Error::config(format!("invalid replace regex '{pattern}': {e}")))?;
-            for item in items {
-                if let Some(v) = item.fields.get_mut(field) {
-                    *v = re.replace_all(v, with.as_str()).into_owned();
-                }
-            }
-        }
-    }
-    Ok(())
-}
-
-fn resolve_url(base: &str, url: &str) -> Result<String> {
-    let base_url = url::Url::parse(base)
-        .map_err(|e| Error::config(format!("invalid base url '{base}': {e}")))?;
-    Ok(base_url.join(url)?.to_string())
-}
-
-fn filter_items(items: Vec<Item>, filter: &FilterConfig) -> Result<Vec<Item>> {
+fn dedupe_items(items: Vec<Item>, key_template: &str) -> Vec<Item> {
+    let mut seen = std::collections::HashSet::new();
     let mut out = Vec::new();
     for item in items {
-        if !filter.include.is_empty() && !filter.include.iter().all(|c| condition_matches(c, &item))
-        {
-            continue;
+        let mut key = key_template.to_string();
+        for (k, v) in &item.fields {
+            key = key.replace(&format!("{{{{{k}}}}}"), v);
         }
-        if filter.exclude.iter().any(|c| condition_matches(c, &item)) {
-            continue;
+        if seen.insert(key) {
+            out.push(item);
         }
-        out.push(item);
-    }
-
-    if let Some(dd) = &filter.drop_duplicate {
-        let mut seen = std::collections::HashSet::new();
-        out.retain(|item| {
-            let key = render_key(&dd.key, item);
-            seen.insert(key)
-        });
-    }
-
-    if let Some(min) = filter.min_items
-        && out.len() < min
-    {
-        out.clear();
-    }
-    Ok(out)
-}
-
-fn condition_matches(cond: &Condition, item: &Item) -> bool {
-    match cond {
-        Condition::Eq { field, value } => {
-            item.fields.get(field).map(|v| v == value).unwrap_or(false)
-        }
-        Condition::Ne { field, value } => {
-            item.fields.get(field).map(|v| v != value).unwrap_or(true)
-        }
-        Condition::Gt { field, value } => item
-            .fields
-            .get(field)
-            .and_then(|v| v.trim().parse::<f64>().ok())
-            .map(|v| v > *value)
-            .unwrap_or(false),
-        Condition::Lt { field, value } => item
-            .fields
-            .get(field)
-            .and_then(|v| v.trim().parse::<f64>().ok())
-            .map(|v| v < *value)
-            .unwrap_or(false),
-        Condition::Regex { field, pattern } => Regex::new(pattern)
-            .map(|re| {
-                item.fields
-                    .get(field)
-                    .map(|v| re.is_match(v))
-                    .unwrap_or(false)
-            })
-            .unwrap_or(false),
-        Condition::Glob { field, pattern } => item
-            .fields
-            .get(field)
-            .map(|v| glob_match(pattern, v))
-            .unwrap_or(false),
-        Condition::Contains { field, value } => item
-            .fields
-            .get(field)
-            .map(|v| v.contains(value))
-            .unwrap_or(false),
-    }
-}
-
-fn glob_match(pattern: &str, text: &str) -> bool {
-    let regex = pattern
-        .replace('.', "\\.")
-        .replace('*', ".*")
-        .replace('?', ".");
-    Regex::new(&format!("^{regex}$"))
-        .map(|re| re.is_match(text))
-        .unwrap_or(false)
-}
-
-fn render_key(template: &str, item: &Item) -> String {
-    let mut out = template.to_string();
-    for (k, v) in &item.fields {
-        out = out.replace(&format!("{{{{{k}}}}}"), v);
     }
     out
 }
@@ -604,66 +299,8 @@ fn compute_fingerprint(items: &[Item], text: &str) -> String {
 mod tests {
     use super::*;
 
-    #[test]
-    fn test_css_items() {
-        let doc = FetchedDocument {
-            final_url: "https://example.com".into(),
-            status: 200,
-            text: r#"<html><body><div class="item" data-id="a"><span class="title">A</span></div><div class="item" data-id="b"><span class="title">B</span></div></body></html>"#.into(),
-            html: None,
-            images: vec![],
-            screenshot: None,
-            etag: None,
-            last_modified: None,
-            content_sha256: "x".into(),
-            normalized_fingerprint: "x".into(),
-            duration_ms: 0,
-            engine: "http".into(),
-            not_modified: false,
-        };
-        let pipeline = PipelineConfig {
-            extract: vec![ExtractConfig::CssItems {
-                selector: ".item".into(),
-                fields: HashMap::from([
-                    (
-                        "id".into(),
-                        FieldSelector {
-                            selector: None,
-                            attr: Some("data-id".into()),
-                            path: None,
-                            regex: None,
-                            group: None,
-                        },
-                    ),
-                    (
-                        "title".into(),
-                        FieldSelector {
-                            selector: Some(".title".into()),
-                            attr: None,
-                            path: None,
-                            regex: None,
-                            group: None,
-                        },
-                    ),
-                ]),
-            }],
-            normalize: vec![],
-            filter: FilterConfig::default(),
-        };
-        let out = run_pipeline(&doc, &pipeline).unwrap();
-        assert_eq!(out.items.len(), 2);
-        assert_eq!(out.items[0].stable_id, "a");
-        assert_eq!(out.items[0].fields["title"], "A");
-    }
-
-    #[test]
-    fn test_auto_text_fingerprint_tracks_text_changes() {
-        let pipeline = PipelineConfig {
-            extract: vec![ExtractConfig::AutoText],
-            normalize: vec![],
-            filter: FilterConfig::default(),
-        };
-        let make_doc = |text: &str| FetchedDocument {
+    fn doc(text: &str) -> FetchedDocument {
+        FetchedDocument {
             final_url: "https://example.com".into(),
             status: 200,
             text: text.into(),
@@ -677,13 +314,52 @@ mod tests {
             duration_ms: 0,
             engine: "http".into(),
             not_modified: false,
+        }
+    }
+
+    #[test]
+    fn test_text_extract() {
+        let out = run_pipeline(&doc("hello world"), &ExtractConfig::Text).unwrap();
+        assert_eq!(out.items.len(), 1);
+        assert_eq!(out.items[0].text, "hello world");
+    }
+
+    #[test]
+    fn test_text_fingerprint_tracks_changes() {
+        let a = run_pipeline(&doc("hello world"), &ExtractConfig::Text).unwrap();
+        let b = run_pipeline(&doc("hello world!"), &ExtractConfig::Text).unwrap();
+        assert_ne!(a.fingerprint, b.fingerprint);
+    }
+
+    #[test]
+    fn test_css_items() {
+        let extract = ExtractConfig::Items {
+            selector: ItemSelector::Css {
+                selector: ".item".into(),
+            },
+            fields: vec![
+                ItemField {
+                    name: "id".into(),
+                    attr: Some("data-id".into()),
+                    ..Default::default()
+                },
+                ItemField {
+                    name: "title".into(),
+                    selector: Some(".title".into()),
+                    ..Default::default()
+                },
+            ],
+            dedupe_key: None,
         };
-        let first = run_pipeline(&make_doc("hello world"), &pipeline).unwrap();
-        let second = run_pipeline(&make_doc("hello world!"), &pipeline).unwrap();
-        assert_ne!(first.fingerprint, second.fingerprint);
-        assert_ne!(
-            first.items[0].fingerprint(&[]),
-            second.items[0].fingerprint(&[])
-        );
+        let out = run_pipeline(
+            &doc(
+                r#"<html><body><div class="item" data-id="a"><span class="title">A</span></div><div class="item" data-id="b"><span class="title">B</span></div></body></html>"#,
+            ),
+            &extract,
+        )
+        .unwrap();
+        assert_eq!(out.items.len(), 2);
+        assert_eq!(out.items[0].stable_id, "a");
+        assert_eq!(out.items[0].fields["title"], "A");
     }
 }
