@@ -1,7 +1,7 @@
 # ReadingSteiner 开发计划
 
 > 网页 / 数据变化检测，Telegram Bot 推送。
-> 技术栈：**Rust**。交互：CLI + TUI（无 Web）。部署：NixOS flake。
+> 技术栈：**Rust** 后端 + **React/shadcn.ui** Web 控制台。交互：CLI + Web 控制台（无 TUI）。部署：NixOS flake。
 > camofox 为**可选抓取引擎**，通过其 HTTP API 直接调用，不内置、不捆绑。
 
 ---
@@ -27,27 +27,27 @@
 
 - 数据源：直连 HTTP/HTTPS；可选 camofox 反检测浏览器（HTTP API）。
 - 推送：只做 Telegram Bot。
-- 交互：无 Web；CLI + TUI。
+- 交互：CLI + Web 控制台（无 TUI）。
 - 性能：单机高并发（数千个 HTTP 源），低延迟、可限流、可背压。
 - 部署：NixOS flake 直接引用 + 配置化部署。
 
-**v1 不做**：Web 面板、多推送渠道、通用爬虫框架、分布式集群、多租户 UI。
+**v1 不做**：多推送渠道、通用爬虫框架、分布式集群、多租户 UI。
 
 ---
 
-## 2. CLI vs TUI：结论
+## 2. CLI vs Web：结论
 
-**TUI 为主，CLI 兜底；二者共享同一个 daemon。**
+**CLI 兜底 + Web 控制台为主；二者共享同一个 daemon。**
 
-- TUI 负责日常交互：看状态、看变化、看日志、临时跑一次检测。
+- Web 控制台（React + shadcn.ui）负责日常交互：看状态、看变化、看事件、临时跑一次检测、管理监控源。
 - CLI 负责脚本化与无人值守：`check`、`run-once`、`status --json`。
-- 架构：`daemon + 本地控制面`，TUI 与 CLI 只是两个客户端，通过 Unix socket 通信，默认不监听 TCP。
+- 架构：`daemon + 控制面`。CLI 通过 Unix socket（JSON-RPC）通信；Web 控制台通过 daemon 内置的 HTTP/JSON API 通信（默认 `127.0.0.1:8901`）。
 
 CLI 命令草案：
 
 ```text
-reading-steiner serve                 # 前台跑 daemon（systemd 用）
-reading-steiner tui                   # 打开 TUI
+reading-steiner serve                 # 前台跑 daemon（systemd 用），并启动 Web API + 静态资源
+reading-steiner web                   # 打印/打开 Web 控制台地址
 reading-steiner status [--json]       # 运行状态
 reading-steiner sources add <file>    # 添加监控项
 reading-steiner check <id>            # 立即检测一次
@@ -64,7 +64,8 @@ reading-steiner history <id>          # 变更历史
 ```mermaid
 flowchart LR
   CFG[config.yaml] --> DAEMON
-  TUI[TUI / CLI] <-->|unix socket| DAEMON
+  CLI[CLI] <-->|unix socket| DAEMON
+  WEB[Web 控制台<br/>React + shadcn.ui] <-->|HTTP /api| DAEMON
 
   subgraph DAEMON[ReadingSteiner daemon]
     S[Scheduler 调度器]
@@ -93,8 +94,9 @@ flowchart LR
 
 | 组件 | 选型 | 理由 |
 |---|---|---|
-| 核心 daemon | **Rust**（tokio, reqwest/hyper, rustls） | 高性能、内存安全、单二进制、Nix 打包成熟 |
-| TUI | ratatui | 终端原生，性能好 |
+| 核心 daemon | **Rust**（tokio, reqwest/hyper, rustls, axum） | 高性能、内存安全、单二进制、Nix 打包成熟 |
+| Web 控制台 | **React + TypeScript + Vite + Tailwind + shadcn/ui** | 现代化 UI、组件化、易扩展 |
+| Web HTTP API | **axum** | 轻量、类型安全、与 tokio 生态一致 |
 | CLI 框架 | clap | 标准 |
 | 存储 | SQLite（WAL）+ 本地 media 目录 | 单机足够、零运维、易备份 |
 | 配置 | YAML | 流水线和选择器可读性好 |
@@ -484,14 +486,18 @@ compare:
 
 ### M4 TUI 与 NixOS 部署（目标 2 周）
 
-- [x] M4-1 daemon 本地控制面：Unix socket + gRPC/JSON-RPC，权限与鉴权
-- [x] M4-2 TUI 首页：运行状态、p50/p95、队列深度、引擎健康
-- [x] M4-3 TUI sources 页：列表、启停、立即检测、编辑流水线
-- [x] M4-4 TUI events 页：变更列表、diff 查看、图片预览索引
-- [x] M4-5 TUI logs 页与失败通知重发
+- [x] M4-1 daemon 本地控制面：Unix socket + JSON-RPC，权限与鉴权
 - [x] M4-6 NixOS module：`services.reading-steiner`、systemd hardening、StateDirectory、secrets
 - [x] M4-7 NixOS 集成测试：VM + 本地 HTTP 服务器 + Telegram mock
 - [x] M4-8 文档：README、配置示例、部署示例、camofox 接入说明
+
+### M6 Web 控制台（替代 TUI）
+
+- [ ] M6-1 移除 TUI：删除 `src/tui.rs`、`tui` 子命令，移除 ratatui/crossterm 依赖
+- [ ] M6-2 daemon 内置 HTTP/JSON API（axum）：status / sources / events / diff / history / check / test-pipeline
+- [ ] M6-3 Web 控制台：React + TypeScript + Vite + Tailwind + shadcn/ui，含 Dashboard / Sources / Events 页面
+- [ ] M6-4 daemon 托管前端静态资源（web/dist），配置化监听地址
+- [ ] M6-5 文档与 flake：README、config.yaml web 段、NixOS module、CLI `web` 命令
 
 ### M5 压测、加固与发布（目标 2 周）
 
@@ -521,12 +527,14 @@ compare:
 ## 16. 当前状态
 
 - 项目根目录：`ReadingSteiner/`
-- 当前版本：**v0.1.0**，Rust 可编译、可测试、clippy 零警告。
-- 已实现：CLI/TUI/daemon、SQLite、HTTP 与 camofox 抓取、提取筛选流水线、Differ、Telegram 推送、图片链路、Unix socket 控制面、NixOS flake/module、mock 契约测试、loadgen 压测工具。
+- 当前版本：**v0.1.0**（重构中：TUI → Web 控制台）。
+- 已实现：CLI/daemon、SQLite、HTTP 与 camofox 抓取、提取筛选流水线、Differ、Telegram 推送、图片链路、Unix socket 控制面、NixOS flake/module、mock 契约测试、loadgen 压测工具。
+- 移除：TUI（`src/tui.rs`、`tui` 命令、ratatui/crossterm 依赖）。
+- 新增：daemon 内置 HTTP/JSON API（axum）+ React/shadcn.ui Web 控制台。
 - CLI 命令统一为 `reading-steiner`（原 `wwatch` 已移除）。
-- 验证：`cargo test --all-targets` 通过（7 个测试），`cargo clippy --all-targets` 零警告，`loadgen 100 16` 冒烟通过。
+- 验证：`cargo test --all-targets` 通过（7 个测试），`cargo clippy --all-targets` 零警告，`loadgen 100 16` 冒烟通过；Web 前端 `npm run build` 通过。
 - 待外部环境验证：真实 camofox 实例 e2e、NixOS VM 集成测试、大规模容量目标（需在 Linux/NixOS 环境执行）。
-- 当前阶段：**M0–M5 代码与文档已完成**（真实外部依赖项需部署环境复验）。
+- 当前阶段：**M0–M5 完成 + M6 Web 控制台重构中**（真实外部依赖项需部署环境复验）。
 
 ---
 
@@ -537,3 +545,4 @@ compare:
 | 2026-08-16 | 初始化开发计划 PLAN.md 与 AI 协作规则 | 人工 review | M0 尚未开始 |
 | 2026-08-16 | 完成 M0–M5 全部代码与文档：Rust 项目、CLI/TUI/daemon、SQLite、HTTP/camofox fetcher、流水线、Differ、Telegram、图片、控制面、NixOS flake/module、测试、loadgen | `cargo test --all-targets`、`cargo clippy --all-targets`、`loadgen 100 16` 冒烟通过 | 真实 camofox/NixOS VM/大容量压测需在部署环境复验 |
 | 2026-08-16 | CLI 命名统一为 `reading-steiner`（移除 `wwatch`）；修复 `auto_text` 指纹不包含文本导致整页监控失效的问题；在 config/README 中强化“提取规则 -> Item -> 比对”的结构化监控说明并补充 JSON API 示例 | `cargo test --all-targets`（7 个）、`cargo clippy --all-targets` 零警告 | 同步更新 PLAN.md CLI 草案与当前状态 |
+| 2026-08-20 | M6-1 移除 TUI（`src/tui.rs`、`tui` 子命令、ratatui/crossterm 依赖）；新增 daemon 内置 HTTP/JSON API（axum）并托管 Web 前端静态资源；CLI 删除 `tui`、新增 `web` 命令；新增 React+TypeScript+Vite+Tailwind+shadcn.ui Web 控制台（`web/`，Dashboard/Sources/Events 页面） | `cargo build`/`cargo test` 待部署环境验证；`npm run build`（web）通过 | 关联 Issue #1：TUI 更换为 Web 控制台 |

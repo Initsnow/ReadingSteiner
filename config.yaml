@@ -7,6 +7,10 @@ daemon:
   queue_capacity: 1024
   log_level: info
 
+web:
+  listen: 127.0.0.1:8901
+  static_dir: web/dist
+
 telegram:
   # token: "123456:ABC"       # prefer token_file for production
   token_file: state/telegram_token

@@ -23,13 +23,13 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
-    /// Run the daemon in the foreground
+    /// Run the daemon in the foreground (starts control socket + web console)
     Serve {
         #[arg(long, default_value = "config.yaml")]
         config: PathBuf,
     },
-    /// Open the TUI
-    Tui {
+    /// Print the Web console address
+    Web {
         #[arg(long, default_value = "config.yaml")]
         config: PathBuf,
     },
@@ -103,13 +103,27 @@ pub async fn run(cli: Cli) -> Result<()> {
                     eprintln!("control server error: {e}");
                 }
             });
+            let web_state = state.clone();
+            let web = tokio::spawn(async move {
+                if let Err(e) = crate::web::serve_web(web_state).await {
+                    eprintln!("web server error: {e}");
+                }
+            });
             scheduler::run_daemon(state).await?;
             control.abort();
+            web.abort();
             Ok(())
         }
-        Command::Tui { config } => {
+        Command::Web { config } => {
             let cfg = Config::load(&config)?;
-            crate::tui::run_tui(&cfg).await
+            let addr = cfg.web.effective_listen();
+            println!("ReadingSteiner web console: http://{addr}");
+            println!("  static dir: {}", cfg.web.static_dir().display());
+            println!(
+                "  hint: start daemon with `reading-steiner serve --config {}` to serve it",
+                config.display()
+            );
+            Ok(())
         }
         Command::Status { json, config } => {
             let cfg = Config::load(&config)?;

@@ -11,6 +11,7 @@ pub struct Config {
     pub state_dir: PathBuf,
     pub media_dir: PathBuf,
     pub daemon: DaemonConfig,
+    pub web: WebConfig,
     pub telegram: TelegramConfig,
     pub camofox: CamofoxConfig,
     pub sources: Vec<SourceConfig>,
@@ -55,6 +56,30 @@ impl Config {
 
     pub fn pipeline(&self, id: &str) -> Option<&PipelineConfig> {
         self.pipelines.get(id)
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct WebConfig {
+    pub listen: String,
+    pub static_dir: PathBuf,
+}
+
+impl WebConfig {
+    pub fn effective_listen(&self) -> String {
+        if self.listen.is_empty() {
+            "127.0.0.1:8901".to_string()
+        } else {
+            self.listen.clone()
+        }
+    }
+    pub fn static_dir(&self) -> PathBuf {
+        if self.static_dir.as_os_str().is_empty() {
+            PathBuf::from("web/dist")
+        } else {
+            self.static_dir.clone()
+        }
     }
 }
 

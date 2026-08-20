@@ -132,7 +132,10 @@ where
     Ok(())
 }
 
-async fn handle_request(state: &Arc<AppState>, req: ControlRequest) -> ControlResponse {
+pub(crate) async fn handle_request(
+    state: &Arc<AppState>,
+    req: ControlRequest,
+) -> ControlResponse {
     match req {
         ControlRequest::Status => {
             let s = state.status().await;
