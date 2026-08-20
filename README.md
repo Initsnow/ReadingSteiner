@@ -45,7 +45,7 @@ web:
   static_dir: web/dist
 ```
 
-- 页面：**仪表盘**（运行状态 / 引擎健康）、**监控源**（添加、编辑、删除、测试、立即检测）、**变更事件**（列表与 diff 详情）。
+- 页面：**监控源**（添加、编辑、删除、测试、立即检测）、**变更事件**（列表与 diff 详情）。
 - **监控源（source）只存在 SQLite（`state/reading-steiner.db` 的 `sources` 表）中**，是运行时唯一数据源。添加、编辑、删除监控源统一通过 Web 控制台或 CLI 操作，即时生效，无需重启 daemon。
 - 技术栈：React + TypeScript + Vite + Tailwind CSS + shadcn/ui。
 - 前端源码位于 [`web/`](./web/)，构建产物输出到 `web/dist`。
@@ -69,61 +69,7 @@ reading-steiner history <id>          # 变更历史
 
 见 [`config.yaml`](./config.yaml)。config.yaml 只负责**全局配置**（state_dir、telegram、camofox、web），**不包含监控源（sources）定义**——监控源统一存于 SQLite，通过 Web 控制台或 CLI 管理。
 
-### 监控源（source）
-
-监控源通过 **Web 控制台**或 **CLI**（`reading-steiner sources add <file>`）添加。核心字段非常简单：
-
-```yaml
-id: shop-list          # 唯一标识
-name: Shop List
-fetch:
-  engine: http         # 或 camofox
-  url: https://example.com/list
-schedule:
-  interval_secs: 60
-extract:
-  type: items          # 内容提取方式（见下）
-  selector:
-    kind: css          # 或 json_path
-    selector: ".product"
-  fields:              # 可选：提取的字段
-    - { name: id, attr: data-id }
-    - { name: title, selector: ".title" }
-    - { name: price, selector: ".price" }
-```
-
-### 内容提取（extract）
-
-`extract` 决定「把抓到的内容变成什么拿来比对」。只有两种直观方式：
-
-#### 1. 整页文本（默认）
-
-```yaml
-extract:
-  type: text
-```
-
-把整个页面（或接口返回的文本）作为监控内容，任何字节变化即视为变更。适合文章、纯文本页面。
-
-#### 2. 结构化提取
-
-```yaml
-extract:
-  type: items
-  selector:
-    kind: css          # CSS 选择器（HTML 页面）
-    selector: ".product"
-  fields:              # 可选
-    - { name: id, attr: data-id }
-    - { name: title, selector: ".title" }
-```
-
-- `selector.kind: css` 用于 HTML 页面（CSS 选择器）。
-- `selector.kind: json_path` 用于 JSON 接口（如 `$.data.items[*]`）。
-- 按选择器提取出若干「条目」，**自动对比条目的新增 / 更新 / 移除**，无需配置稳定字段。
-- `fields` 可选：配置后只比对指定字段；不配置则比对每个条目的全部内容。
-
-> **变更检测完全自动**：整页文本变了就提示更新；结构化条目有增 / 改 / 删就提示对应变化。不存在「比较模式」「稳定字段」这些需要理解的概念。
+监控源通过 **Web 控制台**或 **CLI**（`reading-steiner sources add <file>`）添加，格式见 `src/config.rs::SourceConfig`。每个源只需配置：抓什么（fetch）、提取什么（extract，整页文本或结构化条目）、多久检测一次（schedule）。变更检测完全自动。
 
 ## camofox 接入
 
