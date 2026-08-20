@@ -10,7 +10,7 @@ pub mod models;
 pub mod notifier;
 pub mod pipeline;
 pub mod scheduler;
-pub mod tui;
+pub mod web;
 
 pub use config::Config;
 pub use error::Error;

@@ -2,7 +2,7 @@
 
 持续监控 HTTP/HTTPS 网页与数据接口，检测文本、结构化数据、图片 URL 的变化，并将变化（含图片本体）推送到 Telegram。
 
-- **Rust** 实现，CLI + TUI，无 Web。
+- **Rust** 后端 + **React / shadcn.ui** Web 控制台，CLI + Web（无 TUI）。
 - 可选 camofox 反检测浏览器引擎（通过 HTTP API 调用，不内置、不捆绑）。
 - 存储：SQLite（WAL）+ 本地 media 目录。
 - 部署：NixOS flake 直接引用。
@@ -10,21 +10,45 @@
 ## 快速开始
 
 ```bash
+# 构建 Rust 后端
 cargo build --release
+
+# 构建 Web 控制台前端（可选；未构建时 daemon 仍可提供 /api 接口）
+cd web && npm install && npm run build && cd ..
+
 # 准备配置
 cp config.yaml config.local.yaml
 # 编辑 token / chat / sources 后启动 daemon
 ./target/release/reading-steiner serve --config config.local.yaml
-# 另一个终端查看状态 / TUI
+
+# 打开 Web 控制台
+# 浏览器访问 http://127.0.0.1:8901 （默认地址，可在 config.yaml 的 web.listen 修改）
+
+# 命令行查看状态
 ./target/release/reading-steiner status --config config.local.yaml
-./target/release/reading-steiner tui --config config.local.yaml
 ```
+
+## Web 控制台
+
+daemon 内置一个轻量 HTTP 服务（axum），监听地址与静态目录由 `config.yaml` 的 `web` 段配置：
+
+```yaml
+web:
+  listen: 127.0.0.1:8901
+  static_dir: web/dist
+```
+
+- 页面：**仪表盘**（运行状态 / 引擎健康）、**监控源**（立即检测、试跑流水线）、**变更事件**（列表与 diff 详情）。
+- 技术栈：React + TypeScript + Vite + Tailwind CSS + shadcn/ui。
+- 前端源码位于 [`web/`](./web/)，构建产物输出到 `web/dist`。
+- 开发调试：在 `web/` 下执行 `npm run dev`，Vite 会把 `/api` 代理到 `127.0.0.1:8901`。
+- 仅暴露在 `127.0.0.1` 时请勿将 `web.listen` 绑定到公网地址，或加一层鉴权反代。
 
 ## CLI
 
 ```text
-reading-steiner serve                 # 前台跑 daemon（systemd 用）
-reading-steiner tui                   # 打开 TUI
+reading-steiner serve                 # 前台跑 daemon（systemd 用），并启动 Web API + 静态资源
+reading-steiner web                   # 打印 Web 控制台地址
 reading-steiner status [--json]       # 运行状态
 reading-steiner sources add <file>    # 添加监控项
 reading-steiner sources list          # 列出配置中的监控项
