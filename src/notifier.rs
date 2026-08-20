@@ -205,9 +205,21 @@ impl TelegramNotifier {
         let mut media = Vec::new();
         let mut form = Form::new().text("chat_id", chat_id.to_string());
         let mut needs_multipart = false;
-        for (idx, entry) in entries.iter().enumerate() {
+        for entry in entries {
+            // 用 `media.is_empty()` 判断是否为最终媒体组的首张图：
+            // 首图承载文案，避免被 file_id / 缺失文件跳过时文案丢失。
+            let is_first = media.is_empty();
             if let Some(fid) = &entry.telegram_file_id {
-                media.push(json!({ "type": "photo", "media": fid }));
+                if is_first {
+                    media.push(json!({
+                        "type": "photo",
+                        "media": fid,
+                        "caption": caption,
+                        "parse_mode": "HTML"
+                    }));
+                } else {
+                    media.push(json!({ "type": "photo", "media": fid }));
+                }
                 continue;
             }
             let path = Path::new(&entry.file_path);
@@ -226,9 +238,13 @@ impl TelegramNotifier {
                 .mime_str(&entry.mime)
                 .unwrap_or_else(|_| Part::bytes(Vec::new()));
             form = form.part(attach.clone(), part);
-            // 媒体组第一张图承载文案。
-            if idx == 0 {
-                media.push(json!({ "type": "photo", "media": format!("attach://{attach}"), "caption": caption, "parse_mode": "HTML" }));
+            if is_first {
+                media.push(json!({
+                    "type": "photo",
+                    "media": format!("attach://{attach}"),
+                    "caption": caption,
+                    "parse_mode": "HTML"
+                }));
             } else {
                 media.push(json!({ "type": "photo", "media": format!("attach://{attach}") }));
             }
@@ -344,7 +360,8 @@ pub async fn process_outbox(
                 width: None,
                 height: None,
             };
-            if let Some(entry) = images.ensure(db, &image_ref).await? {
+            // 单个图片下载/解析失败仅跳过该图，不中断整批通知。
+            if let Ok(Some(entry)) = images.ensure(db, &image_ref).await {
                 entries.push(entry);
             }
         }
