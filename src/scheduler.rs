@@ -394,6 +394,18 @@ pub async fn check_source(state: &Arc<AppState>, source_id: &str) -> Result<()> 
         }
     }
 
+    // camofox 源开启截图时，先把截图数据暂存（插入事件拿到 event_id 后再写文件，
+    // 文件命名 `event-{id}.png`，落在 media_dir/screenshots/ 下）。
+    // 写入失败时不引用不存在的文件（screenshot_path 置为 None）。
+    let screenshot_data = if source.fetch.engine == "camofox"
+        && source.fetch.screenshot
+        && let Some(data) = &doc.screenshot
+    {
+        Some(data.clone())
+    } else {
+        None
+    };
+
     let event = ChangeEvent {
         id: 0,
         watchpoint_id: source.id.clone(),
@@ -405,6 +417,8 @@ pub async fn check_source(state: &Arc<AppState>, source_id: &str) -> Result<()> 
         dedupe_key: diff_result.dedupe_key,
         image_urls_json: serde_json::to_string(&image_urls)?,
         detected_at: Utc::now(),
+        read: false,
+        screenshot_path: None,
     };
 
     // 图片下载不阻塞检测：把挑选出的图片 URL 存入事件，
@@ -413,6 +427,44 @@ pub async fn check_source(state: &Arc<AppState>, source_id: &str) -> Result<()> 
     {
         let db = state.db.lock().await;
         event_id = db.insert_change_event(&event)?;
+        // 插入成功后再写截图：以 event_id 命名，写失败时事件不带截图，
+        // 不存在残留临时文件，也不存在 DB 与文件名不一致的问题。
+        if let Some(data) = &screenshot_data {
+            let dir = state.runtime.media_dir.join("screenshots");
+            match std::fs::create_dir_all(&dir) {
+                Ok(()) => {
+                    let fname = format!("event-{event_id}.png");
+                    let path = dir.join(&fname);
+                    match std::fs::write(&path, data) {
+                        Ok(()) => {
+                            if let Err(e) = db.update_event_screenshot(
+                                event_id,
+                                Some(&format!("screenshots/{fname}")),
+                            ) {
+                                // DB 更新失败：清理已写入的文件，避免引用不存在的文件。
+                                tracing::warn!(
+                                    error = %e, event_id,
+                                    "failed to set screenshot path in db; removing file"
+                                );
+                                let _ = std::fs::remove_file(&path);
+                            }
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                error = %e, event_id,
+                                "failed to write screenshot; event will have no screenshot"
+                            );
+                        }
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e, event_id,
+                        "failed to create screenshots dir; event will have no screenshot"
+                    );
+                }
+            }
+        }
         // 仅当该源开启了通知（notify_enabled）且已配置 notifier 与默认 chat 时才排队发送。
         if source.notify_enabled && state.notifier.is_some() {
             let chat_id = if state.cfg.telegram.default_chat_id.is_empty() {
