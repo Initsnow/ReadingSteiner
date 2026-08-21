@@ -1,7 +1,7 @@
 $:
   issue.comment@npc:
     - docker:
-        image: azumaseren/default-npc:latest
+        image: docker.cnb.cool/azumaseren/default-npc:latest
       stages:
         - name: npc go
           type: npc:go
@@ -9,14 +9,14 @@ $:
   pull_request.comment@npc:
     default:
       docker:
-        image: azumaseren/default-npc:latest
+        image: docker.cnb.cool/azumaseren/default-npc:latest
       stages:
         - name: npc go
           type: npc:go
 
   pull_request:
     - docker:
-        image: azumaseren/default-npc:latest
+        image: docker.cnb.cool/azumaseren/default-npc:latest
       stages:
         - name: npc go
           type: npc:go
