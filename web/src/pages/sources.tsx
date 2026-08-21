@@ -212,34 +212,38 @@ export function SourcesPage() {
   // 按 tag 筛选：null 表示全部，"__untagged__" 表示无标签的源。
   const [tagFilter, setTagFilter] = useState<string | null>(null)
   const allTags = useMemo(
-    () => Array.from(new Set(sources.flatMap((s) => s.tags))).sort(),
+    () => Array.from(new Set(sources.flatMap((s) => s.tags ?? []))).sort(),
     [sources],
   )
   const filteredSources = useMemo(
     () =>
       sources.filter((s) => {
+        const tags = s.tags ?? []
         if (tagFilter === null) return true
-        if (tagFilter === "__untagged__") return s.tags.length === 0
-        return s.tags.includes(tagFilter)
+        if (tagFilter === "__untagged__") return tags.length === 0
+        return tags.includes(tagFilter)
       }),
     [sources, tagFilter],
   )
   const hasUntagged = useMemo(
-    () => sources.some((s) => s.tags.length === 0),
+    () => sources.some((s) => (s.tags ?? []).length === 0),
     [sources],
   )
 
   // 切换标签筛选时同步清理 selected，避免批量操作作用于不可见的源。
+  // tag 为 null（全部）时保留全部选中项，为具体标签时仅保留匹配的源。
   function applyTagFilter(tag: string | null) {
     setTagFilter(tag)
-    if (tag === null) return
     setSelected((prev) => {
       const next = new Set(prev)
       sources.forEach((s) => {
+        const tags = s.tags ?? []
         const match =
-          tag === "__untagged__"
-            ? s.tags.length === 0
-            : s.tags.includes(tag)
+          tag === null
+            ? true
+            : tag === "__untagged__"
+              ? tags.length === 0
+              : tags.includes(tag)
         if (!match) next.delete(s.id)
       })
       return next
