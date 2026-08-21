@@ -13,15 +13,3 @@ $:
       stages:
         - name: npc go
           type: npc:go
-
-  pull_request:
-    - docker:
-        image: docker.cnb.cool/azumaseren/default-npc:latest
-      stages:
-        - name: npc go
-          type: npc:go
-          options:
-            role: nya
-            systemPrompt: |
-              You are a helpful software engineer assistant.
-            userPrompt: 审查本次 PR 的代码变更，如果有不足缺漏之处，请给出改进建议
