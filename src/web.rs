@@ -56,6 +56,7 @@ fn build_router(state: Arc<AppState>) -> Router {
             put(api_update_source).delete(api_delete_source),
         )
         .route("/sources/{id}/test", post(api_test_source))
+        .route("/sources/preview", post(api_preview_source))
         .route("/sources/batch", post(api_batch_sources))
         .route("/events", get(api_list_events))
         .route("/events/{id}", get(api_get_event))
@@ -178,6 +179,32 @@ async fn api_test_source(
 ) -> (StatusCode, Json<Value>) {
     json_response(
         control::handle_request(&state, ControlRequest::TestSource { source_id: id }).await,
+    )
+    .await
+}
+
+/// 预览请求体：抓取 URL 并返回页面标题，用于添加监控源时自动填充名称。
+#[derive(Deserialize)]
+struct PreviewSourceBody {
+    url: String,
+    /// 抓取引擎，缺省为 http。
+    #[serde(default)]
+    engine: String,
+}
+
+async fn api_preview_source(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<PreviewSourceBody>,
+) -> (StatusCode, Json<Value>) {
+    json_response(
+        control::handle_request(
+            &state,
+            ControlRequest::PreviewSource {
+                url: body.url,
+                engine: body.engine,
+            },
+        )
+        .await,
     )
     .await
 }

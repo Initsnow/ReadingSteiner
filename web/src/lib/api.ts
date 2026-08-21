@@ -160,6 +160,13 @@ export const api = {
       method: "POST",
     }),
 
+  /** 预览：抓取 URL 并返回页面标题，用于添加监控源时自动填充名称。 */
+  previewSource: (url: string, engine = "http") =>
+    request<{ url: string; title: string }>("/api/sources/preview", {
+      method: "POST",
+      body: JSON.stringify({ url, engine }),
+    }),
+
   listEvents: (limit = 50) =>
     request<ChangeEvent[]>(`/api/events?limit=${limit}`),
 
