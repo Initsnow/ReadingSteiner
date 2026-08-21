@@ -117,7 +117,7 @@ impl TelegramNotifier {
         new_items: &[Item],
         image_entries: &[MediaCacheEntry],
     ) -> Result<Vec<i64>> {
-        let text = render_event_message(event, new_items);
+        let text = render_event_message(event, new_items, &self.cfg.event_template());
         let max = self.cfg.max_images_per_event.max(1);
         let entries: Vec<_> = image_entries.iter().take(max).collect();
 
@@ -299,29 +299,80 @@ struct SendMediaGroupResponse {
     result: Vec<MessageResult>,
 }
 
-pub fn render_event_message(event: &ChangeEvent, new_items: &[Item]) -> String {
+/// 渲染一条变更通知文本。支持模板占位符：
+/// `{label}` 变化类型、`{watch}` 监控源 ID、`{time}` UTC 时间、`{tz}` 服务器时区、
+/// `{summary}` 变更摘要、`{items}` 新增条目预览列表。
+pub fn render_event_message(event: &ChangeEvent, new_items: &[Item], template: &str) -> String {
     let change_label = match event.change_type {
         crate::config::ChangeType::New => "🆕 NEW",
         crate::config::ChangeType::Updated => "✏️ UPDATED",
         crate::config::ChangeType::Removed => "🗑 REMOVED",
     };
-    let mut text = format!(
-        "<b>ReadingSteiner</b> — {change_label}\n<b>{}</b>\n<i>{}</i>\n{}",
-        event.watchpoint_id,
-        event.detected_at.format("%Y-%m-%d %H:%M:%S UTC"),
-        html_escape(&event.diff_summary)
-    );
-    let preview: Vec<&Item> = new_items.iter().take(3).collect();
-    for item in preview {
-        let title = item
-            .fields
-            .get("title")
-            .or_else(|| item.fields.get("name"))
-            .cloned()
-            .unwrap_or_else(|| item.stable_id.clone());
-        text.push_str(&format!("\n• {}", html_escape(&title)));
+    let items = {
+        let preview: Vec<&Item> = new_items.iter().take(3).collect();
+        if preview.is_empty() {
+            String::new()
+        } else {
+            let mut s = String::new();
+            for item in &preview {
+                let title = item
+                    .fields
+                    .get("title")
+                    .or_else(|| item.fields.get("name"))
+                    .cloned()
+                    .unwrap_or_else(|| item.stable_id.clone());
+                s.push_str(&format!("• {}\n", html_escape(&title)));
+            }
+            s
+        }
+    };
+    render_template(
+        template,
+        &[
+            ("{label}", change_label),
+            ("{watch}", &event.watchpoint_id),
+            (
+                "{time}",
+                &event
+                    .detected_at
+                    .format("%Y-%m-%d %H:%M:%S UTC")
+                    .to_string(),
+            ),
+            ("{tz}", "UTC"),
+            ("{summary}", &html_escape(&event.diff_summary)),
+            ("{items}", items.trim_end()),
+        ],
+    )
+}
+
+/// 渲染一条连续失败告警通知文本（系统级，不关联变更事件）。
+pub fn render_failure_message(
+    source_id: &str,
+    failures: u32,
+    threshold: u32,
+    error: &str,
+    tz: &str,
+) -> String {
+    let now = Utc::now();
+    let t = crate::scheduler::format_local_time(now, tz);
+    format!(
+        "<b>⚠️ ReadingSteiner 连续失败告警</b>\n监控源 <b>{}</b> 已连续失败 {} 次（阈值 {}）。\n最近错误：<i>{}</i>\n本地时间（{}）：{}",
+        html_escape(source_id),
+        failures,
+        threshold,
+        html_escape(error),
+        html_escape(tz),
+        html_escape(&t)
+    )
+}
+
+/// 用占位符替换渲染模板。
+fn render_template(template: &str, pairs: &[(&str, &str)]) -> String {
+    let mut out = template.to_string();
+    for (k, v) in pairs {
+        out = out.replace(k, v);
     }
-    text
+    out
 }
 
 fn html_escape(s: &str) -> String {
@@ -396,5 +447,37 @@ pub async fn process_outbox(
             }
         }
     }
+
+    // 处理系统级通知（连续失败告警等）。
+    let sys_pending = { db.lock().await.pending_system_notifications(20)? };
+    for sys in sys_pending {
+        let chat_id = chat_id_override.unwrap_or(&sys.chat_id);
+        match notifier.send_text(chat_id, &sys.text).await {
+            Ok(_) => {
+                db.lock()
+                    .await
+                    .update_system_notification_status(sys.id, "sent")?;
+                sent += 1;
+            }
+            Err(e) => {
+                warn!(notification = sys.id, error = %e, "system notification failed");
+                let attempts = sys.attempts + 1;
+                let next_retry = if attempts >= 5 {
+                    None
+                } else {
+                    Some(Utc::now() + chrono::Duration::seconds(30 * attempts as i64))
+                };
+                db.lock()
+                    .await
+                    .mark_system_notification_retry(sys.id, attempts, next_retry)?;
+                if attempts >= 5 {
+                    db.lock()
+                        .await
+                        .update_system_notification_status(sys.id, "failed")?;
+                }
+            }
+        }
+    }
+
     Ok(sent)
 }

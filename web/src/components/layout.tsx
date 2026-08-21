@@ -4,6 +4,7 @@ import {
   Radio,
   ScrollText,
   Boxes,
+  Settings as SettingsIcon,
 } from "lucide-react"
 import { cn } from "@/lib/utils"
 import { Badge } from "@/components/ui/badge"
@@ -11,6 +12,7 @@ import { Badge } from "@/components/ui/badge"
 const nav = [
   { to: "/sources", label: "监控源", icon: Radio },
   { to: "/events", label: "变更事件", icon: ScrollText },
+  { to: "/settings", label: "设置", icon: SettingsIcon },
 ]
 
 export function Layout() {

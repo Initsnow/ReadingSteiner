@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
@@ -21,6 +22,8 @@ use crate::pipeline;
 pub struct AppState {
     pub cfg: Config,
     pub runtime: RuntimeConfig,
+    /// 当前生效的 config 文件路径（供设置持久化），缺省时无法回写。
+    pub config_path: Option<PathBuf>,
     pub db: Arc<Mutex<Db>>,
     /// Live monitoring sources. Solely backed by the SQLite `sources` table,
     /// kept in sync as sources are added / edited / deleted via the Web/CLI.
@@ -35,6 +38,10 @@ pub struct AppState {
 
 impl AppState {
     pub fn new(cfg: Config) -> Result<Self> {
+        Self::with_config_path(cfg, None)
+    }
+
+    pub fn with_config_path(cfg: Config, config_path: Option<PathBuf>) -> Result<Self> {
         let runtime = RuntimeConfig::from_config(&cfg);
         std::fs::create_dir_all(&runtime.state_dir)?;
         let db_path = runtime.state_dir.join("reading-steiner.db");
@@ -52,6 +59,7 @@ impl AppState {
         Ok(Self {
             cfg,
             runtime,
+            config_path,
             db: Arc::new(Mutex::new(db)),
             sources: Mutex::new(sources),
             notifier,
@@ -68,6 +76,8 @@ impl AppState {
         let enabled = sources.iter().filter(|s| s.enabled).count();
         let last_tick = *self.last_tick_at.lock().await;
         let engine_health = self.engine_health.lock().await.clone();
+        let now = Utc::now();
+        let tz = self.runtime.timezone.clone();
         DaemonStatus {
             running: self.running.load(Ordering::Relaxed),
             version: env!("CARGO_PKG_VERSION").to_string(),
@@ -76,6 +86,9 @@ impl AppState {
             queue_depth: self.queue_depth.load(Ordering::Relaxed),
             last_tick_at: last_tick,
             engine_health,
+            timezone: tz.clone(),
+            server_time_utc: now,
+            server_time_local: format_local_time(now, &tz),
         }
     }
 }
@@ -102,6 +115,7 @@ pub async fn run_daemon(state: Arc<AppState>) -> Result<()> {
                     last_success_at: None,
                     last_notified_fingerprint: None,
                     last_notified_at: None,
+                    failure_notified: false,
                 })?;
             }
         }
@@ -134,6 +148,7 @@ pub async fn run_daemon(state: Arc<AppState>) -> Result<()> {
                     last_success_at: None,
                     last_notified_fingerprint: None,
                     last_notified_at: None,
+                    failure_notified: false,
                 });
                 if let Some(until) = sched.backoff_until
                     && until > now
@@ -166,18 +181,45 @@ pub async fn run_daemon(state: Arc<AppState>) -> Result<()> {
                         sched.backoff_until =
                             Some(Utc::now() + chrono::Duration::seconds(backoff as i64));
                         sched.next_due_at = Utc::now() + chrono::Duration::seconds(1);
+                        // 连续失败达到阈值时，发送一条失败通知（同一段失败连击只发一次）。
+                        let threshold = state.runtime.failure_notify_threshold;
+                        if threshold > 0
+                            && sched.consecutive_failures >= threshold
+                            && !sched.failure_notified
+                        {
+                            let chat_id = &state.cfg.telegram.default_chat_id;
+                            if !chat_id.is_empty() {
+                                let tz = state.runtime.timezone.clone();
+                                let text = notifier::render_failure_message(
+                                    &source.id,
+                                    sched.consecutive_failures,
+                                    threshold,
+                                    &e.to_string(),
+                                    &tz,
+                                );
+                                let _ = db.insert_system_notification(chat_id, &text);
+                                sched.failure_notified = true;
+                            }
+                        }
                         let _ = db.upsert_schedule_state(&sched);
                     }
                 }
             });
         }
 
-        // Drain notification outbox periodically.
+        // Drain notification outbox periodically（含事件通知与系统告警）。
         if let Some(notifier) = state.notifier.clone() {
             let db = state.db.clone();
             let images = state.images.clone();
             if let Err(e) = notifier::process_outbox(&db, &images, &notifier, None).await {
                 warn!(error = %e, "outbox processing failed");
+            }
+            // 按每个监控源保留条数限制清理历史（事件与快照）。
+            let limit = state.runtime.history_limit_per_source;
+            if limit > 0
+                && let Err(e) = db.lock().await.prune_history(limit)
+            {
+                warn!(error = %e, "history pruning failed");
             }
         }
 
@@ -423,6 +465,20 @@ fn next_schedule(
         last_success_at: last_success,
         last_notified_fingerprint: prev.and_then(|p| p.last_notified_fingerprint.clone()),
         last_notified_at: prev.and_then(|p| p.last_notified_at),
+        // 成功（无失败）路径会将失败通知标记清零。
+        failure_notified: failures == 0,
+    }
+}
+
+/// 将 UTC 时间按指定 IANA 时区格式化为 `%Y-%m-%d %H:%M:%S` 的本地时间字符串。
+/// 时区无法解析时退回 UTC。
+pub fn format_local_time(t: DateTime<Utc>, tz: &str) -> String {
+    match tz.parse::<chrono_tz::Tz>() {
+        Ok(zone) => t
+            .with_timezone(&zone)
+            .format("%Y-%m-%d %H:%M:%S")
+            .to_string(),
+        Err(_) => t.format("%Y-%m-%d %H:%M:%S UTC").to_string(),
     }
 }
 

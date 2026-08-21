@@ -60,7 +60,37 @@ reading-steiner check <id>            # 立即检测一次
 reading-steiner diff <event-id>       # 查看变更 diff
 reading-steiner notify test           # 发测试 Telegram 消息
 reading-steiner history <id>          # 变更历史
+reading-steiner settings             # 查看全局设置
+reading-steiner backup               # 备份（db + media + config）
+reading-steiner backups              # 列出已有备份
+reading-steiner restore <name>       # 从备份恢复（需 daemon 停止）
 ```
+
+### 全局设置（Web「设置」页 / `reading-steiner settings`）
+
+全局设置通过 config.yaml 的 `daemon` / `telegram` 段配置，可在 Web 控制台的「设置」页编辑（保存到 config 文件，部分需重启 daemon 生效）：
+
+- `daemon.concurrency`——抓取工作线程数（并发检测数）。
+- `daemon.default_timeout_secs`——全局默认请求超时秒数（单源可覆盖）。
+- `daemon.default_user_agent`——默认 User-Agent（HTTP 抓取与图片下载）。
+- `daemon.history_limit_per_source`——每个监控源保留的历史变更事件条数（0 不限制）。
+- `daemon.failure_notify_threshold`——连续失败达到多少次后发送 Telegram 失败告警（0 禁用）。
+- `daemon.timezone`——调度器/告警展示时区（IANA 名称，如 `Asia/Shanghai`）。
+- `telegram.template`——变更通知模板，占位符：`{label}` `{watch}` `{time}` `{tz}` `{summary}` `{items}`。
+- `telegram.max_images_per_event`、`telegram.default_chat_id` 等。
+
+### 备份与恢复
+
+```bash
+# 备份（在线一致性快照，含 db + media + config）
+reading-steiner backup --config config.local.yaml
+# 列出备份
+reading-steiner backups
+# 恢复（先停止 daemon）
+reading-steiner restore <备份名> --config config.local.yaml
+```
+
+备份保存在 `state/backups/<时间戳>/`。Web 控制台「设置」页也提供一键备份与备份列表。
 
 ## 配置
 

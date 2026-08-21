@@ -115,6 +115,9 @@ pub struct ScheduleState {
     pub last_success_at: Option<DateTime<Utc>>,
     pub last_notified_fingerprint: Option<String>,
     pub last_notified_at: Option<DateTime<Utc>>,
+    /// 当前失败连击是否已发送过失败通知（达到 failure_notify_threshold 后置真，
+    /// 成功后清零），用于避免同一段失败连击反复通知。
+    pub failure_notified: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -140,6 +143,17 @@ pub struct NotificationRecord {
     pub next_retry_at: Option<DateTime<Utc>>,
 }
 
+/// 系统级通知（连续失败告警等），不关联某个变更事件。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SystemNotification {
+    pub id: i64,
+    pub chat_id: String,
+    pub text: String,
+    pub status: String,
+    pub attempts: i32,
+    pub next_retry_at: Option<DateTime<Utc>>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DiffResult {
     pub changed: bool,
@@ -160,4 +174,10 @@ pub struct DaemonStatus {
     pub queue_depth: usize,
     pub last_tick_at: Option<DateTime<Utc>>,
     pub engine_health: HashMap<String, bool>,
+    /// 服务器本地时区（IANA 名称）。
+    pub timezone: String,
+    /// 服务器当前 UTC 时间。
+    pub server_time_utc: DateTime<Utc>,
+    /// 服务器本地时间（按配置时区换算）。
+    pub server_time_local: String,
 }

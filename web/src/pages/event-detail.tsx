@@ -62,7 +62,8 @@ export function EventDetailPage() {
             </CardTitle>
             <CardDescription>
               {event.watchpoint_id} ·{" "}
-              {new Date(event.detected_at).toLocaleString()}
+              {new Date(event.detected_at).toLocaleString()} ·{" "}
+              {new Date(event.detected_at).toISOString().replace("T", " ").slice(0, 19)} UTC
             </CardDescription>
           </CardHeader>
           <CardContent className="space-y-4">

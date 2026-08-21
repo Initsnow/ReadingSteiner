@@ -8,9 +8,10 @@ use crate::config::SourceConfig;
 use crate::error::Result;
 use crate::models::{
     ChangeEvent, MediaCacheEntry, NotificationRecord, ScheduleState, SnapshotRecord,
+    SystemNotification,
 };
 
-const SCHEMA_VERSION: i64 = 4;
+const SCHEMA_VERSION: i64 = 5;
 
 pub struct Db {
     conn: Connection,
@@ -28,6 +29,11 @@ impl Db {
         let db = Self { conn };
         db.migrate()?;
         Ok(db)
+    }
+
+    /// 暴露底层连接，供备份等需要在线一致性快照的场景使用。
+    pub fn connection(&self) -> &Connection {
+        &self.conn
     }
 
     pub fn open_in_memory() -> Result<Self> {
@@ -107,7 +113,17 @@ impl Db {
                     backoff_until TEXT,
                     last_success_at TEXT,
                     last_notified_fingerprint TEXT,
-                    last_notified_at TEXT
+                    last_notified_at TEXT,
+                    failure_notified INTEGER NOT NULL DEFAULT 0
+                );
+                CREATE TABLE IF NOT EXISTS system_notifications (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    chat_id TEXT NOT NULL,
+                    text TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'pending',
+                    attempts INTEGER NOT NULL DEFAULT 0,
+                    next_retry_at TEXT,
+                    created_at TEXT NOT NULL
                 );
                 "#,
             )?;
@@ -136,6 +152,13 @@ impl Db {
             )?;
             self.conn.pragma_update(None, "user_version", 4)?;
             info!("database schema migrated to v4");
+        }
+        if v < 5 {
+            self.conn.execute_batch(
+                "ALTER TABLE schedule_state ADD COLUMN failure_notified INTEGER NOT NULL DEFAULT 0;",
+            )?;
+            self.conn.pragma_update(None, "user_version", 5)?;
+            info!("database schema migrated to v5");
         }
         Ok(())
     }
@@ -310,7 +333,7 @@ impl Db {
     pub fn get_schedule_state(&self, source_id: &str) -> Result<Option<ScheduleState>> {
         self.conn
             .query_row(
-                "SELECT source_id, next_due_at, consecutive_failures, consecutive_changes, backoff_until, last_success_at, last_notified_fingerprint, last_notified_at FROM schedule_state WHERE source_id=?1",
+                "SELECT source_id, next_due_at, consecutive_failures, consecutive_changes, backoff_until, last_success_at, last_notified_fingerprint, last_notified_at, failure_notified FROM schedule_state WHERE source_id=?1",
                 [source_id],
                 |r| {
                     Ok(ScheduleState {
@@ -324,6 +347,7 @@ impl Db {
                         last_notified_at: r
                             .get::<_, Option<String>>(7)?
                             .map(|s| parse_ts(&s)),
+                        failure_notified: r.get::<_, i64>(8)? != 0,
                     })
                 },
             )
@@ -333,9 +357,9 @@ impl Db {
 
     pub fn upsert_schedule_state(&self, state: &ScheduleState) -> Result<()> {
         self.conn.execute(
-            "INSERT INTO schedule_state(source_id, next_due_at, consecutive_failures, consecutive_changes, backoff_until, last_success_at, last_notified_fingerprint, last_notified_at)
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8)
-             ON CONFLICT(source_id) DO UPDATE SET next_due_at=excluded.next_due_at, consecutive_failures=excluded.consecutive_failures, consecutive_changes=excluded.consecutive_changes, backoff_until=excluded.backoff_until, last_success_at=excluded.last_success_at, last_notified_fingerprint=excluded.last_notified_fingerprint, last_notified_at=excluded.last_notified_at",
+            "INSERT INTO schedule_state(source_id, next_due_at, consecutive_failures, consecutive_changes, backoff_until, last_success_at, last_notified_fingerprint, last_notified_at, failure_notified)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)
+             ON CONFLICT(source_id) DO UPDATE SET next_due_at=excluded.next_due_at, consecutive_failures=excluded.consecutive_failures, consecutive_changes=excluded.consecutive_changes, backoff_until=excluded.backoff_until, last_success_at=excluded.last_success_at, last_notified_fingerprint=excluded.last_notified_fingerprint, last_notified_at=excluded.last_notified_at, failure_notified=excluded.failure_notified",
             params![
                 state.source_id,
                 state.next_due_at.to_rfc3339(),
@@ -344,8 +368,47 @@ impl Db {
                 state.backoff_until.map(|d| d.to_rfc3339()),
                 state.last_success_at.map(|d| d.to_rfc3339()),
                 state.last_notified_fingerprint,
-                state.last_notified_at.map(|d| d.to_rfc3339())
+                state.last_notified_at.map(|d| d.to_rfc3339()),
+                state.failure_notified as i64
             ],
+        )?;
+        Ok(())
+    }
+
+    /// 清理每个监控源多余的旧快照与变更事件，使其数量不超过 `per_source` 条。
+    /// `0` 表示不限制。
+    pub fn prune_history(&self, per_source: usize) -> Result<()> {
+        if per_source == 0 {
+            return Ok(());
+        }
+        let limit = per_source as i64;
+        // 每个监控源（watchpoint）仅保留最新 per_source 条，其余删除。
+        self.conn.execute(
+            "DELETE FROM change_events WHERE id NOT IN (
+                SELECT id FROM (
+                    SELECT id, ROW_NUMBER() OVER (PARTITION BY watchpoint_id ORDER BY id DESC) AS rn
+                    FROM change_events
+                ) WHERE rn <= ?1
+            )",
+            [limit],
+        )?;
+        self.conn.execute(
+            "DELETE FROM snapshots WHERE id NOT IN (
+                SELECT id FROM (
+                    SELECT id, ROW_NUMBER() OVER (PARTITION BY watchpoint_id ORDER BY id DESC) AS rn
+                    FROM snapshots
+                ) WHERE rn <= ?1
+            )",
+            [limit],
+        )?;
+        Ok(())
+    }
+
+    /// 插入一条系统级（非事件关联）通知，用于连续失败告警等场景。
+    pub fn insert_system_notification(&self, chat_id: &str, text: &str) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO system_notifications(chat_id, text, status, attempts, next_retry_at, created_at) VALUES (?1,?2,'pending',0,NULL,?3)",
+            params![chat_id, text, Utc::now().to_rfc3339()],
         )?;
         Ok(())
     }
@@ -461,6 +524,50 @@ impl Db {
     ) -> Result<()> {
         self.conn.execute(
             "UPDATE notifications SET attempts=?1, next_retry_at=?2 WHERE id=?3",
+            params![attempts, next_retry_at.map(|d| d.to_rfc3339()), id],
+        )?;
+        Ok(())
+    }
+
+    /// 取出到期的待发送系统通知（连续失败告警等）。
+    pub fn pending_system_notifications(&self, limit: usize) -> Result<Vec<SystemNotification>> {
+        let now = Utc::now().to_rfc3339();
+        let mut stmt = self.conn.prepare(
+            "SELECT id, chat_id, text, status, attempts, next_retry_at FROM system_notifications WHERE status='pending' AND (next_retry_at IS NULL OR next_retry_at <= ?1) ORDER BY id ASC LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(params![now, limit as i64], |r| {
+            Ok(SystemNotification {
+                id: r.get(0)?,
+                chat_id: r.get(1)?,
+                text: r.get(2)?,
+                status: r.get(3)?,
+                attempts: r.get(4)?,
+                next_retry_at: r.get::<_, Option<String>>(5)?.map(|s| parse_ts(&s)),
+            })
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
+    pub fn update_system_notification_status(&self, id: i64, status: &str) -> Result<()> {
+        self.conn.execute(
+            "UPDATE system_notifications SET status=?1 WHERE id=?2",
+            params![status, id],
+        )?;
+        Ok(())
+    }
+
+    pub fn mark_system_notification_retry(
+        &self,
+        id: i64,
+        attempts: i32,
+        next_retry_at: Option<DateTime<Utc>>,
+    ) -> Result<()> {
+        self.conn.execute(
+            "UPDATE system_notifications SET attempts=?1, next_retry_at=?2 WHERE id=?3",
             params![attempts, next_retry_at.map(|d| d.to_rfc3339()), id],
         )?;
         Ok(())

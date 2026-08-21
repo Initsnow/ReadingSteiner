@@ -6,7 +6,7 @@ use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tracing::{error, info};
 
-use crate::config::SourceConfig;
+use crate::config::{EditableSettings, SourceConfig};
 use crate::error::{Error, Result};
 use crate::scheduler::{self, AppState};
 
@@ -47,6 +47,15 @@ pub enum ControlRequest {
     },
     NotifyTest {
         chat_id: Option<String>,
+    },
+    GetSettings,
+    UpdateSettings {
+        settings: Box<EditableSettings>,
+    },
+    Backup,
+    ListBackups,
+    Restore {
+        name: String,
     },
     Shutdown,
 }
@@ -239,6 +248,57 @@ pub(crate) async fn handle_request(state: &Arc<AppState>, req: ControlRequest) -
             },
             None => ControlResponse::err("telegram notifier disabled"),
         },
+        ControlRequest::GetSettings => {
+            let s = EditableSettings::from_config(&state.cfg);
+            match serde_json::to_value(s) {
+                Ok(v) => ControlResponse::ok(v),
+                Err(e) => ControlResponse::err(e.to_string()),
+            }
+        }
+        ControlRequest::UpdateSettings { settings } => {
+            // 持久化到 config 文件；部分参数（并发数、超时、UA、时区、模板）需重启 daemon 生效。
+            let Some(config_path) = state.config_path.clone() else {
+                return ControlResponse::err(
+                    "no config file path available; cannot persist settings",
+                );
+            };
+            let mut cfg = state.cfg.clone();
+            settings.apply_to(&mut cfg);
+            if let Err(e) = cfg.save(&config_path) {
+                return ControlResponse::err(format!("failed to save config: {e}"));
+            }
+            ControlResponse::ok(json!({
+                "saved": true,
+                "restart_required": true,
+                "config": config_path.display().to_string(),
+            }))
+        }
+        ControlRequest::Backup => {
+            let db = state.db.lock().await;
+            match crate::backup::backup(db.connection(), &state.cfg, state.config_path.as_deref()) {
+                Ok(dir) => ControlResponse::ok(json!({
+                    "path": dir.display().to_string(),
+                    "name": dir.file_name().and_then(|s| s.to_str()).unwrap_or(""),
+                })),
+                Err(e) => ControlResponse::err(e.to_string()),
+            }
+        }
+        ControlRequest::ListBackups => {
+            match crate::backup::list_backups(&state.runtime.state_dir) {
+                Ok(names) => ControlResponse::ok(json!({"backups": names})),
+                Err(e) => ControlResponse::err(e.to_string()),
+            }
+        }
+        ControlRequest::Restore { name } => {
+            // 恢复需停止 daemon 后由 CLI 执行；这里仅校验备份存在并给出提示。
+            let dir = state.runtime.state_dir.join("backups").join(&name);
+            if !dir.join("reading-steiner.db").exists() {
+                return ControlResponse::err(format!("backup {name} not found"));
+            }
+            ControlResponse::err(format!(
+                "restore must be run with daemon stopped: reading-steiner restore {name}"
+            ))
+        }
         ControlRequest::Shutdown => {
             state
                 .running

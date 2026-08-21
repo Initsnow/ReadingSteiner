@@ -19,7 +19,10 @@ const changeTypeVariant: Record<string, "success" | "warning" | "destructive" | 
 }
 
 function formatTime(ts: string) {
-  return new Date(ts).toLocaleString()
+  const d = new Date(ts)
+  const local = d.toLocaleString()
+  const utc = d.toISOString().replace("T", " ").slice(0, 19) + " UTC"
+  return `${local} · ${utc}`
 }
 
 export function EventsPage() {
