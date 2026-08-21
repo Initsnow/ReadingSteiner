@@ -7,7 +7,7 @@
 //! （daemon 运行时通过 SQLite 备份接口写入实时连接），无需停止 daemon。
 
 use std::fs;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -154,6 +154,140 @@ pub fn backup_zip_path(state_dir: &Path, name: &str) -> Option<PathBuf> {
 /// 仅允许数字与连字符。用于阻止 `../` 等路径遍历注入。
 pub fn is_valid_backup_name(name: &str) -> bool {
     !name.is_empty() && name.len() <= 32 && name.bytes().all(|b| b.is_ascii_digit() || b == b'-')
+}
+
+/// 删除一个备份（目录 + 对应 zip）。
+///
+/// 返回是否确实删除了（找不到时返回 `Ok(false)`）。
+pub fn delete_backup(state_dir: &Path, name: &str) -> Result<bool> {
+    if !is_valid_backup_name(name) {
+        return Err(Error::other("invalid backup name"));
+    }
+    let dir = state_dir.join(BACKUP_SUBDIR).join(name);
+    let zip = state_dir.join(BACKUP_SUBDIR).join(format!("{name}.zip"));
+    let mut deleted = false;
+    if dir.exists() {
+        fs::remove_dir_all(&dir)?;
+        deleted = true;
+    }
+    if zip.exists() {
+        fs::remove_file(&zip)?;
+        deleted = true;
+    }
+    Ok(deleted)
+}
+
+/// 从用户上传的 zip 备份中恢复。
+///
+/// 把 zip 解压到 `state/backups/<新时间戳>/`（仅接受内部安全的相对路径，
+/// 拒绝 `../`、绝对路径、符号链接等），随后复用 `restore` 恢复数据库与 media。
+/// 返回新备份目录路径。
+pub fn restore_from_zip<R: Read + Send>(
+    zip_reader: R,
+    cfg: &Config,
+    db_conn: Option<&mut Connection>,
+) -> Result<PathBuf> {
+    use std::io::Cursor;
+
+    // 先把整个 zip 读进内存，便于多遍读取（解压 + 校验备份元信息）。
+    let mut buf = Vec::new();
+    let mut r = zip_reader;
+    r.read_to_end(&mut buf)?;
+
+    let mut archive = zip::ZipArchive::new(Cursor::new(&buf))
+        .map_err(|e| Error::other(format!("invalid zip archive: {e}")))?;
+
+    // 校验 zip 内部确实含备份数据库，避免恢复无意义内容。
+    let has_db = (0..archive.len()).any(|i| {
+        archive
+            .by_index(i)
+            .map(|f| f.name() == "reading-steiner.db")
+            .unwrap_or(false)
+    });
+    if !has_db {
+        return Err(Error::other(
+            "zip 中未找到 reading-steiner.db，不是有效的备份包",
+        ));
+    }
+
+    // 解压到新的时间戳目录（同秒冲突时追加序号避免覆盖已有备份）。
+    let state_dir = cfg.state_dir.clone();
+    let backups_dir = state_dir.join(BACKUP_SUBDIR);
+    let ts = Utc::now().format("%Y%m%d-%H%M%S").to_string();
+    let backup_dir = unique_backup_dir(&backups_dir, &ts);
+    fs::create_dir_all(&backup_dir)?;
+
+    for i in 0..archive.len() {
+        let mut f = archive
+            .by_index(i)
+            .map_err(|e| Error::other(format!("zip read error: {e}")))?;
+        let name = f.name().to_string();
+        // 空名或根目录标记条目（如 zip 库生成的 "/" 或 "" 目录项）可安全跳过。
+        if name.is_empty() || name == "/" || name == "\\" {
+            continue;
+        }
+        // 只接受安全相对路径：拒绝绝对路径、含 .. 段、目录穿越等。
+        if !is_safe_zip_path(&name) {
+            return Err(Error::other(format!("zip 内存在不安全路径: {name}")));
+        }
+        let out_path = backup_dir.join(&name);
+        if f.is_dir() {
+            fs::create_dir_all(&out_path)?;
+        } else {
+            if let Some(parent) = out_path.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            let mut out = fs::File::create(&out_path)?;
+            std::io::copy(&mut f, &mut out)?;
+        }
+    }
+
+    // 解压出的备份目录内的 db 需收敛为单文件（清理 WAL/shm）。
+    let db_path = backup_dir.join("reading-steiner.db");
+    if db_path.exists()
+        && let Ok(conn) = Connection::open(&db_path)
+    {
+        let _ = conn.pragma_update(None, "journal_mode", "DELETE");
+    }
+
+    // 复用 restore 把解压出的备份恢复到运行中状态。
+    // 注意：这里不在 DB 锁内重新打包 zip——打包由调用方在无锁场景
+    // （CLI 离线 / daemon 释放 DB 锁后）执行，避免大 media 备份压缩阻塞 daemon。
+    restore(&backup_dir, cfg, db_conn)?;
+
+    Ok(backup_dir)
+}
+
+/// 返回 `backups/<base>` 下不冲突的目录路径：若已存在则追加 `-1`、`-2`… 序号。
+/// 用于避免同秒多次恢复覆盖已有备份目录或 zip。
+fn unique_backup_dir(backups_dir: &Path, base: &str) -> PathBuf {
+    let mut candidate = backups_dir.join(base);
+    let mut n = 1u32;
+    while candidate.exists() {
+        candidate = backups_dir.join(format!("{base}-{n}"));
+        n += 1;
+    }
+    candidate
+}
+
+/// 判断 zip 内路径是否安全：仅允许相对路径、无 `..`、非绝对路径、非符号链接。
+fn is_safe_zip_path(name: &str) -> bool {
+    if name.starts_with('/') || name.starts_with('\\') {
+        return false;
+    }
+    let normalized = name.replace('\\', "/");
+    if normalized.is_empty() {
+        return false;
+    }
+    let mut depth = 0usize;
+    for seg in normalized.split('/') {
+        match seg {
+            "" | "." => continue,
+            ".." => return false,
+            _ => depth += 1,
+        }
+    }
+    depth > 0
 }
 
 /// 从指定备份恢复数据库与 media。
