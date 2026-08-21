@@ -655,14 +655,19 @@ fn next_schedule(
     };
 
     // —— cron 表达式驱动：按表达式精确调度。 ——
-    // 监控源未配置 cron 时使用全局默认 cron（default_cron）。
+    // 监控源未配置 cron 时使用全局默认 cron（default_cron）；
+    // default_cron 也为空时回退到每小时（与 effective_cron() 保持一致）。
     let expr = source
         .schedule
         .cron
         .as_deref()
         .map(|s| s.trim())
         .filter(|s| !s.is_empty())
-        .unwrap_or(default_cron);
+        .or_else(|| {
+            let d = default_cron.trim();
+            if d.is_empty() { None } else { Some(d) }
+        })
+        .unwrap_or("0 * * * *");
     let next_due_at = match next_cron_due(expr, tz, Utc::now()) {
         Ok(t) => t,
         Err(e) => {
