@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde::{Deserialize, Serialize};
 
@@ -287,16 +288,18 @@ pub fn generate_source_id(name: &str, url: &str) -> String {
     }
 }
 
-/// 把任意字符串转成小写短横线 slug（仅保留字母数字与 `-`）。
+/// 把任意字符串转成小写短横线 slug（保留 ASCII 字母数字、CJK 字符与 `-`）。
 fn slugify(s: &str) -> String {
     let mut out = String::new();
     for ch in s.chars() {
         if ch.is_ascii_alphanumeric() {
             out.push(ch.to_ascii_lowercase());
+        } else if is_cjk(ch) {
+            // 保留中日韩等表意文字，避免中文名称退化为不可读的随机 id。
+            out.push(ch);
         } else if ch.is_whitespace() || ch == '-' || ch == '_' {
             out.push('-');
         }
-        // 非 ASCII 字符（如中文）直接丢弃，避免 ID 出现不可读字符。
     }
     while out.contains("--") {
         out = out.replace("--", "-");
@@ -304,15 +307,27 @@ fn slugify(s: &str) -> String {
     out.trim_matches('-').to_string()
 }
 
-/// 生成一个 4 位十六进制随机后缀，用于避免 ID 冲突。
+/// 判断是否为中日韩统一表意文字及扩展区（含假名、谚文）。
+fn is_cjk(ch: char) -> bool {
+    matches!(ch,
+        '\u{4E00}'..='\u{9FFF}'   // CJK 统一表意文字基本区
+        | '\u{3400}'..='\u{4DBF}' // 扩展 A
+        | '\u{F900}'..='\u{FAFF}' // 兼容表意
+        | '\u{3040}'..='\u{30FF}' // 平假名 / 片假名
+        | '\u{AC00}'..='\u{D7AF}' // 谚文音节
+    )
+}
+
+static SEQ: AtomicU64 = AtomicU64::new(0);
+
+/// 生成一个 6 位十六进制随机后缀，用于避免 ID 冲突。
+/// 取 UUID v4 的随机熵并叠加进程内自增计数器，保证同纳秒内快速连续
+/// 添加监控源也不会撞出相同后缀，跨进程则依赖 UUID 的独立随机性。
 fn short_rand() -> String {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
-    // 用时间戳低位保证进程内与跨进程都足够随机（无需额外引入 rand 依赖）。
-    format!("{:04x}", (nanos % 0x10000) as u64)
+    let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+    let u = uuid::Uuid::new_v4();
+    let low = u.as_u128() as u64;
+    format!("{:06x}", (low ^ seq) & 0xffffff)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

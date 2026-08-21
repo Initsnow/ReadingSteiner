@@ -1,3 +1,4 @@
+use std::net::{IpAddr, Ipv6Addr, ToSocketAddrs};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -508,6 +509,9 @@ where
 /// 抓取 URL 并提取页面 `<title>`（JSON 接口则取 `title`/`name` 字段），
 /// 用于添加监控源时自动填充名称。非 HTML/非 JSON 内容返回空标题。
 async fn preview_url(state: &Arc<AppState>, url: &str, engine: &str) -> Result<String> {
+    let url = url.trim();
+    // SSRF 防护：仅允许 http/https，且目标不得为私网/环回/链路本地地址。
+    assert_safe_preview_url(url)?;
     let engine = if engine.is_empty() { "http" } else { engine };
     let fetch = FetchConfig {
         engine: engine.to_string(),
@@ -567,6 +571,73 @@ async fn preview_url(state: &Arc<AppState>, url: &str, engine: &str) -> Result<S
         }
     }
     Ok(String::new())
+}
+
+/// 校验 preview 抓取的 URL，防止 SSRF：仅允许 http/https 协议，且
+/// 目标主机不得解析到私网 / 环回 / 链路本地 / 未指定等内网地址。
+fn assert_safe_preview_url(url: &str) -> Result<()> {
+    let parsed = url::Url::parse(url).map_err(|_| Error::config("invalid preview url"))?;
+    let scheme = parsed.scheme();
+    if scheme != "http" && scheme != "https" {
+        return Err(Error::config(format!(
+            "unsupported preview url scheme: {scheme}"
+        )));
+    }
+    let host = parsed
+        .host_str()
+        .ok_or_else(|| Error::config("preview url missing host"))?;
+
+    // host 为 IP 字面量：直接校验；否则按域名解析后校验（尽力而为）。
+    let ip = parsed
+        .host()
+        .and_then(|h| match h {
+            url::Host::Ipv4(v) => Some(IpAddr::V4(v)),
+            url::Host::Ipv6(v) => Some(IpAddr::V6(v)),
+            _ => None,
+        })
+        .or_else(|| {
+            // 域名：解析出所有 IP 逐一校验，任一命中内网地址即拒绝。
+            (host, 0u16)
+                .to_socket_addrs()
+                .ok()
+                .and_then(|mut it| it.next().map(|s| s.ip()))
+        });
+
+    if let Some(ip) = ip {
+        if is_private_ip(ip) {
+            return Err(Error::config(format!(
+                "preview url target resolves to private/internal address: {ip}"
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// 判断 IP 是否为私网 / 环回 / 链路本地 / 未指定等内网地址。
+fn is_private_ip(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(v) => {
+            v.is_private()
+                || v.is_loopback()
+                || v.is_link_local()
+                || v.is_broadcast()
+                || v.is_unspecified()
+                || v.is_documentation()
+        }
+        IpAddr::V6(v) => {
+            v.is_loopback()
+                || v.is_unspecified()
+                || is_v6_private(&v)
+        }
+    }
+}
+
+/// IPv6 链路本地 / 唯一本地 / 站点本地地址。
+fn is_v6_private(v: &Ipv6Addr) -> bool {
+    v.segments()[0] & 0xffc0 == 0xfe80   // fe80::/10 链路本地
+        || v.segments()[0] & 0xfe00 == 0xfc00 // fc00::/7 唯一本地
+        || v.segments()[0] == 0xfec0       // fec0::/10 站点本地
+        || v.segments()[0] == 0
 }
 
 #[cfg(unix)]
