@@ -269,6 +269,52 @@ impl Default for SourceConfig {
     }
 }
 
+/// 自动生成监控源 ID：优先从名称生成可读 slug，否则从 URL 主机名生成，
+/// 再回退到随机短 id。保证结果非空、且适合作为标识符使用。
+pub fn generate_source_id(name: &str, url: &str) -> String {
+    let base = if !name.trim().is_empty() {
+        name.trim().to_string()
+    } else if let Ok(u) = url::Url::parse(url.trim()) {
+        u.host_str().unwrap_or("").to_string()
+    } else {
+        String::new()
+    };
+    let slug = slugify(&base);
+    if !slug.is_empty() {
+        format!("{}-{}", slug, short_rand())
+    } else {
+        format!("source-{}", short_rand())
+    }
+}
+
+/// 把任意字符串转成小写短横线 slug（仅保留字母数字与 `-`）。
+fn slugify(s: &str) -> String {
+    let mut out = String::new();
+    for ch in s.chars() {
+        if ch.is_ascii_alphanumeric() {
+            out.push(ch.to_ascii_lowercase());
+        } else if ch.is_whitespace() || ch == '-' || ch == '_' {
+            out.push('-');
+        }
+        // 非 ASCII 字符（如中文）直接丢弃，避免 ID 出现不可读字符。
+    }
+    while out.contains("--") {
+        out = out.replace("--", "-");
+    }
+    out.trim_matches('-').to_string()
+}
+
+/// 生成一个 4 位十六进制随机后缀，用于避免 ID 冲突。
+fn short_rand() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    // 用时间戳低位保证进程内与跨进程都足够随机（无需额外引入 rand 依赖）。
+    format!("{:04x}", (nanos % 0x10000) as u64)
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct FetchConfig {

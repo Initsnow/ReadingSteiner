@@ -6,8 +6,9 @@ use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tracing::{error, info};
 
-use crate::config::{EditableSettings, SourceConfig};
+use crate::config::{EditableSettings, FetchConfig, SourceConfig};
 use crate::error::{Error, Result};
+use crate::fetcher::{FetchSpec, create_fetcher};
 use crate::scheduler::{self, AppState};
 
 /// 单次批量操作允许的最大监控源数量，避免持锁期间长时间执行 upsert 阻塞其他请求。
@@ -48,6 +49,11 @@ pub enum ControlRequest {
     },
     TestSource {
         source_id: String,
+    },
+    /// 预览：抓取 URL 并返回页面标题，用于添加监控源时自动填充名称。
+    PreviewSource {
+        url: String,
+        engine: String,
     },
     Diff {
         event_id: i64,
@@ -190,14 +196,19 @@ pub(crate) async fn handle_request(state: &Arc<AppState>, req: ControlRequest) -
                 Err(e) => ControlResponse::err(e.to_string()),
             }
         }
-        ControlRequest::SourcesAdd { source } => {
+        ControlRequest::SourcesAdd { mut source } => {
             // 将存在性检查、DB 写入、内存 push 放进同一次 sources 锁内完成，
             // 避免并发添加相同 id 时因检查与 push 分处两次锁而产生重复条目（TOCTOU）。
             // 锁获取顺序统一为 db → sources，与调度器 run_daemon 保持一致以避免死锁。
             let db = state.db.lock().await;
             let mut sources = state.sources.lock().await;
-            if sources.iter().any(|s| s.id == source.id) {
-                return ControlResponse::err(format!("source {} already exists", source.id));
+            // ID 未填时自动生成：优先从名称生成可读 slug，否则回退到随机短 id。
+            if source.id.trim().is_empty() {
+                source.id = crate::config::generate_source_id(&source.name, &source.fetch.url);
+            }
+            let id = source.id.clone();
+            if sources.iter().any(|s| s.id == id) {
+                return ControlResponse::err(format!("source {} already exists", id));
             }
             if let Err(e) = db.upsert_source(source.as_ref()) {
                 return ControlResponse::err(e.to_string());
@@ -286,6 +297,12 @@ pub(crate) async fn handle_request(state: &Arc<AppState>, req: ControlRequest) -
             };
             match scheduler::test_source(state, &source).await {
                 Ok(v) => ControlResponse::ok(v),
+                Err(e) => ControlResponse::err(e.to_string()),
+            }
+        }
+        ControlRequest::PreviewSource { url, engine } => {
+            match preview_url(state, &url, &engine).await {
+                Ok(title) => ControlResponse::ok(json!({ "url": url, "title": title })),
                 Err(e) => ControlResponse::err(e.to_string()),
             }
         }
@@ -486,6 +503,70 @@ where
     writer.write_all(line.as_bytes()).await?;
     writer.write_all(b"\n").await?;
     Ok(())
+}
+
+/// 抓取 URL 并提取页面 `<title>`（JSON 接口则取 `title`/`name` 字段），
+/// 用于添加监控源时自动填充名称。非 HTML/非 JSON 内容返回空标题。
+async fn preview_url(state: &Arc<AppState>, url: &str, engine: &str) -> Result<String> {
+    let engine = if engine.is_empty() { "http" } else { engine };
+    let fetch = FetchConfig {
+        engine: engine.to_string(),
+        url: url.to_string(),
+        ..FetchConfig::default()
+    };
+    let fetcher = create_fetcher(engine, &state.cfg)?;
+    let doc = fetcher
+        .fetch(&FetchSpec {
+            fetch,
+            etag: None,
+            last_modified: None,
+            source_id: String::new(),
+        })
+        .await?;
+
+    // 提取标题：优先解析 HTML `<title>`，JSON 则取 title/name 字段。
+    let text = doc.text.trim();
+    if text.is_empty() {
+        return Ok(String::new());
+    }
+    let is_json = doc
+        .content_type
+        .as_deref()
+        .map(|ct| ct.contains("json"))
+        .unwrap_or(false);
+    if is_json {
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(text) {
+            for key in ["title", "name", "Title", "Name"] {
+                if let Some(s) = v.get(key).and_then(|x| x.as_str()) {
+                    let s = s.trim();
+                    if !s.is_empty() {
+                        return Ok(s.to_string());
+                    }
+                }
+            }
+        }
+        return Ok(String::new());
+    }
+
+    let doc_html = scraper::Html::parse_document(text);
+    if let Ok(sel) = scraper::Selector::parse("title") {
+        if let Some(el) = doc_html.select(&sel).next() {
+            let title = el.text().collect::<Vec<_>>().join(" ").trim().to_string();
+            if !title.is_empty() {
+                return Ok(title);
+            }
+        }
+    }
+    // 部分页面没有 `<title>`，回退到 `<h1>`。
+    if let Ok(sel) = scraper::Selector::parse("h1") {
+        if let Some(el) = doc_html.select(&sel).next() {
+            let title = el.text().collect::<Vec<_>>().join(" ").trim().to_string();
+            if !title.is_empty() {
+                return Ok(title);
+            }
+        }
+    }
+    Ok(String::new())
 }
 
 #[cfg(unix)]
