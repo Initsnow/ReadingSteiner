@@ -120,8 +120,27 @@ Web 控制台「设置」页提供一键备份、备份列表、**zip 下载**�
 - `daemon.interval_secs`——全局默认检查间隔（秒，默认 3600 = 1h）。
 - `daemon.jitter_secs`——全局默认随机抖动（秒，默认 60s），在基础间隔上叠加随机抖动（均匀分布在 ±jitter/2），避免大量源同一瞬间同时唤醒抢锁。
 - `schedule.interval_secs` / `schedule.jitter_secs`——单个监控源可**覆盖**全局值；留空（0）则使用全局默认。
+- `schedule.cron`——单个监控源可选使用 **cron 表达式**（标准 5 段：`分 时 日 月 周`）精确调度。设置后忽略 `interval_secs` / `jitter_secs`，按表达式在指定时刻触发。
 - `daemon.queue_capacity`——每个轮询 tick 最多入队的检测任务数（有界队列，超出部分下个 tick 再处理），防止突发积压。
 - `daemon.concurrency`——并发检测的最大任务数（信号量）。
+
+**cron 调度示例**（在源配置的 `schedule` 下）：
+
+```yaml
+schedule:
+  # 工作日每天 9:00 与 18:00 各检查一次
+  cron: "0 9,18 * * 1-5"
+  # interval_secs / jitter_secs 在 cron 模式下会被忽略
+```
+
+```yaml
+schedule:
+  # 每 15 分钟检查一次
+  cron: "*/15 * * * *"
+```
+
+支持的语法：`*`（任意）、`*/n`（步进）、`a,b,c`（列表）、`a-b`（范围）、`a-b/n`（范围步进）。
+周字段 `0-6` 对应周日到周六（0 或 7 均为周日）。时区跟随 `daemon.timezone`（缺省为系统本地时区）。
 
 **提取能力**：
 - 结构化条目（`extract.type: items`）的 JSONPath 选择器支持 `$.items[*].id`、`$.items[0].name` 等链式导航（`[*]` 通配、`[n]` 索引可出现在任意层级）。
