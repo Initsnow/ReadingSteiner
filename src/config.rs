@@ -91,10 +91,6 @@ pub struct DaemonConfig {
     /// 监控检查调度器使用的时区（IANA 名称，如 Asia/Shanghai、UTC）。
     /// 影响基于本地时间的显示与告警时间戳；调度仍以 UTC 内部计算，仅做展示/告警换算。
     pub timezone: String,
-    /// 全局默认检查间隔（秒）。监控源未单独覆盖时使用；默认 3600（1h）。
-    pub interval_secs: u64,
-    /// 全局默认检查间隔随机抖动秒数。监控源未单独覆盖时使用；默认 60s。
-    pub jitter_secs: u64,
 }
 
 impl DaemonConfig {
@@ -116,23 +112,7 @@ impl DaemonConfig {
         }
     }
 
-    /// 全局默认检查间隔（秒），0 时回退到 3600（1h）。
-    pub fn effective_interval(&self) -> u64 {
-        if self.interval_secs > 0 {
-            self.interval_secs
-        } else {
-            3600
-        }
-    }
     /// 全局默认随机抖动（秒），0 时回退到 60s。
-    pub fn effective_jitter(&self) -> u64 {
-        if self.jitter_secs > 0 {
-            self.jitter_secs
-        } else {
-            60
-        }
-    }
-
     pub fn effective_timezone(&self) -> String {
         if self.timezone.trim().is_empty() {
             system_local_timezone()
@@ -194,10 +174,6 @@ pub struct EditableSettings {
     pub failure_notify_threshold: u32,
     /// 调度器时区（IANA 名称）。
     pub timezone: String,
-    /// 全局默认检查间隔（秒），源未覆盖时使用。
-    pub interval_secs: u64,
-    /// 全局默认随机抖动（秒），源未覆盖时使用。
-    pub jitter_secs: u64,
     /// 通知模板。
     pub template: String,
     /// Telegram 默认 chat id。
@@ -216,8 +192,6 @@ impl EditableSettings {
             history_limit_per_source: cfg.daemon.history_limit_per_source,
             failure_notify_threshold: cfg.daemon.failure_notify_threshold,
             timezone: cfg.daemon.timezone.clone(),
-            interval_secs: cfg.daemon.effective_interval(),
-            jitter_secs: cfg.daemon.effective_jitter(),
             template: cfg.telegram.template.clone(),
             default_chat_id: cfg.telegram.default_chat_id.clone(),
             max_images_per_event: cfg.telegram.max_images_per_event,
@@ -233,8 +207,6 @@ impl EditableSettings {
         cfg.daemon.history_limit_per_source = self.history_limit_per_source;
         cfg.daemon.failure_notify_threshold = self.failure_notify_threshold;
         cfg.daemon.timezone = self.timezone.clone();
-        cfg.daemon.interval_secs = self.interval_secs;
-        cfg.daemon.jitter_secs = self.jitter_secs;
         cfg.telegram.template = self.template.clone();
         cfg.telegram.default_chat_id = self.default_chat_id.clone();
         cfg.telegram.max_images_per_event = self.max_images_per_event;
@@ -336,39 +308,14 @@ pub struct WaitConfig {
     pub timeout: Option<u64>,
 }
 
-/// 调度配置。`interval_secs` / `jitter_secs` 可选：留空（None）时使用全局设置
-/// （`DaemonConfig.interval_secs` / `DaemonConfig.jitter_secs`）中的值。
-/// 若设置了 `cron`，则按 cron 表达式调度，`interval_secs` / `jitter_secs` 被忽略。
+/// 调度配置。仅通过 `cron` 表达式精确调度（标准 5 段：`分 时 日 月 周`）。
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(default)]
 pub struct ScheduleConfig {
-    /// 检查间隔秒数，None 表示使用全局默认（默认 3600s = 1h）。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub interval_secs: Option<u64>,
-    /// 检查间隔随机抖动秒数，None 表示使用全局默认（默认 60s）。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub jitter_secs: Option<u64>,
-    /// 可选 cron 表达式（标准 5 段：`分 时 日 月 周`）。
-    /// 设置后按 cron 精确调度，忽略 interval_secs / jitter_secs。
+    /// cron 表达式（标准 5 段：`分 时 日 月 周`）。
     /// 例：`*/15 * * * *`（每 15 分钟）、`0 9,18 * * 1-5`（工作日 9:00/18:00）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cron: Option<String>,
-}
-
-impl ScheduleConfig {
-    /// 该源是否使用 cron 精确调度（而非固定间隔）。
-    pub fn uses_cron(&self) -> bool {
-        self.cron.as_deref().is_some_and(|c| !c.trim().is_empty())
-    }
-    /// 返回该源的有效检查间隔（秒）：优先用源自身的覆盖值，否则用全局默认。
-    /// 仅在非 cron 模式下有意义。
-    pub fn effective_interval(&self, global: u64) -> u64 {
-        self.interval_secs.filter(|&v| v > 0).unwrap_or(global)
-    }
-    /// 返回该源的有效随机抖动（秒）。
-    pub fn effective_jitter(&self, global: u64) -> u64 {
-        self.jitter_secs.unwrap_or(global)
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -465,10 +412,6 @@ pub struct RuntimeConfig {
     pub history_limit_per_source: usize,
     pub failure_notify_threshold: u32,
     pub timezone: String,
-    /// 全局默认检查间隔（秒，已应用有效值）。
-    pub interval_secs: u64,
-    /// 全局默认随机抖动（秒，已应用有效值）。
-    pub jitter_secs: u64,
     pub template: String,
 }
 
@@ -493,26 +436,7 @@ impl RuntimeConfig {
             history_limit_per_source: cfg.daemon.history_limit_per_source,
             failure_notify_threshold: cfg.daemon.failure_notify_threshold,
             timezone: cfg.daemon.effective_timezone(),
-            interval_secs: cfg.daemon.effective_interval(),
-            jitter_secs: cfg.daemon.effective_jitter(),
             template: cfg.telegram.event_template(),
-        }
-    }
-
-    /// 全局默认检查间隔（秒）。
-    pub fn interval_secs(&self) -> u64 {
-        if self.interval_secs > 0 {
-            self.interval_secs
-        } else {
-            3600
-        }
-    }
-    /// 全局默认随机抖动（秒）。
-    pub fn jitter_secs(&self) -> u64 {
-        if self.jitter_secs > 0 {
-            self.jitter_secs
-        } else {
-            60
         }
     }
 }

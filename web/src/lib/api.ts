@@ -29,9 +29,7 @@ export interface SourceConfig {
     screenshot?: boolean
   }
   schedule: {
-    interval_secs?: number
-    jitter_secs?: number
-    /** 可选 cron 表达式（标准 5 段），设置后优先于 interval_secs / jitter_secs。 */
+    /** cron 表达式（标准 5 段：分 时 日 月 周）。 */
     cron?: string
   }
   // 内容提取：决定「把抓到的内容变成什么拿来比对」
@@ -113,8 +111,6 @@ export interface EditableSettings {
   history_limit_per_source: number
   failure_notify_threshold: number
   timezone: string
-  interval_secs: number
-  jitter_secs: number
   template: string
   default_chat_id: string
   max_images_per_event: number
