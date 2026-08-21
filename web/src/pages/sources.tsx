@@ -21,13 +21,7 @@ import {
 } from "@/lib/api"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
-import {
-  Card,
-  CardContent,
-  CardDescription,
-  CardHeader,
-  CardTitle,
-} from "@/components/ui/card"
+import { Card, CardContent, CardDescription } from "@/components/ui/card"
 
 // ---- editable field model for the add/edit form ----
 interface FormState {
@@ -61,9 +55,9 @@ function emptyForm(): FormState {
     engine: "http",
     method: "GET",
     cron: "",
-    timeout_secs: 30,
+    timeout_secs: 0,
     tags: "",
-    extractType: "text",
+    extractType: "items",
     selectorKind: "css",
     selector: "",
     fieldsJson: "[]",
@@ -116,7 +110,7 @@ function sourceToForm(s: SourceConfig): FormState {
     engine: s.fetch.engine,
     method: s.fetch.method,
     cron: s.schedule.cron ?? "",
-    timeout_secs: s.fetch.timeout_secs ?? 30,
+    timeout_secs: s.fetch.timeout_secs ?? 0,
     tags: (s.tags ?? []).join(","),
     ...ex,
   }
@@ -169,7 +163,8 @@ function formToSource(f: FormState, existing?: SourceConfig): SourceConfig {
       engine: f.engine,
       url: f.url.trim(),
       method: f.method || "GET",
-      timeout_secs: f.timeout_secs || 30,
+      // 0 表示未单独设置，跟随全局默认（后端 effective_timeout 会兜底）。
+      timeout_secs: f.timeout_secs > 0 ? f.timeout_secs : 0,
     },
     schedule: {
       ...base.schedule,
@@ -220,6 +215,7 @@ export function SourcesPage() {
   const [form, setForm] = useState<FormState>(emptyForm())
   const [saving, setSaving] = useState(false)
   const [formError, setFormError] = useState<string | null>(null)
+  const [previewingTitle, setPreviewingTitle] = useState(false)
 
   // test result modal state
   const [testResult, setTestResult] = useState<TestSourceResult | null>(null)
@@ -268,9 +264,28 @@ export function SourcesPage() {
     setModalOpen(true)
   }
 
+  // 抓取 URL 的页面标题，自动填充名称。
+  async function fetchTitle() {
+    const url = form.url.trim()
+    if (!url) return
+    setPreviewingTitle(true)
+    try {
+      const res = await api.previewSource(url, form.engine)
+      if (res.title) {
+        setForm((prev) => ({ ...prev, name: res.title }))
+      } else {
+        setFormError("未能自动获取标题（页面无 title 或非 HTML/JSON），请手动填写名称")
+      }
+    } catch {
+      setFormError("获取标题失败，请检查 URL 或手动填写名称")
+    } finally {
+      setPreviewingTitle(false)
+    }
+  }
+
   async function handleSave() {
-    if (!form.id.trim() || !form.url.trim()) {
-      setFormError("id 和 url 为必填项")
+    if (!form.url.trim()) {
+      setFormError("url 为必填项")
       return
     }
     if (form.extractType === "items" && !form.selector.trim()) {
@@ -470,106 +485,92 @@ export function SourcesPage() {
             <Card
               key={s.id}
               className={
-                selected.has(s.id)
-                  ? "ring-2 ring-primary/60"
-                  : undefined
+                selected.has(s.id) ? "ring-2 ring-primary/60" : undefined
               }
             >
-              <CardHeader className="flex flex-row items-start justify-between space-y-0">
-                <div className="flex items-start gap-3">
-                  <input
-                    type="checkbox"
-                    className="mt-1 h-4 w-4 accent-primary"
-                    checked={selected.has(s.id)}
-                    onChange={() => toggleSelect(s.id)}
-                  />
-                  <div>
-                    <CardTitle className="flex items-center gap-2">
+              <CardContent className="flex flex-wrap items-center gap-x-3 gap-y-2 px-4 py-3">
+                <input
+                  type="checkbox"
+                  className="h-4 w-4 shrink-0 accent-primary"
+                  checked={selected.has(s.id)}
+                  onChange={() => toggleSelect(s.id)}
+                />
+                <div className="min-w-0 flex-1">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="truncate text-sm font-medium">
                       {s.name || s.id}
-                      <Badge variant={s.enabled ? "success" : "secondary"}>
-                        {s.enabled ? "监控中" : "已暂停监控"}
-                      </Badge>
-                      <Badge
-                        variant={
-                          s.notify_enabled ? "success" : "secondary"
-                        }
-                      >
-                        {s.notify_enabled ? "通知开启" : "已暂停通知"}
-                      </Badge>
-                    </CardTitle>
-                    <CardDescription className="mt-1 break-all">
-                      {s.fetch.url}
-                    </CardDescription>
-                  </div>
-                </div>
-              </CardHeader>
-              <CardContent>
-                <div className="flex flex-wrap items-center gap-4 text-xs text-muted-foreground">
-                  <span>engine: {s.fetch.engine}</span>
-                  <span>
-                    {s.schedule.cron?.trim()
-                      ? `cron: ${s.schedule.cron}`
-                      : "cron: 未设置"}
-                  </span>
-                  <span>
-                    extract:{" "}
-                    {s.extract?.type === "items"
-                      ? `${s.extract.selector.kind} (${s.extract.selector.kind === "css" ? s.extract.selector.selector : s.extract.selector.path})`
-                      : "整页文本"}
-                  </span>
-                </div>
-                {s.tags.length > 0 && (
-                  <div className="mt-3 flex flex-wrap gap-1">
+                    </span>
+                    <Badge
+                      variant={s.enabled ? "success" : "secondary"}
+                      className="px-1.5 py-0 text-[10px]"
+                    >
+                      {s.enabled ? "监控中" : "已暂停监控"}
+                    </Badge>
+                    <Badge
+                      variant={s.notify_enabled ? "success" : "secondary"}
+                      className="px-1.5 py-0 text-[10px]"
+                    >
+                      {s.notify_enabled ? "通知开" : "已暂停通知"}
+                    </Badge>
                     {s.tags.map((t) => (
-                      <Badge key={t} variant="outline">
+                      <Badge
+                        key={t}
+                        variant="outline"
+                        className="px-1.5 py-0 text-[10px]"
+                      >
                         {t}
                       </Badge>
                     ))}
                   </div>
-                )}
-                <div className="mt-4 flex flex-wrap gap-2">
+                  <div className="mt-0.5 truncate text-xs text-muted-foreground">
+                    {s.fetch.url}
+                  </div>
+                </div>
+                <div className="flex shrink-0 items-center gap-1">
                   <Button
                     size="sm"
-                    variant="outline"
+                    variant="ghost"
+                    className="h-7 px-2 text-xs"
                     disabled={busyId === s.id}
                     onClick={() => runCheck(s.id)}
+                    title="立即检测"
                   >
                     {busyId === s.id ? (
-                      <Loader2 className="h-4 w-4 animate-spin" />
+                      <Loader2 className="h-3.5 w-3.5 animate-spin" />
                     ) : (
-                      <Play className="h-4 w-4" />
+                      <Play className="h-3.5 w-3.5" />
                     )}
-                    立即检测
                   </Button>
                   <Button
                     size="sm"
-                    variant="outline"
-                    disabled={busyId === s.id}
+                    variant="ghost"
+                    className="h-7 px-2 text-xs"
+                    disabled={testingId === s.id}
                     onClick={() => handleTest(s)}
+                    title="测试"
                   >
                     {testingId === s.id ? (
-                      <Loader2 className="h-4 w-4 animate-spin" />
+                      <Loader2 className="h-3.5 w-3.5 animate-spin" />
                     ) : (
-                      <TestTube2 className="h-4 w-4" />
+                      <TestTube2 className="h-3.5 w-3.5" />
                     )}
-                    测试
                   </Button>
-                  <div className="flex-1" />
                   <Button
                     size="sm"
                     variant="ghost"
+                    className="h-7 px-2 text-xs"
                     onClick={() => openEdit(s)}
                   >
-                    <Pencil className="h-4 w-4" /> 编辑
+                    <Pencil className="h-3.5 w-3.5" /> 编辑
                   </Button>
                   <Button
                     size="sm"
                     variant="ghost"
-                    className="text-destructive hover:text-destructive"
+                    className="h-7 px-2 text-xs text-destructive hover:text-destructive"
                     disabled={busyId === s.id}
                     onClick={() => handleDelete(s)}
                   >
-                    <Trash2 className="h-4 w-4" /> 删除
+                    <Trash2 className="h-3.5 w-3.5" /> 删除
                   </Button>
                 </div>
               </CardContent>
@@ -598,24 +599,6 @@ export function SourcesPage() {
             )}
 
             <div className="mt-4 grid grid-cols-2 gap-4">
-              <Field label="ID（唯一标识）" className="col-span-1">
-                <input
-                  className={inputCls}
-                  value={form.id}
-                  disabled={!!editing}
-                  placeholder="e.g. shop-list"
-                  onChange={(e) => setForm({ ...form, id: e.target.value })}
-                />
-              </Field>
-              <Field label="名称" className="col-span-1">
-                <input
-                  className={inputCls}
-                  value={form.name}
-                  placeholder="e.g. Shop List"
-                  onChange={(e) => setForm({ ...form, name: e.target.value })}
-                />
-              </Field>
-
               <Field label="URL" className="col-span-2">
                 <input
                   className={inputCls}
@@ -624,6 +607,28 @@ export function SourcesPage() {
                   onChange={(e) => setForm({ ...form, url: e.target.value })}
                 />
               </Field>
+
+              <Field label="名称" className="col-span-1">
+                <input
+                  className={inputCls}
+                  value={form.name}
+                  placeholder="留空自动获取网页标题"
+                  onChange={(e) => setForm({ ...form, name: e.target.value })}
+                />
+              </Field>
+              <div className="col-span-1 flex items-end">
+                <Button
+                  variant="outline"
+                  className="w-full"
+                  disabled={!form.url.trim() || previewingTitle}
+                  onClick={fetchTitle}
+                >
+                  {previewingTitle && (
+                    <Loader2 className="h-4 w-4 animate-spin" />
+                  )}
+                  获取标题
+                </Button>
+              </div>
 
               <div className="col-span-2 flex flex-wrap items-center gap-6 rounded-md border bg-muted/30 p-3">
                 <label className="flex cursor-pointer items-center gap-2 text-sm">
@@ -635,12 +640,7 @@ export function SourcesPage() {
                       setForm({ ...form, enabled: e.target.checked })
                     }
                   />
-                  <span>
-                    启用监控
-                    <span className="ml-1 text-xs text-muted-foreground">
-                      （关闭后该源不再被调度检查）
-                    </span>
-                  </span>
+                  <span>启用监控</span>
                 </label>
                 <label className="flex cursor-pointer items-center gap-2 text-sm">
                   <input
@@ -651,12 +651,7 @@ export function SourcesPage() {
                       setForm({ ...form, notify_enabled: e.target.checked })
                     }
                   />
-                  <span>
-                    启用通知
-                    <span className="ml-1 text-xs text-muted-foreground">
-                      （关闭后仍监控，但变更不推送 Telegram）
-                    </span>
-                  </span>
+                  <span>启用通知</span>
                 </label>
               </div>
 
@@ -707,8 +702,8 @@ export function SourcesPage() {
                     })
                   }
                 >
-                  <option value="text">整页文本（监控整页内容变化）</option>
-                  <option value="items">结构化提取（按选择器提取条目）</option>
+                  <option value="text">整页文本</option>
+                  <option value="items">结构化提取</option>
                 </select>
               </Field>
 
@@ -727,8 +722,8 @@ export function SourcesPage() {
                           })
                         }
                       >
-                        <option value="css">CSS（HTML 页面）</option>
-                        <option value="json_path">JSONPath（JSON 接口）</option>
+                        <option value="css">CSS</option>
+                        <option value="json_path">JSONPath</option>
                       </select>
                     </Field>
                     <Field
@@ -763,9 +758,6 @@ export function SourcesPage() {
                       }
                     />
                   </Field>
-                  <p className="text-xs text-muted-foreground">
-                    不填字段则提取每个条目的全部内容。变更检测会自动对比条目的新增 / 更新 / 移除，无需配置比较模式或稳定字段。
-                  </p>
                 </div>
               )}
 
@@ -790,12 +782,10 @@ export function SourcesPage() {
                       >
                         <option value="none">不附带图片</option>
                         {form.extractType === "items" && (
-                          <option value="items">条目的图片（结构化提取）</option>
+                          <option value="items">条目的图片</option>
                         )}
                         {form.extractType === "items" && (
-                          <option value="changed">
-                            变更元素的图片（只发有变化的条目相关 img）
-                          </option>
+                          <option value="changed">变更元素的图片</option>
                         )}
                         <option value="css">按 CSS 选择器</option>
                       </select>
@@ -813,21 +803,43 @@ export function SourcesPage() {
                       </Field>
                     )}
                   </div>
-                  <p className="mt-2 text-xs text-muted-foreground">
-                    页面变化时，选中的图片会随 Telegram 通知一并发送（最多受 telegram.max_images_per_event 限制）。CSS 选择器可匹配 &lt;img&gt; 或其容器元素。
-                  </p>
                 </div>
               </Field>
 
-              <Field label="超时（秒）">
-                <input
-                  type="number"
-                  className={inputCls}
-                  value={form.timeout_secs}
-                  onChange={(e) =>
-                    setForm({ ...form, timeout_secs: Number(e.target.value) })
-                  }
-                />
+              <Field label="超时" className="col-span-1">
+                <div className="flex items-center gap-3 rounded-md border bg-muted/30 px-3 py-2">
+                  <label className="flex cursor-pointer items-center gap-2 text-sm">
+                    <input
+                      type="checkbox"
+                      className="h-4 w-4 accent-primary"
+                      checked={form.timeout_secs === 0}
+                      onChange={(e) =>
+                        setForm({
+                          ...form,
+                          timeout_secs: e.target.checked ? 0 : 30,
+                        })
+                      }
+                    />
+                    跟随全局
+                  </label>
+                  {form.timeout_secs !== 0 && (
+                    <span className="flex items-center gap-1">
+                      <input
+                        type="number"
+                        min={1}
+                        className="w-20 rounded-md border border-input bg-background px-2 py-1 text-sm"
+                        value={form.timeout_secs}
+                        onChange={(e) =>
+                          setForm({
+                            ...form,
+                            timeout_secs: Number(e.target.value),
+                          })
+                        }
+                      />
+                      <span className="text-xs text-muted-foreground">秒</span>
+                    </span>
+                  )}
+                </div>
               </Field>
               <Field label="标签（逗号分隔）">
                 <input
