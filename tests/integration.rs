@@ -3,12 +3,12 @@ use std::collections::HashMap;
 use chrono::Utc;
 use reading_steiner::config::{
     CamofoxConfig, ChangeType, Config, ExtractConfig, FetchConfig, ItemField, ItemSelector,
-    SourceConfig,
+    SourceConfig, resolve_effective_source,
 };
 use reading_steiner::db::Db;
 use reading_steiner::differ;
 use reading_steiner::fetcher::FetchSpec;
-use reading_steiner::models::{Item, SnapshotRecord};
+use reading_steiner::models::{Item, SnapshotRecord, TagConfig};
 use reading_steiner::pipeline;
 
 #[test]
@@ -586,4 +586,124 @@ fn test_backup_delete_and_zip_restore_roundtrip() {
     assert!(restored_zip.exists());
     assert!(reading_steiner::backup::backup_zip_path(&restore_state_dir, &restored_name).is_some());
     let _ = backup_dir; // zip 已生成，目录保留
+}
+
+#[test]
+fn test_resolve_effective_source_with_groups() {
+    // 基础源：跟随分组，带标签 news。
+    let mut source = SourceConfig {
+        id: "s1".into(),
+        name: "s1".into(),
+        enabled: true,
+        notify_enabled: true,
+        follow_group: true,
+        tags: vec!["news".into()],
+        ..SourceConfig::default()
+    };
+
+    // 未配置分组时，使用自身设置。
+    let tags = vec![];
+    assert_eq!(
+        resolve_effective_source(&source, &tags, 100),
+        (true, true, 100)
+    );
+
+    // 分组开启监控/通知，继承分组设置。
+    let group_tags = vec![TagConfig {
+        name: "news".into(),
+        enabled: true,
+        notify_enabled: true,
+        history_limit: 50,
+    }];
+    assert_eq!(
+        resolve_effective_source(&source, &group_tags, 100),
+        (true, true, 50)
+    );
+
+    // 分组关闭监控，则源被暂停监控。
+    let group_tags_off = vec![TagConfig {
+        name: "news".into(),
+        enabled: false,
+        notify_enabled: true,
+        history_limit: 0,
+    }];
+    assert_eq!(
+        resolve_effective_source(&source, &group_tags_off, 100),
+        (false, true, 100)
+    );
+
+    // 分组关闭通知。
+    let group_tags_notify_off = vec![TagConfig {
+        name: "news".into(),
+        enabled: true,
+        notify_enabled: false,
+        history_limit: 0,
+    }];
+    assert_eq!(
+        resolve_effective_source(&source, &group_tags_notify_off, 100),
+        (true, false, 100)
+    );
+
+    // 关闭“跟随分组”后使用自身设置（自覆盖）。
+    source.follow_group = false;
+    assert_eq!(
+        resolve_effective_source(&source, &group_tags, 100),
+        (true, true, 100)
+    );
+    source.follow_group = true;
+
+    // 多个分组取保守策略：任一分组关闭则关闭，历史取最小值。
+    source.tags = vec!["news".into(), "alert".into()];
+    let multi = vec![
+        TagConfig {
+            name: "news".into(),
+            enabled: true,
+            notify_enabled: true,
+            history_limit: 50,
+        },
+        TagConfig {
+            name: "alert".into(),
+            enabled: false,
+            notify_enabled: false,
+            history_limit: 20,
+        },
+    ];
+    assert_eq!(resolve_effective_source(&source, &multi, 100), (false, false, 20));
+}
+
+#[test]
+fn test_tag_db_roundtrip() {
+    let db = Db::open_in_memory().unwrap();
+    // 初始为空。
+    assert!(db.list_tags().unwrap().is_empty());
+    assert!(db.get_tag("news").unwrap().is_none());
+
+    // 新增。
+    let tag = TagConfig {
+        name: "news".into(),
+        enabled: true,
+        notify_enabled: false,
+        history_limit: 30,
+    };
+    db.upsert_tag(&tag).unwrap();
+    assert_eq!(db.list_tags().unwrap().len(), 1);
+    let loaded = db.get_tag("news").unwrap().unwrap();
+    assert_eq!(loaded.notify_enabled, false);
+    assert_eq!(loaded.history_limit, 30);
+
+    // 更新。
+    db.upsert_tag(&TagConfig {
+        name: "news".into(),
+        enabled: false,
+        notify_enabled: true,
+        history_limit: 0,
+    })
+    .unwrap();
+    let loaded = db.get_tag("news").unwrap().unwrap();
+    assert_eq!(loaded.enabled, false);
+    assert_eq!(loaded.history_limit, 0);
+
+    // 删除。
+    assert_eq!(db.delete_tag("news").unwrap(), 1);
+    assert!(db.get_tag("news").unwrap().is_none());
 }

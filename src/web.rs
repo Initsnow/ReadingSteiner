@@ -19,6 +19,7 @@ use tracing::info;
 
 use crate::config::{EditableSettings, SourceConfig};
 use crate::control::{self, ControlRequest, ControlResponse};
+use crate::models::TagConfig;
 use crate::error::Result;
 use crate::scheduler::AppState;
 
@@ -63,6 +64,8 @@ fn build_router(state: Arc<AppState>) -> Router {
         .route("/events/{id}/read", post(api_mark_event_read))
         .route("/events/{id}/screenshot", get(api_event_screenshot))
         .route("/sources/{id}/read", post(api_mark_source_read))
+        .route("/tags", get(api_list_tags))
+        .route("/tags/{name}", put(api_update_tag).delete(api_delete_tag))
         .route("/check", post(api_check))
         .route("/history", get(api_history))
         .route("/notify-test", post(api_notify_test))
@@ -261,6 +264,34 @@ async fn api_mark_source_read(
         control::handle_request(&state, ControlRequest::MarkSourceRead { source_id: id }).await,
     )
     .await
+}
+
+/// 列出全部分组（标签）设置。
+async fn api_list_tags(State(state): State<Arc<AppState>>) -> (StatusCode, Json<Value>) {
+    json_response(control::handle_request(&state, ControlRequest::ListTags).await).await
+}
+
+/// 新增 / 更新一个分组（标签）设置。
+async fn api_update_tag(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+    Json(tag): Json<TagConfig>,
+) -> (StatusCode, Json<Value>) {
+    // URL 路径中的分组名权威，避免重命名造成分组漂移。
+    let mut tag = tag;
+    tag.name = name;
+    json_response(
+        control::handle_request(&state, ControlRequest::UpdateTag { tag: Box::new(tag) }).await,
+    )
+    .await
+}
+
+/// 删除一个分组（标签）设置。
+async fn api_delete_tag(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+) -> (StatusCode, Json<Value>) {
+    json_response(control::handle_request(&state, ControlRequest::DeleteTag { name }).await).await
 }
 
 /// 获取变更事件的 camofox 截图（二进制图片流）。

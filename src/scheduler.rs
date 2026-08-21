@@ -137,10 +137,14 @@ pub async fn run_daemon(state: Arc<AppState>) -> Result<()> {
         let due = {
             let db = state.db.lock().await;
             let now = Utc::now();
+            let tags = db.list_tags().unwrap_or_default();
             let mut due: Vec<SourceConfig> = Vec::new();
             let sources = state.sources.lock().await;
             for source in sources.iter() {
-                if !source.enabled {
+                // 解析分组继承后的生效监控开关（分组关闭或自身关闭则跳过调度）。
+                let (enabled, _, _) =
+                    crate::config::resolve_effective_source(source, &tags, 0);
+                if !enabled {
                     continue;
                 }
                 let sched = db.get_schedule_state(&source.id)?.unwrap_or(ScheduleState {
@@ -217,12 +221,22 @@ pub async fn run_daemon(state: Arc<AppState>) -> Result<()> {
                 warn!(error = %e, "outbox processing failed");
             }
             // 按每个监控源保留条数限制清理历史（事件与快照）。
-            let limit = state.runtime.history_limit_per_source;
-            if limit > 0
-                && let Err(e) = db.lock().await.prune_history(limit)
-            {
-                warn!(error = %e, "history pruning failed");
+            // 解析分组继承后的生效保留条数：若分组配置了更严格的保留策略，
+            // 则优先按分组的限制清理，否则使用全局限制。
+            let db = db.lock().await;
+            let tags = db.list_tags().unwrap_or_default();
+            let global_limit = state.runtime.history_limit_per_source;
+            let sources = state.sources.lock().await;
+            for source in sources.iter() {
+                let (_, _, history) =
+                    crate::config::resolve_effective_source(source, &tags, global_limit);
+                if history > 0
+                    && let Err(e) = db.prune_history_for_source(&source.id, history)
+                {
+                    warn!(source = %source.id, error = %e, "history pruning failed");
+                }
             }
+            drop(db);
         }
 
         tokio::time::sleep(Duration::from_millis(500)).await;
@@ -465,8 +479,14 @@ pub async fn check_source(state: &Arc<AppState>, source_id: &str) -> Result<()> 
                 }
             }
         }
-        // 仅当该源开启了通知（notify_enabled）且已配置 notifier 与默认 chat 时才排队发送。
-        if source.notify_enabled && state.notifier.is_some() {
+        // 仅当该源开启了通知（解析分组继承后的生效通知开关）且已配置 notifier
+        // 与默认 chat 时才排队发送。
+        let (_, effective_notify, _) = {
+            let db = state.db.lock().await;
+            let tags = db.list_tags().unwrap_or_default();
+            crate::config::resolve_effective_source(&source, &tags, 0)
+        };
+        if effective_notify && state.notifier.is_some() {
             let chat_id = if state.cfg.telegram.default_chat_id.is_empty() {
                 String::new()
             } else {
