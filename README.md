@@ -64,6 +64,8 @@ reading-steiner settings             # 查看全局设置
 reading-steiner backup               # 备份（db + media + config，并打包 zip）
 reading-steiner backups              # 列出已有备份
 reading-steiner restore <name>       # 从备份恢复（在线，无需停止 daemon）
+reading-steiner backup-delete <name> # 删除一个备份（目录 + zip）
+reading-steiner restore-from-zip --file x.zip  # 从上传/本地的 zip 备份恢复
 ```
 
 ### 全局设置（Web「设置」页 / `reading-steiner settings`）
@@ -90,10 +92,23 @@ reading-steiner backup --config config.local.yaml
 reading-steiner backups
 # 恢复（在线，无需停止 daemon；daemon 未运行时自动回退到离线恢复）
 reading-steiner restore <备份名> --config config.local.yaml
+# 删除备份
+reading-steiner backup-delete <备份名> --config config.local.yaml
+# 从本地/上传的 zip 备份包恢复（daemon 在线时自动走在线恢复）
+reading-steiner restore-from-zip --file backup.zip --config config.local.yaml
 ```
 
 备份保存在 `state/backups/<时间戳>/`，并打包为同名 `<时间戳>.zip` 供下载。
-Web 控制台「设置」页提供一键备份、备份列表、**zip 下载**与**在线恢复**（无需停止 daemon）。
+Web 控制台「设置」页提供一键备份、备份列表、**zip 下载**、**删除备份**与**在线恢复**（无需停止 daemon）。
+
+#### 从 zip 备份包恢复 / 跨机器迁移
+
+备份 zip 可下载后带到另一台机器：
+
+- **Web 控制台**：「设置 → 备份与恢复」点击「上传 zip 恢复」，选择 `.zip` 备份包即在线恢复。
+- **CLI**：`reading-steiner restore-from-zip --file backup.zip`。
+
+上传的 zip 会被解压到 `state/backups/<新时间戳>/`（仅接受安全相对路径，拒绝路径穿越），然后在线恢复数据库与 media。支持整机迁移或灾难恢复。
 
 ## 配置
 

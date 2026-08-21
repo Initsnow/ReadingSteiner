@@ -202,4 +202,26 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ name }),
     }),
+
+  deleteBackup: (name: string) =>
+    request<{ deleted: boolean; name: string }>(
+      `/api/backups/${encodeURIComponent(name)}`,
+      { method: "DELETE" },
+    ),
+
+  // 上传 zip 备份并恢复。multipart 字段名为 file，不能走默认 JSON 头。
+  restoreFromZip: async (file: File) => {
+    const form = new FormData()
+    form.append("file", file)
+    const res = await fetch("/api/restore/upload", { method: "POST", body: form })
+    const body = (await res.json()) as ApiEnvelope<{
+      restored: boolean
+      name: string
+      error?: string
+    }>
+    if (!res.ok || !body.ok) {
+      throw new Error(body.error ?? `HTTP ${res.status}`)
+    }
+    return body.result
+  },
 }

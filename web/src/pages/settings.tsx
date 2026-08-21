@@ -1,10 +1,12 @@
-import { useEffect, useState } from "react"
+import { useEffect, useRef, useState } from "react"
 import {
   Loader2,
   RefreshCw,
   Save,
   Archive,
   History,
+  Trash2,
+  Upload,
   Clock,
   Server,
 } from "lucide-react"
@@ -131,6 +133,41 @@ export function SettingsPage() {
       } else {
         setNotice(`已从备份 ${name} 在线恢复。`)
       }
+    } catch (e) {
+      setError((e as Error).message)
+    }
+  }
+
+  async function handleDeleteBackup(name: string) {
+    setNotice(null)
+    setError(null)
+    if (!window.confirm(`确定要删除备份 ${name} 吗？此操作不可撤销。`)) return
+    try {
+      await api.deleteBackup(name)
+      setNotice(`已删除备份 ${name}。`)
+      loadBackups()
+    } catch (e) {
+      setError((e as Error).message)
+    }
+  }
+
+  const fileInputRef = useRef<HTMLInputElement>(null)
+
+  async function handleUploadZip(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0]
+    e.target.value = "" // 允许重复选择同一文件
+    if (!file) return
+    setNotice(null)
+    setError(null)
+    if (!file.name.toLowerCase().endsWith(".zip")) {
+      setError("请选择 .zip 备份包文件")
+      return
+    }
+    if (!window.confirm(`确定要从上传的 zip 备份（${file.name}）恢复吗？当前数据库与 media 将被覆盖。`)) return
+    try {
+      await api.restoreFromZip(file)
+      setNotice("已从上传的 zip 备份在线恢复。")
+      loadBackups()
     } catch (e) {
       setError((e as Error).message)
     }
@@ -363,9 +400,22 @@ export function SettingsPage() {
             <Button variant="outline" onClick={handleBackup}>
               <Archive className="h-4 w-4" /> 立即备份
             </Button>
+            <Button
+              variant="outline"
+              onClick={() => fileInputRef.current?.click()}
+            >
+              <Upload className="h-4 w-4" /> 上传 zip 恢复
+            </Button>
             <Button variant="ghost" size="sm" onClick={loadBackups}>
               <RefreshCw className="h-3.5 w-3.5" /> 刷新列表
             </Button>
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept=".zip,application/zip"
+              className="hidden"
+              onChange={handleUploadZip}
+            />
           </div>
           <p className="mt-3 text-xs text-muted-foreground">
             备份保存在 <code>state/backups/&lt;时间戳&gt;/</code>，并打包为同名的{" "}
@@ -392,6 +442,14 @@ export function SettingsPage() {
                       onClick={() => handleRestore(b.name)}
                     >
                       <History className="h-3.5 w-3.5" /> 恢复
+                    </Button>
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      className="text-destructive hover:text-destructive"
+                      onClick={() => handleDeleteBackup(b.name)}
+                    >
+                      <Trash2 className="h-3.5 w-3.5" /> 删除
                     </Button>
                   </div>
                 </div>
