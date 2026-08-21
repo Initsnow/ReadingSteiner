@@ -11,7 +11,7 @@ use crate::models::{
     SystemNotification,
 };
 
-const SCHEMA_VERSION: i64 = 5;
+const SCHEMA_VERSION: i64 = 6;
 
 pub struct Db {
     conn: Connection,
@@ -88,7 +88,9 @@ impl Db {
                     fingerprint TEXT NOT NULL,
                     dedupe_key TEXT NOT NULL,
                     image_urls_json TEXT NOT NULL DEFAULT '[]',
-                    detected_at TEXT NOT NULL
+                    detected_at TEXT NOT NULL,
+                    read INTEGER NOT NULL DEFAULT 0,
+                    screenshot_path TEXT
                 );
                 CREATE INDEX IF NOT EXISTS idx_events_watchpoint ON change_events(watchpoint_id, id DESC);
                 CREATE TABLE IF NOT EXISTS media_cache (
@@ -164,6 +166,14 @@ impl Db {
             )?;
             self.conn.pragma_update(None, "user_version", 5)?;
             info!("database schema migrated to v5");
+        }
+        if v < 6 {
+            self.conn.execute_batch(
+                "ALTER TABLE change_events ADD COLUMN read INTEGER NOT NULL DEFAULT 0;\n\
+                 ALTER TABLE change_events ADD COLUMN screenshot_path TEXT;",
+            )?;
+            self.conn.pragma_update(None, "user_version", 6)?;
+            info!("database schema migrated to v6");
         }
         Ok(())
     }
@@ -267,8 +277,8 @@ impl Db {
 
     pub fn insert_change_event(&self, ev: &ChangeEvent) -> Result<i64> {
         self.conn.execute(
-            "INSERT INTO change_events(watchpoint_id, change_type, old_items_json, new_items_json, diff_summary, fingerprint, dedupe_key, image_urls_json, detected_at)
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)",
+            "INSERT INTO change_events(watchpoint_id, change_type, old_items_json, new_items_json, diff_summary, fingerprint, dedupe_key, image_urls_json, detected_at, read, screenshot_path)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",
             params![
                 ev.watchpoint_id,
                 serde_json::to_string(&ev.change_type)?,
@@ -278,7 +288,9 @@ impl Db {
                 ev.fingerprint,
                 ev.dedupe_key,
                 ev.image_urls_json,
-                ev.detected_at.to_rfc3339()
+                ev.detected_at.to_rfc3339(),
+                ev.read as i64,
+                ev.screenshot_path
             ],
         )?;
         Ok(self.conn.last_insert_rowid())
@@ -287,23 +299,10 @@ impl Db {
     pub fn get_change_event(&self, id: i64) -> Result<Option<ChangeEvent>> {
         self.conn
             .query_row(
-                "SELECT id, watchpoint_id, change_type, old_items_json, new_items_json, diff_summary, fingerprint, dedupe_key, image_urls_json, detected_at
+                "SELECT id, watchpoint_id, change_type, old_items_json, new_items_json, diff_summary, fingerprint, dedupe_key, image_urls_json, detected_at, read, screenshot_path
                  FROM change_events WHERE id=?1",
                 [id],
-                |r| {
-                    Ok(ChangeEvent {
-                        id: r.get(0)?,
-                        watchpoint_id: r.get(1)?,
-                        change_type: serde_json::from_str(&r.get::<_, String>(2)?).unwrap_or(crate::config::ChangeType::Updated),
-                        old_items_json: r.get(3)?,
-                        new_items_json: r.get(4)?,
-                        diff_summary: r.get(5)?,
-                        fingerprint: r.get(6)?,
-                        dedupe_key: r.get(7)?,
-                        image_urls_json: r.get(8)?,
-                        detected_at: parse_ts(&r.get::<_, String>(9)?),
-                    })
-                },
+                map_event,
             )
             .optional()
             .map_err(Into::into)
@@ -314,11 +313,11 @@ impl Db {
         watchpoint_id: Option<&str>,
         limit: usize,
     ) -> Result<Vec<ChangeEvent>> {
-        let sql = if let Some(_wp) = watchpoint_id {
-            "SELECT id, watchpoint_id, change_type, old_items_json, new_items_json, diff_summary, fingerprint, dedupe_key, image_urls_json, detected_at
+        let sql = if watchpoint_id.is_some() {
+            "SELECT id, watchpoint_id, change_type, old_items_json, new_items_json, diff_summary, fingerprint, dedupe_key, image_urls_json, detected_at, read, screenshot_path
              FROM change_events WHERE watchpoint_id=?1 ORDER BY id DESC LIMIT ?2"
         } else {
-            "SELECT id, watchpoint_id, change_type, old_items_json, new_items_json, diff_summary, fingerprint, dedupe_key, image_urls_json, detected_at
+            "SELECT id, watchpoint_id, change_type, old_items_json, new_items_json, diff_summary, fingerprint, dedupe_key, image_urls_json, detected_at, read, screenshot_path
              FROM change_events ORDER BY id DESC LIMIT ?1"
         };
         let mut stmt = self.conn.prepare(sql)?;
@@ -333,6 +332,137 @@ impl Db {
             out.push(row?);
         }
         Ok(out)
+    }
+
+    /// 标记指定监控源的全部变更事件为已读。返回受影响的行数。
+    pub fn mark_source_events_read(&self, source_id: &str) -> Result<usize> {
+        Ok(self
+            .conn
+            .execute("UPDATE change_events SET read=1 WHERE watchpoint_id=?1", [source_id])?)
+    }
+
+    /// 标记指定变更事件为已读。返回受影响的行数。
+    pub fn mark_event_read(&self, event_id: i64) -> Result<usize> {
+        Ok(self
+            .conn
+            .execute("UPDATE change_events SET read=1 WHERE id=?1", [event_id])?)
+    }
+
+    /// 统计指定监控源未读变更事件数。
+    pub fn unread_count(&self, source_id: &str) -> Result<u32> {
+        let n: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM change_events WHERE watchpoint_id=?1 AND read=0",
+            [source_id],
+            |r| r.get(0),
+        )?;
+        Ok(n as u32)
+    }
+
+    /// 获取指定监控源最近一次检查时间（最新快照时间）。
+    pub fn last_check_at(&self, source_id: &str) -> Result<Option<DateTime<Utc>>> {
+        self.conn
+            .query_row(
+                "SELECT fetched_at FROM snapshots WHERE watchpoint_id=?1 ORDER BY id DESC LIMIT 1",
+                [source_id],
+                |r| r.get::<_, String>(0).map(|s| parse_ts(&s)),
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
+    /// 获取指定监控源最近一次变更时间。
+    pub fn last_change_at(&self, source_id: &str) -> Result<Option<DateTime<Utc>>> {
+        self.conn
+            .query_row(
+                "SELECT detected_at FROM change_events WHERE watchpoint_id=?1 ORDER BY id DESC LIMIT 1",
+                [source_id],
+                |r| r.get::<_, String>(0).map(|s| parse_ts(&s)),
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
+    /// 获取所有监控源的展示用元信息。
+    pub fn list_source_meta(&self, sources: &[SourceConfig]) -> Result<Vec<crate::models::SourceMeta>> {
+        use crate::models::SourceMeta;
+        use std::collections::HashMap;
+
+        // 最近检查时间：每个源取最新快照的 fetched_at。
+        let mut last_check_at: HashMap<String, DateTime<Utc>> = HashMap::new();
+        {
+            let mut stmt = self.conn.prepare(
+                "SELECT watchpoint_id, MAX(fetched_at) AS latest FROM snapshots GROUP BY watchpoint_id",
+            )?;
+            let rows = stmt.query_map([], |r| {
+                Ok((r.get::<_, String>(0)?, parse_ts(&r.get::<_, String>(1)?)))
+            })?;
+            for row in rows {
+                let (wp, ts) = row?;
+                last_check_at.insert(wp, ts);
+            }
+        }
+
+        // 最近变更时间：每个源取最新事件的 detected_at。
+        let mut last_change_at: HashMap<String, DateTime<Utc>> = HashMap::new();
+        {
+            let mut stmt = self.conn.prepare(
+                "SELECT watchpoint_id, MAX(detected_at) AS latest FROM change_events GROUP BY watchpoint_id",
+            )?;
+            let rows = stmt.query_map([], |r| {
+                Ok((r.get::<_, String>(0)?, parse_ts(&r.get::<_, String>(1)?)))
+            })?;
+            for row in rows {
+                let (wp, ts) = row?;
+                last_change_at.insert(wp, ts);
+            }
+        }
+
+        // 未读事件数：每个源统计 read=0 的事件。
+        let mut unread_count: HashMap<String, u32> = HashMap::new();
+        {
+            let mut stmt = self.conn.prepare(
+                "SELECT watchpoint_id, COUNT(*) FROM change_events WHERE read=0 GROUP BY watchpoint_id",
+            )?;
+            let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?;
+            for row in rows {
+                let (wp, n) = row?;
+                unread_count.insert(wp, n as u32);
+            }
+        }
+
+        // 错误状态：schedule_state 中连续失败次数 > 0。
+        let mut has_error: HashMap<String, bool> = HashMap::new();
+        {
+            let mut stmt = self.conn.prepare(
+                "SELECT source_id FROM schedule_state WHERE consecutive_failures > 0",
+            )?;
+            let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+            for row in rows {
+                let sid = row?;
+                has_error.insert(sid, true);
+            }
+        }
+
+        let mut out = Vec::with_capacity(sources.len());
+        for s in sources {
+            out.push(SourceMeta {
+                source: s.clone(),
+                last_check_at: last_check_at.get(&s.id).copied(),
+                last_change_at: last_change_at.get(&s.id).copied(),
+                unread_count: unread_count.get(&s.id).copied().unwrap_or(0),
+                has_error: has_error.get(&s.id).copied().unwrap_or(false),
+            });
+        }
+        Ok(out)
+    }
+
+    /// 更新变更事件的截图路径。传 `None` 时清空截图路径。
+    pub fn update_event_screenshot(&self, event_id: i64, path: Option<&str>) -> Result<()> {
+        self.conn.execute(
+            "UPDATE change_events SET screenshot_path=?1 WHERE id=?2",
+            params![path, event_id],
+        )?;
+        Ok(())
     }
 
     pub fn get_schedule_state(&self, source_id: &str) -> Result<Option<ScheduleState>> {
@@ -598,6 +728,8 @@ fn map_event(r: &rusqlite::Row<'_>) -> rusqlite::Result<ChangeEvent> {
         dedupe_key: r.get(7)?,
         image_urls_json: r.get(8)?,
         detected_at: parse_ts(&r.get::<_, String>(9)?),
+        read: r.get::<_, i64>(10)? != 0,
+        screenshot_path: r.get(11)?,
     })
 }
 

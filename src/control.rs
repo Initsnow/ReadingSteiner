@@ -63,6 +63,14 @@ pub enum ControlRequest {
         source_id: Option<String>,
         limit: Option<usize>,
     },
+    /// 标记某个监控源的全部变更事件为已读。
+    MarkSourceRead {
+        source_id: String,
+    },
+    /// 标记单个变更事件为已读。
+    MarkEventRead {
+        event_id: i64,
+    },
     NotifyTest {
         chat_id: Option<String>,
     },
@@ -179,8 +187,12 @@ pub(crate) async fn handle_request(state: &Arc<AppState>, req: ControlRequest) -
             ControlResponse::ok(serde_json::to_value(s).unwrap_or(json!(null)))
         }
         ControlRequest::ListSources => {
+            let db = state.db.lock().await;
             let sources = state.sources.lock().await.clone();
-            ControlResponse::ok(serde_json::to_value(sources).unwrap_or(json!([])))
+            match db.list_source_meta(&sources) {
+                Ok(meta) => ControlResponse::ok(serde_json::to_value(meta).unwrap_or(json!([]))),
+                Err(e) => ControlResponse::err(e.to_string()),
+            }
         }
         ControlRequest::ListEvents { limit } => {
             let db = state.db.lock().await;
@@ -206,6 +218,12 @@ pub(crate) async fn handle_request(state: &Arc<AppState>, req: ControlRequest) -
             // ID 未填时自动生成：优先从名称生成可读 slug，否则回退到随机短 id。
             if source.id.trim().is_empty() {
                 source.id = crate::config::generate_source_id(&source.name, &source.fetch.url);
+            }
+            // 名称未填时自动从 URL 主机名生成可读名称。
+            if source.name.trim().is_empty() {
+                if let Ok(u) = url::Url::parse(&source.fetch.url) {
+                    source.name = u.host_str().unwrap_or("").to_string();
+                }
             }
             let id = source.id.clone();
             if sources.iter().any(|s| s.id == id) {
@@ -323,6 +341,20 @@ pub(crate) async fn handle_request(state: &Arc<AppState>, req: ControlRequest) -
                 Ok(events) => {
                     ControlResponse::ok(serde_json::to_value(events).unwrap_or(json!([])))
                 }
+                Err(e) => ControlResponse::err(e.to_string()),
+            }
+        }
+        ControlRequest::MarkSourceRead { source_id } => {
+            let db = state.db.lock().await;
+            match db.mark_source_events_read(&source_id) {
+                Ok(n) => ControlResponse::ok(json!({ "updated": n })),
+                Err(e) => ControlResponse::err(e.to_string()),
+            }
+        }
+        ControlRequest::MarkEventRead { event_id } => {
+            let db = state.db.lock().await;
+            match db.mark_event_read(event_id) {
+                Ok(n) => ControlResponse::ok(json!({ "updated": n })),
                 Err(e) => ControlResponse::err(e.to_string()),
             }
         }

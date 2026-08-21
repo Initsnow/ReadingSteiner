@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use crate::config::ChangeType;
+use crate::config::{ChangeType, SourceConfig};
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
 pub struct Item {
@@ -103,6 +103,27 @@ pub struct ChangeEvent {
     /// 本次变更要随通知附带的图片 URL（JSON 数组，供 notifier 读取并发送）。
     pub image_urls_json: String,
     pub detected_at: DateTime<Utc>,
+    /// 是否已读（Web 控制台标记）。
+    #[serde(default)]
+    pub read: bool,
+    /// camofox 截图文件路径（相对 media_dir），供 Web 控制台展示。
+    #[serde(default)]
+    pub screenshot_path: Option<String>,
+}
+
+/// 监控源列表项：在 SourceConfig 基础上附加展示用元信息。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SourceMeta {
+    #[serde(flatten)]
+    pub source: SourceConfig,
+    /// 最近一次检查时间（成功或失败的抓取都算）。
+    pub last_check_at: Option<DateTime<Utc>>,
+    /// 最近一次检测到变更的时间。
+    pub last_change_at: Option<DateTime<Utc>>,
+    /// 未读变更事件数。
+    pub unread_count: u32,
+    /// 是否处于错误状态（连续失败次数 > 0）。
+    pub has_error: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

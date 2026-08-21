@@ -10,10 +10,16 @@ import {
   X,
   CheckCircle2,
   AlertCircle,
+  ChevronDown,
+  ChevronRight,
+  Eye,
+  History as HistoryIcon,
 } from "lucide-react"
 import {
   api,
   type SourceConfig,
+  type SourceMeta,
+  type ChangeEvent,
   type TestSourceResult,
   type ExtractConfig,
   type ItemField,
@@ -45,6 +51,8 @@ interface FormState {
   // 图片选择器
   imageKind: "none" | "items" | "css" | "changed"
   imageSelector: string
+  // camofox 截图
+  screenshot: boolean
 }
 
 function emptyForm(): FormState {
@@ -66,6 +74,7 @@ function emptyForm(): FormState {
     fieldsJson: "[]",
     imageKind: "none",
     imageSelector: "",
+    screenshot: false,
   }
 }
 
@@ -117,6 +126,7 @@ function sourceToForm(s: SourceConfig): FormState {
     timeout_secs: s.fetch.timeout_secs ?? 0,
     tags: (s.tags ?? []).join(","),
     ...ex,
+    screenshot: s.fetch.screenshot ?? false,
   }
 }
 
@@ -155,7 +165,7 @@ function formToSource(f: FormState, existing?: SourceConfig): SourceConfig {
   return {
     ...base,
     id: f.id.trim(),
-    name: f.name.trim() || f.id.trim(),
+    name: f.name.trim(),
     enabled: f.enabled,
     notify_enabled: f.notify_enabled,
     tags: f.tags
@@ -169,6 +179,7 @@ function formToSource(f: FormState, existing?: SourceConfig): SourceConfig {
       method: f.method || "GET",
       // 0 表示未单独设置，跟随全局默认（后端 effective_timeout 会兜底）。
       timeout_secs: f.timeout_secs > 0 ? f.timeout_secs : 0,
+      screenshot: f.screenshot,
     },
     schedule: {
       ...base.schedule,
@@ -204,8 +215,38 @@ function Field({
   )
 }
 
+function formatRelativeTime(ts: string | null): string {
+  if (!ts) return "—"
+  const d = new Date(ts)
+  if (isNaN(d.getTime())) return "—"
+  const diff = Date.now() - d.getTime()
+  if (diff < 0) return "刚刚"
+  const sec = Math.floor(diff / 1000)
+  if (sec < 60) return `${sec} 秒前`
+  const min = Math.floor(sec / 60)
+  if (min < 60) return `${min} 分钟前`
+  const hr = Math.floor(min / 60)
+  if (hr < 24) return `${hr} 小时前`
+  const day = Math.floor(hr / 24)
+  if (day < 30) return `${day} 天前`
+  return d.toLocaleDateString()
+}
+
+function formatDateTime(ts: string | null): string {
+  if (!ts) return "—"
+  const d = new Date(ts)
+  if (isNaN(d.getTime())) return "—"
+  return d.toLocaleString()
+}
+
+function parseChangeEvent(e: ChangeEvent) {
+  const oldItems = safeJsonParse<any[]>(e.old_items_json) ?? []
+  const newItems = safeJsonParse<any[]>(e.new_items_json) ?? []
+  return { oldItems, newItems }
+}
+
 export function SourcesPage() {
-  const [sources, setSources] = useState<SourceConfig[]>([])
+  const [sources, setSources] = useState<SourceMeta[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [busyId, setBusyId] = useState<string | null>(null)
@@ -216,27 +257,41 @@ export function SourcesPage() {
 
   // 按 tag 筛选：null 表示全部，"__untagged__" 表示无标签的源。
   const [tagFilter, setTagFilter] = useState<string | null>(null)
+  // 附加状态筛选："all" | "unread" | "error"
+  const [statusFilter, setStatusFilter] = useState<"all" | "unread" | "error">("all")
+
   const allTags = useMemo(
     () => Array.from(new Set(sources.flatMap((s) => s.tags ?? []))).sort(),
     [sources],
   )
-  const filteredSources = useMemo(
-    () =>
-      sources.filter((s) => {
-        const tags = s.tags ?? []
-        if (tagFilter === null) return true
-        if (tagFilter === "__untagged__") return tags.length === 0
-        return tags.includes(tagFilter)
-      }),
-    [sources, tagFilter],
-  )
+
+  const filteredSources = useMemo(() => {
+    let list = sources.filter((s) => {
+      const tags = s.tags ?? []
+      if (tagFilter === null) return true
+      if (tagFilter === "__untagged__") return tags.length === 0
+      return tags.includes(tagFilter)
+    })
+    if (statusFilter === "unread") {
+      list = list.filter((s) => (s.unread_count ?? 0) > 0)
+    } else if (statusFilter === "error") {
+      list = list.filter((s) => s.has_error)
+    }
+    return list
+  }, [sources, tagFilter, statusFilter])
+
   const hasUntagged = useMemo(
     () => sources.some((s) => (s.tags ?? []).length === 0),
     [sources],
   )
 
+  // 展开历史记录的源 id 集合
+  const [expanded, setExpanded] = useState<Set<string>>(new Set())
+  // 每个源的历史事件缓存
+  const [historyMap, setHistoryMap] = useState<Record<string, ChangeEvent[]>>({})
+  const [historyLoading, setHistoryLoading] = useState<Set<string>>(new Set())
+
   // 切换标签筛选时同步清理 selected，避免批量操作作用于不可见的源。
-  // tag 为 null（全部）时保留全部选中项，为具体标签时仅保留匹配的源。
   function applyTagFilter(tag: string | null) {
     setTagFilter(tag)
     setSelected((prev) => {
@@ -257,11 +312,10 @@ export function SourcesPage() {
 
   // add/edit modal state
   const [modalOpen, setModalOpen] = useState(false)
-  const [editing, setEditing] = useState<SourceConfig | null>(null)
+  const [editing, setEditing] = useState<SourceMeta | null>(null)
   const [form, setForm] = useState<FormState>(emptyForm())
   const [saving, setSaving] = useState(false)
   const [formError, setFormError] = useState<string | null>(null)
-  const [previewingTitle, setPreviewingTitle] = useState(false)
 
   // test result modal state
   const [testResult, setTestResult] = useState<TestSourceResult | null>(null)
@@ -303,32 +357,14 @@ export function SourcesPage() {
     setModalOpen(true)
   }
 
-  function openEdit(s: SourceConfig) {
+  function openEdit(s: SourceMeta) {
     setEditing(s)
     setForm(sourceToForm(s))
     setFormError(null)
     setModalOpen(true)
   }
 
-  // 抓取 URL 的页面标题，自动填充名称。
-  async function fetchTitle() {
-    const url = form.url.trim()
-    if (!url) return
-    setPreviewingTitle(true)
-    try {
-      const res = await api.previewSource(url, form.engine)
-      if (res.title) {
-        setForm((prev) => ({ ...prev, name: res.title }))
-      } else {
-        setFormError("未能自动获取标题（页面无 title 或非 HTML/JSON），请手动填写名称")
-      }
-    } catch {
-      setFormError("获取标题失败，请检查 URL 或手动填写名称")
-    } finally {
-      setPreviewingTitle(false)
-    }
-  }
-
+  // 添加监控源时，若名称留空则自动从 URL 抓取 title 填入名称。
   async function handleSave() {
     if (!form.url.trim()) {
       setFormError("url 为必填项")
@@ -357,13 +393,27 @@ export function SourcesPage() {
         return
       }
     }
+
     setSaving(true)
     setFormError(null)
     try {
+      let effectiveForm = form
+      // 新增且名称留空时，自动抓取 URL 的 title 作为名称
+      if (!editing && !form.name.trim()) {
+        try {
+          const res = await api.previewSource(form.url.trim(), form.engine)
+          if (res.title) {
+            effectiveForm = { ...form, name: res.title }
+          }
+        } catch {
+          // 抓取标题失败不阻塞保存，名称留空则由后端回退到 id。
+        }
+      }
+
       if (editing) {
-        await api.updateSource(editing.id, formToSource(form, editing))
+        await api.updateSource(editing.id, formToSource(effectiveForm, editing))
       } else {
-        await api.addSource(formToSource(form))
+        await api.addSource(formToSource(effectiveForm))
       }
       setModalOpen(false)
       await load()
@@ -374,7 +424,7 @@ export function SourcesPage() {
     }
   }
 
-  async function handleDelete(s: SourceConfig) {
+  async function handleDelete(s: SourceMeta) {
     if (!window.confirm(`确定删除监控源「${s.name || s.id}」？此操作不可撤销。`)) return
     setBusyId(s.id)
     try {
@@ -387,7 +437,7 @@ export function SourcesPage() {
     }
   }
 
-  async function handleTest(s: SourceConfig) {
+  async function handleTest(s: SourceMeta) {
     setTestingId(s.id)
     setTestError(null)
     setTestResult(null)
@@ -428,6 +478,41 @@ export function SourcesPage() {
       setError((e as Error).message)
     } finally {
       setBatchBusy(false)
+    }
+  }
+
+  // ---- 历史记录展开 ----
+  async function toggleHistory(id: string) {
+    setExpanded((prev) => {
+      const next = new Set(prev)
+      if (next.has(id)) next.delete(id)
+      else next.add(id)
+      return next
+    })
+    if (!historyMap[id]) {
+      setHistoryLoading((prev) => new Set(prev).add(id))
+      try {
+        const events = await api.history(id, 20)
+        setHistoryMap((prev) => ({ ...prev, [id]: events }))
+      } catch {
+        setError("加载历史记录失败")
+      } finally {
+        setHistoryLoading((prev) => {
+          const next = new Set(prev)
+          next.delete(id)
+          return next
+        })
+      }
+    }
+  }
+
+  // ---- 标记已读 ----
+  async function handleMarkSourceRead(s: SourceMeta) {
+    try {
+      await api.markSourceRead(s.id)
+      await load()
+    } catch (e) {
+      setError((e as Error).message)
     }
   }
 
@@ -537,152 +622,252 @@ export function SourcesPage() {
             </label>
           </div>
 
-          {/* 按 tag 筛选栏 */}
-          {(allTags.length > 0 || hasUntagged) && (
-            <div className="flex flex-wrap items-center gap-2 px-1">
-              <span className="text-xs text-muted-foreground">按标签：</span>
+          {/* 标签与状态筛选栏 */}
+          <div className="flex flex-wrap items-center gap-2 px-1">
+            <span className="text-xs text-muted-foreground">标签：</span>
+            <button
+              onClick={() => applyTagFilter(null)}
+              className={`rounded-full px-2.5 py-0.5 text-xs transition-colors ${
+                tagFilter === null
+                  ? "bg-primary text-primary-foreground"
+                  : "bg-muted text-muted-foreground hover:bg-muted/70"
+              }`}
+            >
+              全部
+            </button>
+            {allTags.map((t) => (
               <button
-                onClick={() => applyTagFilter(null)}
+                key={t}
+                onClick={() => applyTagFilter(tagFilter === t ? null : t)}
                 className={`rounded-full px-2.5 py-0.5 text-xs transition-colors ${
-                  tagFilter === null
+                  tagFilter === t
                     ? "bg-primary text-primary-foreground"
                     : "bg-muted text-muted-foreground hover:bg-muted/70"
                 }`}
               >
-                全部
+                {t}
               </button>
-              {allTags.map((t) => (
-                <button
-                  key={t}
-                  onClick={() => applyTagFilter(tagFilter === t ? null : t)}
-                  className={`rounded-full px-2.5 py-0.5 text-xs transition-colors ${
-                    tagFilter === t
-                      ? "bg-primary text-primary-foreground"
-                      : "bg-muted text-muted-foreground hover:bg-muted/70"
-                  }`}
-                >
-                  {t}
-                </button>
-              ))}
-              {hasUntagged && (
-                <button
-                  onClick={() =>
-                    applyTagFilter(
-                      tagFilter === "__untagged__" ? null : "__untagged__",
-                    )
-                  }
-                  className={`rounded-full px-2.5 py-0.5 text-xs transition-colors ${
-                    tagFilter === "__untagged__"
-                      ? "bg-primary text-primary-foreground"
-                      : "bg-muted text-muted-foreground hover:bg-muted/70"
-                  }`}
-                >
-                  无标签
-                </button>
-              )}
-            </div>
-          )}
+            ))}
+            {hasUntagged && (
+              <button
+                onClick={() =>
+                  applyTagFilter(
+                    tagFilter === "__untagged__" ? null : "__untagged__",
+                  )
+                }
+                className={`rounded-full px-2.5 py-0.5 text-xs transition-colors ${
+                  tagFilter === "__untagged__"
+                    ? "bg-primary text-primary-foreground"
+                    : "bg-muted text-muted-foreground hover:bg-muted/70"
+                }`}
+              >
+                无标签
+              </button>
+            )}
+
+            <span className="ml-2 text-xs text-muted-foreground">状态：</span>
+            {(["all", "unread", "error"] as const).map((f) => (
+              <button
+                key={f}
+                onClick={() => setStatusFilter(f)}
+                className={`rounded-full px-2.5 py-0.5 text-xs transition-colors ${
+                  statusFilter === f
+                    ? "bg-primary text-primary-foreground"
+                    : "bg-muted text-muted-foreground hover:bg-muted/70"
+                }`}
+              >
+                {f === "all" ? "全部" : f === "unread" ? "未读" : "错误"}
+              </button>
+            ))}
+          </div>
 
           {filteredSources.length === 0 ? (
             <p className="px-1 text-sm text-muted-foreground">
-              没有符合该标签的监控源。
+              没有符合筛选条件的监控源。
             </p>
           ) : (
-            filteredSources.map((s) => (
-              <Card
-                key={s.id}
-                className={
-                  selected.has(s.id) ? "ring-2 ring-primary/60" : undefined
-                }
-              >
-                <CardContent className="flex flex-wrap items-center gap-x-3 gap-y-2 px-4 py-3">
-                  <input
-                    type="checkbox"
-                    className="h-4 w-4 shrink-0 accent-primary"
-                    checked={selected.has(s.id)}
-                    onChange={() => toggleSelect(s.id)}
-                  />
-                  <div className="min-w-0 flex-1">
-                    <div className="flex flex-wrap items-center gap-2">
-                      <span className="truncate text-sm font-medium">
-                        {s.name || s.id}
-                      </span>
-                      <Badge
-                        variant={s.enabled ? "success" : "secondary"}
-                        className="px-1.5 py-0 text-[10px]"
+            filteredSources.map((s) => {
+              const isExpanded = expanded.has(s.id)
+              const events = historyMap[s.id]
+              const isHistLoading = historyLoading.has(s.id)
+              const isCamofox = s.fetch.engine === "camofox"
+              const unread = s.unread_count ?? 0
+              return (
+                <Card
+                  key={s.id}
+                  className={
+                    selected.has(s.id)
+                      ? "ring-2 ring-primary/60"
+                      : undefined
+                  }
+                >
+                  <CardContent className="px-4 py-3">
+                    {/* 主行 */}
+                    <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
+                      <input
+                        type="checkbox"
+                        className="h-4 w-4 shrink-0 accent-primary"
+                        checked={selected.has(s.id)}
+                        onChange={() => toggleSelect(s.id)}
+                      />
+                      <button
+                        className="shrink-0 text-muted-foreground hover:text-foreground"
+                        onClick={() => toggleHistory(s.id)}
+                        title={isExpanded ? "收起历史" : "展开历史"}
                       >
-                        {s.enabled ? "监控中" : "已暂停监控"}
-                      </Badge>
-                      <Badge
-                        variant={s.notify_enabled ? "success" : "secondary"}
-                        className="px-1.5 py-0 text-[10px]"
-                      >
-                        {s.notify_enabled ? "通知开" : "已暂停通知"}
-                      </Badge>
-                      {s.tags.map((t) => (
-                        <Badge
-                          key={t}
-                          variant="outline"
-                          className="px-1.5 py-0 text-[10px]"
+                        {isHistLoading ? (
+                          <Loader2 className="h-4 w-4 animate-spin" />
+                        ) : isExpanded ? (
+                          <ChevronDown className="h-4 w-4" />
+                        ) : (
+                          <ChevronRight className="h-4 w-4" />
+                        )}
+                      </button>
+                      <div className="min-w-0 flex-1">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <span className="truncate text-sm font-medium">
+                            {s.name || s.id}
+                          </span>
+                          {unread > 0 && (
+                            <Badge variant="warning" className="px-1.5 py-0 text-[10px]">
+                              {unread} 未读
+                            </Badge>
+                          )}
+                          {s.has_error && (
+                            <Badge variant="destructive" className="px-1.5 py-0 text-[10px]">
+                              <AlertCircle className="h-2.5 w-2.5" /> 错误
+                            </Badge>
+                          )}
+                          <Badge
+                            variant={s.enabled ? "success" : "secondary"}
+                            className="px-1.5 py-0 text-[10px]"
+                          >
+                            {s.enabled ? "监控中" : "已暂停监控"}
+                          </Badge>
+                          <Badge
+                            variant={s.notify_enabled ? "success" : "secondary"}
+                            className="px-1.5 py-0 text-[10px]"
+                          >
+                            {s.notify_enabled ? "通知开" : "已暂停通知"}
+                          </Badge>
+                          {isCamofox && s.fetch.screenshot && (
+                            <Badge variant="outline" className="px-1.5 py-0 text-[10px]">
+                              <Eye className="h-2.5 w-2.5" /> 截图
+                            </Badge>
+                          )}
+                          {s.tags.map((t) => (
+                            <Badge
+                              key={t}
+                              variant="outline"
+                              className="px-1.5 py-0 text-[10px]"
+                            >
+                              {t}
+                            </Badge>
+                          ))}
+                        </div>
+                        <div className="mt-0.5 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted-foreground">
+                          <span className="truncate">{s.fetch.url}</span>
+                          <span className="shrink-0">
+                            最近检查: <span title={formatDateTime(s.last_check_at)}>{formatRelativeTime(s.last_check_at)}</span>
+                          </span>
+                          <span className="shrink-0">
+                            最近变更: <span title={formatDateTime(s.last_change_at)}>{formatRelativeTime(s.last_change_at)}</span>
+                          </span>
+                        </div>
+                      </div>
+                      <div className="flex shrink-0 items-center gap-1">
+                        {unread > 0 && (
+                          <Button
+                            size="sm"
+                            variant="ghost"
+                            className="h-7 px-2 text-xs"
+                            onClick={() => handleMarkSourceRead(s)}
+                            title="标记已读"
+                          >
+                            <Eye className="h-3.5 w-3.5" /> 已读
+                          </Button>
+                        )}
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          className="h-7 px-2 text-xs"
+                          disabled={busyId === s.id}
+                          onClick={() => runCheck(s.id)}
+                          title="立即检测"
                         >
-                          {t}
-                        </Badge>
-                      ))}
+                          {busyId === s.id ? (
+                            <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                          ) : (
+                            <Play className="h-3.5 w-3.5" />
+                          )}
+                        </Button>
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          className="h-7 px-2 text-xs"
+                          disabled={testingId === s.id}
+                          onClick={() => handleTest(s)}
+                          title="测试"
+                        >
+                          {testingId === s.id ? (
+                            <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                          ) : (
+                            <TestTube2 className="h-3.5 w-3.5" />
+                          )}
+                        </Button>
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          className="h-7 px-2 text-xs"
+                          onClick={() => openEdit(s)}
+                        >
+                          <Pencil className="h-3.5 w-3.5" /> 编辑
+                        </Button>
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          className="h-7 px-2 text-xs text-destructive hover:text-destructive"
+                          disabled={busyId === s.id}
+                          onClick={() => handleDelete(s)}
+                        >
+                          <Trash2 className="h-3.5 w-3.5" /> 删除
+                        </Button>
+                      </div>
                     </div>
-                    <div className="mt-0.5 truncate text-xs text-muted-foreground">
-                      {s.fetch.url}
-                    </div>
-                  </div>
-                  <div className="flex shrink-0 items-center gap-1">
-                    <Button
-                      size="sm"
-                      variant="ghost"
-                      className="h-7 px-2 text-xs"
-                      disabled={busyId === s.id}
-                      onClick={() => runCheck(s.id)}
-                      title="立即检测"
-                    >
-                      {busyId === s.id ? (
-                        <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                      ) : (
-                        <Play className="h-3.5 w-3.5" />
-                      )}
-                    </Button>
-                    <Button
-                      size="sm"
-                      variant="ghost"
-                      className="h-7 px-2 text-xs"
-                      disabled={testingId === s.id}
-                      onClick={() => handleTest(s)}
-                      title="测试"
-                    >
-                      {testingId === s.id ? (
-                        <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                      ) : (
-                        <TestTube2 className="h-3.5 w-3.5" />
-                      )}
-                    </Button>
-                    <Button
-                      size="sm"
-                      variant="ghost"
-                      className="h-7 px-2 text-xs"
-                      onClick={() => openEdit(s)}
-                    >
-                      <Pencil className="h-3.5 w-3.5" /> 编辑
-                    </Button>
-                    <Button
-                      size="sm"
-                      variant="ghost"
-                      className="h-7 px-2 text-xs text-destructive hover:text-destructive"
-                      disabled={busyId === s.id}
-                      onClick={() => handleDelete(s)}
-                    >
-                      <Trash2 className="h-3.5 w-3.5" /> 删除
-                    </Button>
-                  </div>
-                </CardContent>
-              </Card>
-            )))}
+
+                    {/* 历史记录展开区 */}
+                    {isExpanded && (
+                      <div className="mt-3 border-t pt-3">
+                        <div className="mb-2 flex items-center gap-2 text-xs font-medium text-muted-foreground">
+                          <HistoryIcon className="h-3.5 w-3.5" /> 变更历史
+                          {events && (
+                            <span className="text-[10px] text-muted-foreground">
+                              （共 {events.length} 条）
+                            </span>
+                          )}
+                        </div>
+                        {isHistLoading ? (
+                          <div className="flex items-center gap-2 py-4 text-xs text-muted-foreground">
+                            <Loader2 className="h-3.5 w-3.5 animate-spin" /> 加载历史…
+                          </div>
+                        ) : events && events.length > 0 ? (
+                          <div className="space-y-2">
+                            {events.map((ev) => (
+                              <EventRow key={ev.id} event={ev} />
+                            ))}
+                          </div>
+                        ) : (
+                          <p className="py-2 text-xs text-muted-foreground">
+                            暂无变更记录。
+                          </p>
+                        )}
+                      </div>
+                    )}
+                  </CardContent>
+                </Card>
+              )
+            })
+          )}
         </div>
       )}
 
@@ -715,7 +900,11 @@ export function SourcesPage() {
                 />
               </Field>
 
-              <Field label="名称" className="col-span-1">
+              <Field
+                label="名称"
+                className="col-span-2"
+                hint={!editing ? "留空会自动抓取网页标题" : undefined}
+              >
                 <input
                   className={inputCls}
                   value={form.name}
@@ -723,19 +912,6 @@ export function SourcesPage() {
                   onChange={(e) => setForm({ ...form, name: e.target.value })}
                 />
               </Field>
-              <div className="col-span-1 flex items-end">
-                <Button
-                  variant="outline"
-                  className="w-full"
-                  disabled={!form.url.trim() || previewingTitle}
-                  onClick={fetchTitle}
-                >
-                  {previewingTitle && (
-                    <Loader2 className="h-4 w-4 animate-spin" />
-                  )}
-                  获取标题
-                </Button>
-              </div>
 
               <div className="col-span-2 flex flex-wrap items-center gap-6 rounded-md border bg-muted/30 p-3">
                 <label className="flex cursor-pointer items-center gap-2 text-sm">
@@ -783,6 +959,25 @@ export function SourcesPage() {
                   <option value="HEAD">HEAD</option>
                 </select>
               </Field>
+
+              {/* camofox 截图开关（仅 camofox 引擎生效） */}
+              {form.engine === "camofox" && (
+                <Field label="camofox 截图" className="col-span-2">
+                  <div className="rounded-md border bg-muted/30 p-3">
+                    <label className="flex cursor-pointer items-center gap-2 text-sm">
+                      <input
+                        type="checkbox"
+                        className="h-4 w-4 accent-primary"
+                        checked={form.screenshot}
+                        onChange={(e) =>
+                          setForm({ ...form, screenshot: e.target.checked })
+                        }
+                      />
+                      <span>检测到变更时截图（可在历史记录中查看）</span>
+                    </label>
+                  </div>
+                </Field>
+              )}
 
               <Field
                 label="cron 表达式（分 时 日 月 周）"
@@ -871,7 +1066,7 @@ export function SourcesPage() {
                       />
                     </Field>
                   </div>
-                  <Field label={`提取字段（可选 JSON 数组，如 [{"name":"id","attr":"data-id"}]）`}>
+                  <Field label={`提取字段（可选 JSON 数组）`}>
                     <textarea
                       rows={3}
                       className={`${inputCls} font-mono text-xs`}
@@ -1089,6 +1284,107 @@ export function SourcesPage() {
                 关闭
               </Button>
             </div>
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
+// ---- 单条变更事件行 ----
+function EventRow({ event }: { event: ChangeEvent }) {
+  const [read, setRead] = useState(event.read)
+  const [showDiff, setShowDiff] = useState(false)
+  const { oldItems, newItems } = parseChangeEvent(event)
+  const hasScreenshot = !!event.screenshot_path
+
+  async function markRead() {
+    if (read) return
+    try {
+      await api.markEventRead(event.id)
+      setRead(true)
+    } catch {
+      // ignore
+    }
+  }
+
+  return (
+    <div
+      className={`rounded-md border p-2 text-xs ${read ? "bg-background/40" : "bg-primary/5"}`}
+      onClick={markRead}
+    >
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="text-muted-foreground">#{event.id}</span>
+        <Badge
+          variant={
+            event.change_type === "new"
+              ? "success"
+              : event.change_type === "updated"
+                ? "warning"
+                : "destructive"
+          }
+          className="px-1.5 py-0 text-[10px]"
+        >
+          {event.change_type}
+        </Badge>
+        {!read && (
+          <span className="text-[10px] text-primary">● 未读</span>
+        )}
+        <span className="text-muted-foreground">
+          {new Date(event.detected_at).toLocaleString()}
+        </span>
+        <div className="flex-1" />
+        <button
+          className="flex items-center gap-1 text-muted-foreground hover:text-foreground"
+          onClick={(e) => {
+            e.stopPropagation()
+            setShowDiff((v) => !v)
+          }}
+        >
+          {showDiff ? (
+            <ChevronDown className="h-3 w-3" />
+          ) : (
+            <ChevronRight className="h-3 w-3" />
+          )}
+          查看变更
+        </button>
+      </div>
+      {event.diff_summary && (
+        <p className="mt-1 text-muted-foreground">{event.diff_summary}</p>
+      )}
+
+      {hasScreenshot && (
+        <div className="mt-2">
+          <img
+            src={api.eventScreenshotUrl(event.id)}
+            alt={`截图 #${event.id}`}
+            className="max-h-48 rounded-md border object-contain"
+            loading="lazy"
+          />
+        </div>
+      )}
+
+      {showDiff && (
+        <div className="mt-2 grid gap-2 md:grid-cols-2">
+          <div className="rounded bg-muted p-2">
+            <div className="mb-1 font-medium text-muted-foreground">旧 ({oldItems.length} 条)</div>
+            {oldItems.length > 0 ? (
+              <pre className="max-h-40 overflow-auto font-mono text-[10px]">
+                {oldItems.map((it) => it.text ?? JSON.stringify(it)).join("\n\n")}
+              </pre>
+            ) : (
+              <span className="text-muted-foreground">—</span>
+            )}
+          </div>
+          <div className="rounded bg-muted p-2">
+            <div className="mb-1 font-medium text-muted-foreground">新 ({newItems.length} 条)</div>
+            {newItems.length > 0 ? (
+              <pre className="max-h-40 overflow-auto font-mono text-[10px]">
+                {newItems.map((it) => it.text ?? JSON.stringify(it)).join("\n\n")}
+              </pre>
+            ) : (
+              <span className="text-muted-foreground">—</span>
+            )}
           </div>
         </div>
       )}
