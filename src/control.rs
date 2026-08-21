@@ -10,6 +10,7 @@ use tracing::{error, info};
 use crate::config::{EditableSettings, FetchConfig, SourceConfig};
 use crate::error::{Error, Result};
 use crate::fetcher::{FetchSpec, create_fetcher};
+use crate::models::TagConfig;
 use crate::scheduler::{self, AppState};
 
 /// 单次批量操作允许的最大监控源数量，避免持锁期间长时间执行 upsert 阻塞其他请求。
@@ -66,6 +67,16 @@ pub enum ControlRequest {
     /// 标记某个监控源的全部变更事件为已读。
     MarkSourceRead {
         source_id: String,
+    },
+    /// 列出全部分组（标签）设置。
+    ListTags,
+    /// 新增 / 更新一个分组（标签）设置。
+    UpdateTag {
+        tag: Box<TagConfig>,
+    },
+    /// 删除一个分组（标签）设置。
+    DeleteTag {
+        name: String,
     },
     /// 标记单个变更事件为已读。
     MarkEventRead {
@@ -348,6 +359,39 @@ pub(crate) async fn handle_request(state: &Arc<AppState>, req: ControlRequest) -
             let db = state.db.lock().await;
             match db.mark_source_events_read(&source_id) {
                 Ok(n) => ControlResponse::ok(json!({ "updated": n })),
+                Err(e) => ControlResponse::err(e.to_string()),
+            }
+        }
+        ControlRequest::ListTags => {
+            let db = state.db.lock().await;
+            match db.list_tags() {
+                Ok(tags) => ControlResponse::ok(serde_json::to_value(tags).unwrap_or(json!([]))),
+                Err(e) => ControlResponse::err(e.to_string()),
+            }
+        }
+        ControlRequest::UpdateTag { tag } => {
+            let name = tag.name.trim().to_string();
+            if name.is_empty() {
+                return ControlResponse::err("tag name is required");
+            }
+            let mut tag = tag.as_ref().clone();
+            tag.name = name;
+            let db = state.db.lock().await;
+            match db.upsert_tag(&tag) {
+                Ok(()) => ControlResponse::ok(json!({ "name": tag.name, "updated": true })),
+                Err(e) => ControlResponse::err(e.to_string()),
+            }
+        }
+        ControlRequest::DeleteTag { name } => {
+            if name.trim().is_empty() {
+                return ControlResponse::err("tag name is required");
+            }
+            let db = state.db.lock().await;
+            match db.delete_tag(name.trim()) {
+                Ok(n) if n > 0 => {
+                    ControlResponse::ok(json!({ "name": name.trim(), "deleted": true }))
+                }
+                Ok(_) => ControlResponse::err(format!("tag {} not found", name.trim())),
                 Err(e) => ControlResponse::err(e.to_string()),
             }
         }

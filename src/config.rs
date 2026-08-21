@@ -257,6 +257,11 @@ pub struct SourceConfig {
     /// 是否发送变更通知。false 时仍正常监控检测，但检测到的变更不会推送 Telegram 通知。
     #[serde(default = "default_true")]
     pub notify_enabled: bool,
+    /// 是否跟随所属分组（标签）的设置。true 时，若监控源带有已配置的分组，
+    /// 则其监控开关、通知开关与历史保留条数继承分组的设置；
+    /// false 时完全使用本监控源自己的 `enabled` / `notify_enabled` 设置（自覆盖）。
+    #[serde(default = "default_true")]
+    pub follow_group: bool,
     #[serde(default)]
     pub tags: Vec<String>,
     pub fetch: FetchConfig,
@@ -279,12 +284,49 @@ impl Default for SourceConfig {
             name: String::new(),
             enabled: true,
             notify_enabled: true,
+            follow_group: true,
             tags: Vec::new(),
             fetch: FetchConfig::default(),
             schedule: ScheduleConfig::default(),
             extract: ExtractConfig::default(),
         }
     }
+}
+
+/// 解析监控源的「生效」开关配置。
+///
+/// 若监控源开启 `follow_group` 且带有已配置的分组，则监控 / 通知开关与历史保留条数
+/// 继承分组的设置；否则使用监控源自身的 `enabled` / `notify_enabled`。
+///
+/// 一个监控源可挂多个分组，这里采用「保守策略」：监控开关取各分组 `enabled` 的逻辑与
+/// （任一分组关闭监控则该源暂停监控），通知开关取各分组 `notify_enabled` 的逻辑与，
+/// 历史保留条数取各分组中的最小值（最严格的保留策略）。
+pub fn resolve_effective_source(
+    source: &SourceConfig,
+    tags: &[crate::models::TagConfig],
+    global_history_limit: usize,
+) -> (bool, bool, usize) {
+    // 若源未跟随分组，或没有标签，则完全使用自身设置。
+    if !source.follow_group || source.tags.is_empty() {
+        return (source.enabled, source.notify_enabled, global_history_limit);
+    }
+    let group_tags: Vec<&crate::models::TagConfig> = tags
+        .iter()
+        .filter(|t| source.tags.iter().any(|tag| tag == &t.name))
+        .collect();
+    if group_tags.is_empty() {
+        // 有标签但没有对应分组配置：仍使用自身设置（分组未配置时不改变行为）。
+        return (source.enabled, source.notify_enabled, global_history_limit);
+    }
+    let enabled = group_tags.iter().all(|t| t.enabled);
+    let notify = group_tags.iter().all(|t| t.notify_enabled);
+    let history = group_tags
+        .iter()
+        .map(|t| t.history_limit)
+        .filter(|&h| h > 0)
+        .min()
+        .unwrap_or(global_history_limit);
+    (enabled, notify, history)
 }
 
 /// 自动生成监控源 ID：优先从名称生成可读 slug，否则从 URL 主机名生成，
