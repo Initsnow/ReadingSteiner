@@ -1,0 +1,14 @@
+$:
+  issue.comment@npc:
+    - docker:
+        image: docker.cnb.cool/azumaseren/default-npc:latest
+      stages:
+        - name: npc go
+          type: npc:go
+
+  pull_request.comment@npc:
+    - docker:
+        image: docker.cnb.cool/azumaseren/default-npc:latest
+      stages:
+        - name: npc go
+          type: npc:go
