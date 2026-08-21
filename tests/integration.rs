@@ -508,3 +508,68 @@ fn test_event_template_rendering() {
     assert!(text.contains("added 2 items"));
     assert!(text.contains("Asia/Shanghai"));
 }
+
+#[test]
+fn test_backup_delete_and_zip_restore_roundtrip() {
+    use std::io::Cursor;
+
+    let dir = tempfile::tempdir().unwrap();
+    let state_dir = dir.path().join("state");
+    let media_dir = dir.path().join("media");
+    let cfg = Config {
+        state_dir: state_dir.clone(),
+        media_dir: media_dir.clone(),
+        ..Config::default()
+    };
+
+    // 准备一个可备份的数据库。
+    let db_path = state_dir.join("reading-steiner.db");
+    std::fs::create_dir_all(&state_dir).unwrap();
+    {
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        conn.execute_batch("CREATE TABLE t (id INTEGER PRIMARY KEY, v TEXT);")
+            .unwrap();
+    }
+
+    // 备份。
+    let backup_dir = reading_steiner::backup::backup_from_path(&cfg, None).unwrap();
+    let name = backup_dir
+        .file_name()
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_string();
+    assert!(backup_dir.join("reading-steiner.db").exists());
+
+    // 列表应包含它。
+    let list = reading_steiner::backup::list_backups(&state_dir).unwrap();
+    assert!(list.iter().any(|b| b.name == name && b.has_zip));
+
+    // 删除它。
+    assert!(reading_steiner::backup::delete_backup(&state_dir, &name).unwrap());
+    assert!(!backup_dir.exists());
+    let list = reading_steiner::backup::list_backups(&state_dir).unwrap();
+    assert!(!list.iter().any(|b| b.name == name));
+
+    // 再备份一次并导出为 zip 字节，模拟“上传 zip 恢复”。
+    let backup_dir = reading_steiner::backup::backup_from_path(&cfg, None).unwrap();
+    let list = reading_steiner::backup::list_backups(&state_dir).unwrap();
+    let new_name = &list[0].name;
+    let zip_path = reading_steiner::backup::backup_zip_path(&state_dir, new_name).unwrap();
+    let zip_bytes = std::fs::read(&zip_path).unwrap();
+
+    // 清空状态目录并重新从 zip 恢复。
+    let restore_state_dir = dir.path().join("state2");
+    let restore_cfg = Config {
+        state_dir: restore_state_dir.clone(),
+        media_dir: dir.path().join("media2"),
+        ..Config::default()
+    };
+    let restored_dir =
+        reading_steiner::backup::restore_from_zip(Cursor::new(zip_bytes), &restore_cfg, None)
+            .unwrap();
+    assert!(restored_dir.join("reading-steiner.db").exists());
+    // 恢复后应把数据库复制到目标 state 目录。
+    assert!(restore_state_dir.join("reading-steiner.db").exists());
+    let _ = backup_dir; // zip 已生成，目录保留
+}
