@@ -35,6 +35,14 @@ pub enum ControlRequest {
     SourcesDelete {
         source_id: String,
     },
+    SourcesSetFlags {
+        /// 要批量更新的监控源 id 列表。
+        source_ids: Vec<String>,
+        /// 批量设置监控开关。None 表示不修改监控开关。
+        enabled: Option<bool>,
+        /// 批量设置通知开关。None 表示不修改通知开关。
+        notify_enabled: Option<bool>,
+    },
     TestSource {
         source_id: String,
     },
@@ -218,6 +226,36 @@ pub(crate) async fn handle_request(state: &Arc<AppState>, req: ControlRequest) -
             }
             sources.retain(|s| s.id != source_id);
             ControlResponse::ok(json!({ "source_id": source_id, "deleted": true }))
+        }
+        ControlRequest::SourcesSetFlags {
+            source_ids,
+            enabled,
+            notify_enabled,
+        } => {
+            // 空 id 列表直接返回成功（幂等，避免前端空选误报错）。
+            if source_ids.is_empty() {
+                return ControlResponse::ok(json!({"updated": 0}));
+            }
+            // 同一把 db → sources 锁内完成校验、写库与内存更新，保证原子性。
+            let db = state.db.lock().await;
+            let mut sources = state.sources.lock().await;
+            let mut updated = 0usize;
+            for sid in &source_ids {
+                let Some(source) = sources.iter_mut().find(|s| s.id == *sid) else {
+                    continue;
+                };
+                if let Some(e) = enabled {
+                    source.enabled = e;
+                }
+                if let Some(n) = notify_enabled {
+                    source.notify_enabled = n;
+                }
+                if let Err(e) = db.upsert_source(source) {
+                    return ControlResponse::err(format!("failed to update {}: {e}", source.id));
+                }
+                updated += 1;
+            }
+            ControlResponse::ok(json!({"updated": updated}))
         }
         ControlRequest::TestSource { source_id } => {
             let source = match scheduler::get_live_source(state, &source_id).await {

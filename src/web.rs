@@ -56,6 +56,7 @@ fn build_router(state: Arc<AppState>) -> Router {
             put(api_update_source).delete(api_delete_source),
         )
         .route("/sources/{id}/test", post(api_test_source))
+        .route("/sources/batch", post(api_batch_sources))
         .route("/events", get(api_list_events))
         .route("/events/{id}", get(api_get_event))
         .route("/check", post(api_check))
@@ -137,6 +138,36 @@ async fn api_delete_source(
 ) -> (StatusCode, Json<Value>) {
     json_response(
         control::handle_request(&state, ControlRequest::SourcesDelete { source_id: id }).await,
+    )
+    .await
+}
+
+/// 批量操作请求体：对多个监控源同时设置监控开关 / 通知开关。
+/// 两个字段均为可选，前端可只改监控或只改通知（也可同时改）。
+#[derive(Deserialize)]
+struct BatchSourcesBody {
+    /// 要批量更新的监控源 id 列表。
+    source_ids: Vec<String>,
+    /// 批量设置监控开关。缺省时不修改监控开关。
+    enabled: Option<bool>,
+    /// 批量设置通知开关。缺省时不修改通知开关。
+    notify_enabled: Option<bool>,
+}
+
+async fn api_batch_sources(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<BatchSourcesBody>,
+) -> (StatusCode, Json<Value>) {
+    json_response(
+        control::handle_request(
+            &state,
+            ControlRequest::SourcesSetFlags {
+                source_ids: body.source_ids,
+                enabled: body.enabled,
+                notify_enabled: body.notify_enabled,
+            },
+        )
+        .await,
     )
     .await
 }

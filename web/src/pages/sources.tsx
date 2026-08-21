@@ -34,6 +34,7 @@ interface FormState {
   id: string
   name: string
   enabled: boolean
+  notify_enabled: boolean
   url: string
   engine: string
   method: string
@@ -56,6 +57,7 @@ function emptyForm(): FormState {
     id: "",
     name: "",
     enabled: true,
+    notify_enabled: true,
     url: "",
     engine: "http",
     method: "GET",
@@ -111,6 +113,7 @@ function sourceToForm(s: SourceConfig): FormState {
     id: s.id,
     name: s.name,
     enabled: s.enabled,
+    notify_enabled: s.notify_enabled ?? true,
     url: s.fetch.url,
     engine: s.fetch.engine,
     method: s.fetch.method,
@@ -159,6 +162,7 @@ function formToSource(f: FormState, existing?: SourceConfig): SourceConfig {
     id: f.id.trim(),
     name: f.name.trim() || f.id.trim(),
     enabled: f.enabled,
+    notify_enabled: f.notify_enabled,
     tags: f.tags
       .split(",")
       .map((t) => t.trim())
@@ -209,6 +213,10 @@ export function SourcesPage() {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [busyId, setBusyId] = useState<string | null>(null)
+
+  // 多选：选中的监控源 id 集合（用于批量暂停监控 / 暂停通知）。
+  const [selected, setSelected] = useState<Set<string>>(new Set())
+  const [batchBusy, setBatchBusy] = useState(false)
 
   // add/edit modal state
   const [modalOpen, setModalOpen] = useState(false)
@@ -325,6 +333,40 @@ export function SourcesPage() {
     }
   }
 
+  // ---- 多选批量操作 ----
+  function toggleSelect(id: string) {
+    setSelected((prev) => {
+      const next = new Set(prev)
+      if (next.has(id)) next.delete(id)
+      else next.add(id)
+      return next
+    })
+  }
+
+  function toggleSelectAll(checked: boolean) {
+    setSelected(checked ? new Set(sources.map((s) => s.id)) : new Set())
+  }
+
+  async function runBatch(
+    flags: { enabled?: boolean; notify_enabled?: boolean },
+    confirmText?: string,
+  ) {
+    const ids = [...selected]
+    if (ids.length === 0) return
+    if (confirmText && !window.confirm(confirmText)) return
+    setBatchBusy(true)
+    setError(null)
+    try {
+      await api.batchSetFlags(ids, flags)
+      await load()
+      setSelected(new Set())
+    } catch (e) {
+      setError((e as Error).message)
+    } finally {
+      setBatchBusy(false)
+    }
+  }
+
   if (loading) {
     return (
       <div className="flex items-center gap-2 text-muted-foreground">
@@ -347,6 +389,58 @@ export function SourcesPage() {
         </div>
       </div>
 
+      {/* 多选批量操作栏：选中任意监控源后出现 */}
+      {selected.size > 0 && (
+        <div className="flex flex-wrap items-center gap-3 rounded-md border bg-muted/40 px-3 py-2">
+          <span className="text-sm font-medium">已选 {selected.size} 个监控源</span>
+          <div className="flex-1" />
+          <Button
+            size="sm"
+            variant="outline"
+            disabled={batchBusy}
+            onClick={() => runBatch({ enabled: false })}
+          >
+            {batchBusy && <Loader2 className="h-4 w-4 animate-spin" />}
+            暂停监控
+          </Button>
+          <Button
+            size="sm"
+            variant="outline"
+            disabled={batchBusy}
+            onClick={() => runBatch({ enabled: true })}
+          >
+            {batchBusy && <Loader2 className="h-4 w-4 animate-spin" />}
+            恢复监控
+          </Button>
+          <Button
+            size="sm"
+            variant="outline"
+            disabled={batchBusy}
+            onClick={() => runBatch({ notify_enabled: false })}
+          >
+            {batchBusy && <Loader2 className="h-4 w-4 animate-spin" />}
+            暂停通知
+          </Button>
+          <Button
+            size="sm"
+            variant="outline"
+            disabled={batchBusy}
+            onClick={() => runBatch({ notify_enabled: true })}
+          >
+            {batchBusy && <Loader2 className="h-4 w-4 animate-spin" />}
+            恢复通知
+          </Button>
+          <Button
+            size="sm"
+            variant="ghost"
+            disabled={batchBusy}
+            onClick={() => setSelected(new Set())}
+          >
+            取消选择
+          </Button>
+        </div>
+      )}
+
       {error && (
         <p className="text-sm text-destructive">加载失败：{error}</p>
       )}
@@ -359,19 +453,58 @@ export function SourcesPage() {
         </Card>
       ) : (
         <div className="grid gap-4">
+          <div className="flex items-center gap-2 px-1 text-sm text-muted-foreground">
+            <label className="flex cursor-pointer items-center gap-2">
+              <input
+                type="checkbox"
+                className="h-4 w-4 accent-primary"
+                checked={selected.size > 0 && selected.size === sources.length}
+                ref={(el) => {
+                  if (el) {
+                    el.indeterminate =
+                      selected.size > 0 && selected.size < sources.length
+                  }
+                }}
+                onChange={(e) => toggleSelectAll(e.target.checked)}
+              />
+              全选
+            </label>
+          </div>
           {sources.map((s) => (
-            <Card key={s.id}>
+            <Card
+              key={s.id}
+              className={
+                selected.has(s.id)
+                  ? "ring-2 ring-primary/60"
+                  : undefined
+              }
+            >
               <CardHeader className="flex flex-row items-start justify-between space-y-0">
-                <div>
-                  <CardTitle className="flex items-center gap-2">
-                    {s.name || s.id}
-                    <Badge variant={s.enabled ? "success" : "secondary"}>
-                      {s.enabled ? "enabled" : "disabled"}
-                    </Badge>
-                  </CardTitle>
-                  <CardDescription className="mt-1 break-all">
-                    {s.fetch.url}
-                  </CardDescription>
+                <div className="flex items-start gap-3">
+                  <input
+                    type="checkbox"
+                    className="mt-1 h-4 w-4 accent-primary"
+                    checked={selected.has(s.id)}
+                    onChange={() => toggleSelect(s.id)}
+                  />
+                  <div>
+                    <CardTitle className="flex items-center gap-2">
+                      {s.name || s.id}
+                      <Badge variant={s.enabled ? "success" : "secondary"}>
+                        {s.enabled ? "监控中" : "已暂停监控"}
+                      </Badge>
+                      <Badge
+                        variant={
+                          s.notify_enabled ? "success" : "secondary"
+                        }
+                      >
+                        {s.notify_enabled ? "通知开启" : "已暂停通知"}
+                      </Badge>
+                    </CardTitle>
+                    <CardDescription className="mt-1 break-all">
+                      {s.fetch.url}
+                    </CardDescription>
+                  </div>
                 </div>
               </CardHeader>
               <CardContent>
@@ -493,6 +626,41 @@ export function SourcesPage() {
                   onChange={(e) => setForm({ ...form, url: e.target.value })}
                 />
               </Field>
+
+              <div className="col-span-2 flex flex-wrap items-center gap-6 rounded-md border bg-muted/30 p-3">
+                <label className="flex cursor-pointer items-center gap-2 text-sm">
+                  <input
+                    type="checkbox"
+                    className="h-4 w-4 accent-primary"
+                    checked={form.enabled}
+                    onChange={(e) =>
+                      setForm({ ...form, enabled: e.target.checked })
+                    }
+                  />
+                  <span>
+                    启用监控
+                    <span className="ml-1 text-xs text-muted-foreground">
+                      （关闭后该源不再被调度检查）
+                    </span>
+                  </span>
+                </label>
+                <label className="flex cursor-pointer items-center gap-2 text-sm">
+                  <input
+                    type="checkbox"
+                    className="h-4 w-4 accent-primary"
+                    checked={form.notify_enabled}
+                    onChange={(e) =>
+                      setForm({ ...form, notify_enabled: e.target.checked })
+                    }
+                  />
+                  <span>
+                    启用通知
+                    <span className="ml-1 text-xs text-muted-foreground">
+                      （关闭后仍监控，但变更不推送 Telegram）
+                    </span>
+                  </span>
+                </label>
+              </div>
 
               <Field label="引擎 (engine)">
                 <select
