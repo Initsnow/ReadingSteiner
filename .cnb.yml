@@ -24,4 +24,4 @@ $:
             role: nya
             systemPrompt: |
               You are a helpful software engineer assistant.
-            userPrompt: 审查本次 PR 的代码变更，给出改进建议，如果有不足缺漏之处自动提交修复
+            userPrompt: 审查本次 PR 的代码变更，如果有不足缺漏之处，请给出改进建议
