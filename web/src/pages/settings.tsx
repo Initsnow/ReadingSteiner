@@ -11,6 +11,7 @@ import {
   Server,
 } from "lucide-react"
 import { api, type EditableSettings } from "@/lib/api"
+import { validateCron } from "@/lib/utils"
 import { Button } from "@/components/ui/button"
 import {
   Card,
@@ -95,6 +96,14 @@ export function SettingsPage() {
 
   async function handleSave() {
     if (!settings) return
+    // 全局默认 cron 留空回退到每小时；非空时校验格式。
+    if (settings.default_cron.trim()) {
+      const cronErr = validateCron(settings.default_cron)
+      if (cronErr) {
+        setError(cronErr)
+        return
+      }
+    }
     setSaving(true)
     setNotice(null)
     setError(null)
@@ -267,6 +276,19 @@ export function SettingsPage() {
                 value={settings.default_timeout_secs}
                 onChange={(e) =>
                   setSettings({ ...settings, default_timeout_secs: Number(e.target.value) })
+                }
+              />
+            </Field>
+            <Field
+              label="默认 cron 表达式"
+              hint="新建监控源未单独配置时使用；留空回退到每小时（0 * * * *）"
+            >
+              <input
+                className={inputCls}
+                value={settings.default_cron}
+                placeholder="0 * * * *"
+                onChange={(e) =>
+                  setSettings({ ...settings, default_cron: e.target.value })
                 }
               />
             </Field>
