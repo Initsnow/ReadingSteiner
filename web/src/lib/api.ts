@@ -107,6 +107,7 @@ export interface EditableSettings {
   concurrency: number
   queue_capacity: number
   default_timeout_secs: number
+  default_cron: string
   default_user_agent: string
   history_limit_per_source: number
   failure_notify_threshold: number

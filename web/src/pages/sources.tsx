@@ -33,6 +33,7 @@ interface FormState {
   engine: string
   method: string
   cron: string
+  cron_follow_global: boolean
   timeout_secs: number
   tags: string
   // 内容提取
@@ -55,6 +56,7 @@ function emptyForm(): FormState {
     engine: "http",
     method: "GET",
     cron: "",
+    cron_follow_global: true,
     timeout_secs: 0,
     tags: "",
     extractType: "items",
@@ -110,6 +112,7 @@ function sourceToForm(s: SourceConfig): FormState {
     engine: s.fetch.engine,
     method: s.fetch.method,
     cron: s.schedule.cron ?? "",
+    cron_follow_global: !s.schedule.cron,
     timeout_secs: s.fetch.timeout_secs ?? 0,
     tags: (s.tags ?? []).join(","),
     ...ex,
@@ -169,7 +172,8 @@ function formToSource(f: FormState, existing?: SourceConfig): SourceConfig {
     schedule: {
       ...base.schedule,
       // 仅 cron 表达式调度。
-      cron: f.cron.trim() ? f.cron.trim() : undefined,
+      // 跟随全局时 cron 留空，后端自动使用全局默认值。
+      cron: f.cron_follow_global ? undefined : f.cron.trim() || undefined,
     },
     extract: buildExtract(f),
   }
@@ -682,13 +686,30 @@ export function SourcesPage() {
                 className="col-span-2"
                 hint={"例：*/15 * * * *（每 15 分钟）、0 9,18 * * 1-5（工作日 9:00/18:00）。"}
               >
-                <input
-                  type="text"
-                  className={inputCls}
-                  placeholder="0 9 * * 1-5"
-                  value={form.cron}
-                  onChange={(e) => setForm({ ...form, cron: e.target.value })}
-                />
+                <div className="flex items-center gap-3 rounded-md border bg-muted/30 px-3 py-2">
+                  <label className="flex shrink-0 cursor-pointer items-center gap-2 text-sm">
+                    <input
+                      type="checkbox"
+                      className="h-4 w-4 accent-primary"
+                      checked={form.cron_follow_global}
+                      onChange={(e) =>
+                        setForm({ ...form, cron_follow_global: e.target.checked })
+                      }
+                    />
+                    跟随全局
+                  </label>
+                  {!form.cron_follow_global && (
+                    <input
+                      type="text"
+                      className={`${inputCls} flex-1`}
+                      placeholder="0 * * * *"
+                      value={form.cron}
+                      onChange={(e) =>
+                        setForm({ ...form, cron: e.target.value })
+                      }
+                    />
+                  )}
+                </div>
               </Field>
 
               <Field label="内容提取" className="col-span-2">
