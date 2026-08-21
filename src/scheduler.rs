@@ -353,15 +353,24 @@ pub async fn check_source(state: &Arc<AppState>, source_id: &str) -> Result<()> 
     Ok(())
 }
 
-/// 一个轻量、无额外依赖的伪随机数（用于调度抖动）。
-/// 基于纳秒时钟与固定加权哈希，保证每次调用结果不同且分布尚可。
-fn rand_jitter() -> i64 {
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
-    // 用大质数做简单混合，避免相邻时间戳序列化（低 4 位周期性）。
-    ((nanos as i64) ^ ((nanos >> 32) as i64)) & 0x7fff_ffff
+/// 基于源 ID 生成稳定、均匀分散在 [-spread, +spread] 的确定性抖动偏移（秒）。
+///
+/// 相比基于纳秒时钟的随机抖动，用源 ID 做哈希能让每个源获得**固定**的错峰偏移：
+/// 同一源每轮调度偏移一致，不同源之间偏移相互错开，从而真正避免大量源在同一瞬间
+/// 同时唤醒抢锁；而随机抖动每次调用取值都不同，仍可能让部分源在某轮重新"撞车"。
+fn stable_jitter(source_id: &str, spread: i64) -> i64 {
+    if spread <= 0 {
+        return 0;
+    }
+    // 用 FNV-1a 对源 ID 做非加密哈希，得到 32 位无符号散列值。
+    let mut hash: u32 = 0x811c_9dc5;
+    for &b in source_id.as_bytes() {
+        hash ^= b as u32;
+        hash = hash.wrapping_mul(0x0100_0193);
+    }
+    // 把哈希映射到 [-spread, +spread] 闭区间，均匀分布。
+    let span = (spread * 2 + 1) as u64;
+    (hash as u64 % span) as i64 - spread
 }
 
 /// 计算下一轮调度状态。
@@ -390,7 +399,7 @@ fn next_schedule(
         // 抖动均匀分布在 [-jitter/2, +jitter/2]，围绕基础间隔上下浮动。
         let spread = jitter / 2;
         let offset = if spread > 0 {
-            (rand_jitter() % (spread * 2 + 1)) - spread
+            stable_jitter(&source.id, spread)
         } else {
             0
         };
