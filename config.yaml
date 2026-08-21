@@ -8,6 +8,8 @@ daemon:
   log_level: info
   # 全局默认请求超时秒数（单个监控源可覆盖）
   default_timeout_secs: 30
+  # 全局默认 cron 表达式（单个监控源可覆盖；留空回退到每小时 `0 * * * *`）
+  default_cron: ""
   # 默认 User-Agent（HTTP 抓取与图片下载）
   default_user_agent: ""
   # 每个监控源最多保留的历史变更事件条数（0 不限制）

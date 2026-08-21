@@ -268,6 +268,7 @@ pub async fn check_source(state: &Arc<AppState>, source_id: &str) -> Result<()> 
             false,
             prev.as_ref(),
             &state.runtime.timezone,
+            &state.runtime.default_cron,
         ))?;
         return Ok(());
     }
@@ -320,6 +321,7 @@ pub async fn check_source(state: &Arc<AppState>, source_id: &str) -> Result<()> 
             false,
             prev.as_ref(),
             &state.runtime.timezone,
+            &state.runtime.default_cron,
         ))?;
         debug!(source = %source.id, "no change");
         return Ok(());
@@ -344,6 +346,7 @@ pub async fn check_source(state: &Arc<AppState>, source_id: &str) -> Result<()> 
                 true,
                 Some(&sched),
                 &state.runtime.timezone,
+                &state.runtime.default_cron,
             ))?;
             debug!(source = %source.id, "duplicate change, suppressed");
             return Ok(());
@@ -438,6 +441,7 @@ pub async fn check_source(state: &Arc<AppState>, source_id: &str) -> Result<()> 
             true,
             prev.as_ref(),
             &state.runtime.timezone,
+            &state.runtime.default_cron,
         );
         sched.last_notified_fingerprint = Some(event.dedupe_key.clone());
         sched.last_notified_at = Some(Utc::now());
@@ -640,6 +644,7 @@ fn next_schedule(
     had_change: bool,
     prev: Option<&ScheduleState>,
     tz: &str,
+    default_cron: &str,
 ) -> ScheduleState {
     // 连续变化计数：本次有变化时保留/递增；无变化时清零。
     let consecutive_changes = if had_change {
@@ -650,11 +655,20 @@ fn next_schedule(
     };
 
     // —— cron 表达式驱动：按表达式精确调度。 ——
-    let next_due_at = match next_cron_due(
-        source.schedule.cron.as_deref().unwrap_or_default(),
-        tz,
-        Utc::now(),
-    ) {
+    // 监控源未配置 cron 时使用全局默认 cron（default_cron）；
+    // default_cron 也为空时回退到每小时（与 effective_cron() 保持一致）。
+    let expr = source
+        .schedule
+        .cron
+        .as_deref()
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .or_else(|| {
+            let d = default_cron.trim();
+            if d.is_empty() { None } else { Some(d) }
+        })
+        .unwrap_or("0 * * * *");
+    let next_due_at = match next_cron_due(expr, tz, Utc::now()) {
         Ok(t) => t,
         Err(e) => {
             // 表达式缺失或无效时退化为短间隔重试，避免 daemon 因单个源卡死。
