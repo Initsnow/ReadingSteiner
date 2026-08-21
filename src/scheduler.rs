@@ -423,7 +423,8 @@ pub async fn check_source(state: &Arc<AppState>, source_id: &str) -> Result<()> 
     {
         let db = state.db.lock().await;
         event_id = db.insert_change_event(&event)?;
-        if state.notifier.is_some() {
+        // 仅当该源开启了通知（notify_enabled）且已配置 notifier 与默认 chat 时才排队发送。
+        if source.notify_enabled && state.notifier.is_some() {
             let chat_id = if state.cfg.telegram.default_chat_id.is_empty() {
                 String::new()
             } else {

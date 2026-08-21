@@ -10,6 +10,9 @@ use crate::config::{EditableSettings, SourceConfig};
 use crate::error::{Error, Result};
 use crate::scheduler::{self, AppState};
 
+/// 单次批量操作允许的最大监控源数量，避免持锁期间长时间执行 upsert 阻塞其他请求。
+const MAX_BATCH_SIZE: usize = 100;
+
 #[cfg(not(unix))]
 use tokio::net::{TcpListener, TcpStream};
 #[cfg(unix)]
@@ -34,6 +37,14 @@ pub enum ControlRequest {
     },
     SourcesDelete {
         source_id: String,
+    },
+    SourcesSetFlags {
+        /// 要批量更新的监控源 id 列表。
+        source_ids: Vec<String>,
+        /// 批量设置监控开关。None 表示不修改监控开关。
+        enabled: Option<bool>,
+        /// 批量设置通知开关。None 表示不修改通知开关。
+        notify_enabled: Option<bool>,
     },
     TestSource {
         source_id: String,
@@ -218,6 +229,55 @@ pub(crate) async fn handle_request(state: &Arc<AppState>, req: ControlRequest) -
             }
             sources.retain(|s| s.id != source_id);
             ControlResponse::ok(json!({ "source_id": source_id, "deleted": true }))
+        }
+        ControlRequest::SourcesSetFlags {
+            source_ids,
+            enabled,
+            notify_enabled,
+        } => {
+            // 空 id 列表或两个开关均未指定时直接返回成功（幂等，避免前端空选/误报错，
+            // 也避免对每个源做无意义的 upsert 写库）。
+            if source_ids.is_empty() || (enabled.is_none() && notify_enabled.is_none()) {
+                return ControlResponse::ok(json!({"updated": 0}));
+            }
+            // 限制单次批量数量，避免超大列表在持锁期间长时间执行 upsert 阻塞其他请求。
+            if source_ids.len() > MAX_BATCH_SIZE {
+                return ControlResponse::err(format!(
+                    "batch size {} exceeds limit {MAX_BATCH_SIZE}",
+                    source_ids.len()
+                ));
+            }
+            // 同一把 db → sources 锁内完成校验、写库与内存更新，保证原子性。
+            let db = state.db.lock().await;
+            let mut sources = state.sources.lock().await;
+            // 基于快照先写库成功后再写回内存，避免写库失败时内存已被修改导致
+            // 内存与 DB 不一致；先收集全部修改后的快照并统一写库，中途失败则
+            // 返回错误且内存保持原状（与原实现「逐个 upsert 留部分成功状态」相比更安全）。
+            let mut snapshots: Vec<SourceConfig> = Vec::new();
+            for sid in &source_ids {
+                let Some(source) = sources.iter().find(|s| s.id == *sid) else {
+                    continue;
+                };
+                let mut snapshot = source.clone();
+                if let Some(e) = enabled {
+                    snapshot.enabled = e;
+                }
+                if let Some(n) = notify_enabled {
+                    snapshot.notify_enabled = n;
+                }
+                if let Err(e) = db.upsert_source(&snapshot) {
+                    return ControlResponse::err(format!("failed to update {}: {e}", snapshot.id));
+                }
+                snapshots.push(snapshot);
+            }
+            // 全部写库成功后统一写回内存，保持内存与 DB 一致。
+            let updated = snapshots.len();
+            for snapshot in &snapshots {
+                if let Some(s) = sources.iter_mut().find(|s| s.id == snapshot.id) {
+                    *s = snapshot.clone();
+                }
+            }
+            ControlResponse::ok(json!({"updated": updated}))
         }
         ControlRequest::TestSource { source_id } => {
             let source = match scheduler::get_live_source(state, &source_id).await {
