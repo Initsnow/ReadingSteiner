@@ -87,6 +87,32 @@ export interface ChangeEvent {
   detected_at: string
 }
 
+export interface DaemonStatus {
+  running: boolean
+  version: string
+  sources: number
+  enabled_sources: number
+  queue_depth: number
+  last_tick_at: string | null
+  engine_health: Record<string, boolean>
+  timezone: string
+  server_time_utc: string
+  server_time_local: string
+}
+
+export interface EditableSettings {
+  concurrency: number
+  queue_capacity: number
+  default_timeout_secs: number
+  default_user_agent: string
+  history_limit_per_source: number
+  failure_notify_threshold: number
+  timezone: string
+  template: string
+  default_chat_id: string
+  max_images_per_event: number
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(path, {
     headers: { "Content-Type": "application/json" },
@@ -146,5 +172,29 @@ export const api = {
     request<{ message_id?: number }>("/api/notify-test", {
       method: "POST",
       body: JSON.stringify({ chat_id: chatId ?? null }),
+    }),
+
+  status: () => request<DaemonStatus>("/api/status"),
+
+  getSettings: () => request<EditableSettings>("/api/settings"),
+
+  updateSettings: (settings: EditableSettings) =>
+    request<{ saved: boolean; restart_required: boolean; config: string }>(
+      "/api/settings",
+      {
+        method: "PUT",
+        body: JSON.stringify(settings),
+      },
+    ),
+
+  createBackup: () =>
+    request<{ path: string; name: string }>("/api/backup", { method: "POST" }),
+
+  listBackups: () => request<{ backups: string[] }>("/api/backups"),
+
+  restoreBackup: (name: string) =>
+    request<unknown>("/api/restore", {
+      method: "POST",
+      body: JSON.stringify({ name }),
     }),
 }

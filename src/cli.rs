@@ -69,6 +69,27 @@ pub enum Command {
         #[arg(long, default_value = "config.yaml")]
         config: PathBuf,
     },
+    /// Show current global settings
+    Settings {
+        #[arg(long, default_value = "config.yaml")]
+        config: PathBuf,
+    },
+    /// Create a full backup (db + media + config)
+    Backup {
+        #[arg(long, default_value = "config.yaml")]
+        config: PathBuf,
+    },
+    /// List available backups
+    Backups {
+        #[arg(long, default_value = "config.yaml")]
+        config: PathBuf,
+    },
+    /// Restore from a backup by name (requires daemon stopped)
+    Restore {
+        name: String,
+        #[arg(long, default_value = "config.yaml")]
+        config: PathBuf,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -89,7 +110,7 @@ pub async fn run(cli: Cli) -> Result<()> {
         Command::Serve { config } => {
             init_tracing("info");
             let cfg = Config::load(&config)?;
-            let state = Arc::new(AppState::new(cfg)?);
+            let state = Arc::new(AppState::with_config_path(cfg, Some(config.clone()))?);
             let control_state = state.clone();
             let control = tokio::spawn(async move {
                 if let Err(e) = control::serve_control(control_state).await {
@@ -209,6 +230,62 @@ pub async fn run(cli: Cli) -> Result<()> {
             )
             .await?;
             print_response(&resp, false);
+            Ok(())
+        }
+        Command::Settings { config } => {
+            let cfg = Config::load(&config)?;
+            let resp =
+                control::send_request(cfg.socket_path(), &ControlRequest::GetSettings).await?;
+            print_response(&resp, false);
+            Ok(())
+        }
+        Command::Backup { config } => {
+            let cfg = Config::load(&config)?;
+            // 优先通过 daemon 在线备份（一致性快照）；daemon 不可用时回退到直接读库。
+            let resp = control::send_request(cfg.socket_path(), &ControlRequest::Backup).await;
+            match resp {
+                Ok(r) if r.ok => {
+                    print_response(&r, false);
+                    Ok(())
+                }
+                _ => {
+                    // daemon 未运行：直接打开数据库做备份。
+                    match crate::backup::backup_from_path(&cfg, Some(&config)) {
+                        Ok(dir) => {
+                            println!("backup created: {}", dir.display());
+                            Ok(())
+                        }
+                        Err(e) => Err(e),
+                    }
+                }
+            }
+        }
+        Command::Backups { config } => {
+            let cfg = Config::load(&config)?;
+            match crate::backup::list_backups(&cfg.state_dir) {
+                Ok(names) => {
+                    if names.is_empty() {
+                        println!("no backups found");
+                    } else {
+                        for n in &names {
+                            println!("{n}");
+                        }
+                    }
+                    Ok(())
+                }
+                Err(e) => Err(e),
+            }
+        }
+        Command::Restore { name, config } => {
+            let cfg = Config::load(&config)?;
+            // 恢复会覆盖当前数据库与 media，需 daemon 停止。
+            let dir = cfg.state_dir.join("backups").join(&name);
+            if !dir.exists() {
+                return Err(Error::other(format!("backup {name} not found")));
+            }
+            println!("restoring from backup {name} ...");
+            crate::backup::restore(&dir, &cfg)?;
+            println!("restore complete. restart daemon to load restored data.");
             Ok(())
         }
     }

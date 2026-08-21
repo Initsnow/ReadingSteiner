@@ -80,6 +80,45 @@ pub struct DaemonConfig {
     pub concurrency: usize,
     pub queue_capacity: usize,
     pub log_level: String,
+    /// 全局默认请求超时秒数（单个监控源可覆盖，见 FetchConfig::timeout_secs）。
+    pub default_timeout_secs: u64,
+    /// 全局默认 User-Agent（HTTP 抓取与图片下载使用）。
+    pub default_user_agent: String,
+    /// 每个监控源最多保留的历史变更事件条数（超出部分自动清理，0 表示不限制）。
+    pub history_limit_per_source: usize,
+    /// 连续失败达到多少次后发送一条 Telegram 失败通知（0 表示禁用）。
+    pub failure_notify_threshold: u32,
+    /// 监控检查调度器使用的时区（IANA 名称，如 Asia/Shanghai、UTC）。
+    /// 影响基于本地时间的显示与告警时间戳；调度仍以 UTC 内部计算，仅做展示/告警换算。
+    pub timezone: String,
+}
+
+impl DaemonConfig {
+    pub fn effective_timeout(&self, per_source: u64) -> u64 {
+        if per_source > 0 {
+            per_source
+        } else if self.default_timeout_secs > 0 {
+            self.default_timeout_secs
+        } else {
+            30
+        }
+    }
+
+    pub fn effective_user_agent(&self) -> String {
+        if self.default_user_agent.trim().is_empty() {
+            format!("ReadingSteiner/{}", env!("CARGO_PKG_VERSION"))
+        } else {
+            self.default_user_agent.clone()
+        }
+    }
+
+    pub fn effective_timezone(&self) -> String {
+        if self.timezone.trim().is_empty() {
+            "UTC".to_string()
+        } else {
+            self.timezone.trim().to_string()
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -92,6 +131,85 @@ pub struct TelegramConfig {
     pub max_images_per_event: usize,
     pub image_bytes_budget: u64,
     pub digest_window_secs: u64,
+    /// 变更通知文案模板。支持占位符：{label}、{watch}、{time}、{tz}、{summary}、{items}。
+    /// 留空则使用内置默认模板。
+    pub template: String,
+}
+
+impl TelegramConfig {
+    /// 获取事件通知模板，未配置时返回内置默认模板。
+    pub fn event_template(&self) -> String {
+        if self.template.trim().is_empty() {
+            DEFAULT_EVENT_TEMPLATE.to_string()
+        } else {
+            self.template.clone()
+        }
+    }
+}
+
+/// 默认变更通知模板。占位符含义见 TelegramConfig::template 注释。
+pub const DEFAULT_EVENT_TEMPLATE: &str = r#"<b>ReadingSteiner</b> — {label}
+<b>{watch}</b>
+<i>{time} {tz}</i>
+{summary}
+{items}"#;
+
+/// 通过 Web/CLI 可编辑的全局设置视图。对应 config.yaml 的 daemon / telegram 段。
+/// 不包含 token 等敏感密钥（token 仍通过 token_file 管理）。
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct EditableSettings {
+    /// 抓取工作线程数（并发数）。
+    pub concurrency: usize,
+    /// 队列容量。
+    pub queue_capacity: usize,
+    /// 默认请求超时秒数。
+    pub default_timeout_secs: u64,
+    /// 默认 User-Agent。
+    pub default_user_agent: String,
+    /// 每个监控源保留历史条数（0 不限制）。
+    pub history_limit_per_source: usize,
+    /// 连续失败达到多少次发送失败通知（0 禁用）。
+    pub failure_notify_threshold: u32,
+    /// 调度器时区（IANA 名称）。
+    pub timezone: String,
+    /// 通知模板。
+    pub template: String,
+    /// Telegram 默认 chat id。
+    pub default_chat_id: String,
+    /// 单事件最多附带图片数。
+    pub max_images_per_event: usize,
+}
+
+impl EditableSettings {
+    pub fn from_config(cfg: &Config) -> Self {
+        Self {
+            concurrency: cfg.daemon.concurrency,
+            queue_capacity: cfg.daemon.queue_capacity,
+            default_timeout_secs: cfg.daemon.default_timeout_secs,
+            default_user_agent: cfg.daemon.default_user_agent.clone(),
+            history_limit_per_source: cfg.daemon.history_limit_per_source,
+            failure_notify_threshold: cfg.daemon.failure_notify_threshold,
+            timezone: cfg.daemon.timezone.clone(),
+            template: cfg.telegram.template.clone(),
+            default_chat_id: cfg.telegram.default_chat_id.clone(),
+            max_images_per_event: cfg.telegram.max_images_per_event,
+        }
+    }
+
+    /// 把可编辑设置写回 config（会合并 token 等未编辑字段）。
+    pub fn apply_to(&self, cfg: &mut Config) {
+        cfg.daemon.concurrency = self.concurrency;
+        cfg.daemon.queue_capacity = self.queue_capacity;
+        cfg.daemon.default_timeout_secs = self.default_timeout_secs;
+        cfg.daemon.default_user_agent = self.default_user_agent.clone();
+        cfg.daemon.history_limit_per_source = self.history_limit_per_source;
+        cfg.daemon.failure_notify_threshold = self.failure_notify_threshold;
+        cfg.daemon.timezone = self.timezone.clone();
+        cfg.telegram.template = self.template.clone();
+        cfg.telegram.default_chat_id = self.default_chat_id.clone();
+        cfg.telegram.max_images_per_event = self.max_images_per_event;
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -281,6 +399,12 @@ pub struct RuntimeConfig {
     pub socket_path: PathBuf,
     pub concurrency: usize,
     pub queue_capacity: usize,
+    pub default_timeout_secs: u64,
+    pub default_user_agent: String,
+    pub history_limit_per_source: usize,
+    pub failure_notify_threshold: u32,
+    pub timezone: String,
+    pub template: String,
 }
 
 impl RuntimeConfig {
@@ -299,6 +423,12 @@ impl RuntimeConfig {
             } else {
                 cfg.daemon.queue_capacity
             },
+            default_timeout_secs: cfg.daemon.default_timeout_secs,
+            default_user_agent: cfg.daemon.effective_user_agent(),
+            history_limit_per_source: cfg.daemon.history_limit_per_source,
+            failure_notify_threshold: cfg.daemon.failure_notify_threshold,
+            timezone: cfg.daemon.effective_timezone(),
+            template: cfg.telegram.event_template(),
         }
     }
 }

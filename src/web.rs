@@ -17,7 +17,7 @@ use serde_json::{Value, json};
 use tower_http::services::{ServeDir, ServeFile};
 use tracing::info;
 
-use crate::config::SourceConfig;
+use crate::config::{EditableSettings, SourceConfig};
 use crate::control::{self, ControlRequest, ControlResponse};
 use crate::error::Result;
 use crate::scheduler::AppState;
@@ -56,6 +56,10 @@ fn build_router(state: Arc<AppState>) -> Router {
         .route("/check", post(api_check))
         .route("/history", get(api_history))
         .route("/notify-test", post(api_notify_test))
+        .route("/settings", get(api_get_settings).put(api_update_settings))
+        .route("/backup", post(api_backup))
+        .route("/backups", get(api_list_backups))
+        .route("/restore", post(api_restore))
         .with_state(state);
 
     Router::new()
@@ -229,6 +233,49 @@ async fn api_notify_test(
             },
         )
         .await,
+    )
+    .await
+}
+
+async fn api_get_settings(State(state): State<Arc<AppState>>) -> (StatusCode, Json<Value>) {
+    json_response(control::handle_request(&state, ControlRequest::GetSettings).await).await
+}
+
+async fn api_update_settings(
+    State(state): State<Arc<AppState>>,
+    Json(settings): Json<EditableSettings>,
+) -> (StatusCode, Json<Value>) {
+    json_response(
+        control::handle_request(
+            &state,
+            ControlRequest::UpdateSettings {
+                settings: Box::new(settings),
+            },
+        )
+        .await,
+    )
+    .await
+}
+
+async fn api_backup(State(state): State<Arc<AppState>>) -> (StatusCode, Json<Value>) {
+    json_response(control::handle_request(&state, ControlRequest::Backup).await).await
+}
+
+async fn api_list_backups(State(state): State<Arc<AppState>>) -> (StatusCode, Json<Value>) {
+    json_response(control::handle_request(&state, ControlRequest::ListBackups).await).await
+}
+
+#[derive(Deserialize)]
+struct RestoreBody {
+    name: String,
+}
+
+async fn api_restore(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<RestoreBody>,
+) -> (StatusCode, Json<Value>) {
+    json_response(
+        control::handle_request(&state, ControlRequest::Restore { name: body.name }).await,
     )
     .await
 }

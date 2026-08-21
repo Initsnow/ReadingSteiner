@@ -15,12 +15,12 @@ pub struct HttpFetcher {
 }
 
 impl HttpFetcher {
-    pub fn new() -> Result<Self> {
+    pub fn new(user_agent: &str, default_timeout_secs: u64) -> Result<Self> {
         let client = ClientBuilder::new()
             .connect_timeout(Duration::from_secs(10))
-            .timeout(Duration::from_secs(60))
+            .timeout(Duration::from_secs(default_timeout_secs.max(1)))
             .pool_max_idle_per_host(32)
-            .user_agent(concat!("ReadingSteiner/", env!("CARGO_PKG_VERSION")))
+            .user_agent(user_agent)
             .build()?;
         Ok(Self {
             client,

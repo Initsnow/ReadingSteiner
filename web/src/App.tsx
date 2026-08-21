@@ -3,6 +3,7 @@ import { Layout } from "./components/layout"
 import { SourcesPage } from "./pages/sources"
 import { EventsPage } from "./pages/events"
 import { EventDetailPage } from "./pages/event-detail"
+import { SettingsPage } from "./pages/settings"
 
 export default function App() {
   return (
@@ -12,6 +13,7 @@ export default function App() {
         <Route path="/sources" element={<SourcesPage />} />
         <Route path="/events" element={<EventsPage />} />
         <Route path="/events/:id" element={<EventDetailPage />} />
+        <Route path="/settings" element={<SettingsPage />} />
         <Route path="*" element={<Navigate to="/sources" replace />} />
       </Route>
     </Routes>

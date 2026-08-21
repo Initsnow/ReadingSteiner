@@ -6,6 +6,16 @@ daemon:
   concurrency: 16
   queue_capacity: 1024
   log_level: info
+  # 全局默认请求超时秒数（单个监控源可覆盖）
+  default_timeout_secs: 30
+  # 默认 User-Agent（HTTP 抓取与图片下载）
+  default_user_agent: ""
+  # 每个监控源最多保留的历史变更事件条数（0 不限制）
+  history_limit_per_source: 0
+  # 连续失败达到多少次后发送 Telegram 失败通知（0 禁用）
+  failure_notify_threshold: 0
+  # 监控检查调度器/告警展示使用的时区（IANA 名称，如 Asia/Shanghai）
+  timezone: UTC
 
 web:
   listen: 127.0.0.1:8901
@@ -19,6 +29,9 @@ telegram:
   max_images_per_event: 10
   image_bytes_budget: 10485760
   digest_window_secs: 30
+  # 变更通知模板（占位符：{label} {watch} {time} {tz} {summary} {items}；留空用默认）
+  # template: ""
+  template: ""
 
 camofox:
   enabled: false

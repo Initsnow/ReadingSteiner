@@ -429,3 +429,83 @@ fn test_css_image_selector_ignores_non_html() {
     let out = pipeline::run_pipeline(&html_doc, &extract).unwrap();
     assert_eq!(out.image_urls, vec!["/a.jpg"]);
 }
+
+#[test]
+fn test_prune_history_per_source() {
+    let db = Db::open_in_memory().unwrap();
+    // 给两个监控源各插入 5 条事件。
+    for wp in ["a", "b"] {
+        for i in 0..5 {
+            db.insert_change_event(&reading_steiner::models::ChangeEvent {
+                id: 0,
+                watchpoint_id: wp.into(),
+                change_type: ChangeType::Updated,
+                old_items_json: "[]".into(),
+                new_items_json: "[]".into(),
+                diff_summary: format!("{wp}-{i}"),
+                fingerprint: "f".into(),
+                dedupe_key: "d".into(),
+                image_urls_json: "[]".into(),
+                detected_at: Utc::now(),
+            })
+            .unwrap();
+        }
+    }
+    // 每个保留 2 条。
+    db.prune_history(2).unwrap();
+    let events = db.list_change_events(None, 100).unwrap();
+    assert_eq!(events.len(), 4, "每个源应只保留 2 条，共 4 条");
+    // 校验每个源都保留最新 2 条（diff_summary 含 -3 / -4）。
+    for wp in ["a", "b"] {
+        let list = db.list_change_events(Some(wp), 10).unwrap();
+        assert_eq!(list.len(), 2);
+        assert!(list.iter().any(|e| e.diff_summary == format!("{wp}-3")));
+        assert!(list.iter().any(|e| e.diff_summary == format!("{wp}-4")));
+    }
+}
+
+#[test]
+fn test_failure_notified_field_roundtrip() {
+    let db = Db::open_in_memory().unwrap();
+    let sched = reading_steiner::models::ScheduleState {
+        source_id: "s".into(),
+        next_due_at: Utc::now(),
+        consecutive_failures: 3,
+        consecutive_changes: 0,
+        backoff_until: None,
+        last_success_at: None,
+        last_notified_fingerprint: None,
+        last_notified_at: None,
+        failure_notified: true,
+    };
+    db.upsert_schedule_state(&sched).unwrap();
+    let got = db.get_schedule_state("s").unwrap().unwrap();
+    assert!(got.failure_notified);
+    assert_eq!(got.consecutive_failures, 3);
+}
+
+#[test]
+fn test_event_template_rendering() {
+    let event = reading_steiner::models::ChangeEvent {
+        id: 1,
+        watchpoint_id: "watch1".into(),
+        change_type: ChangeType::New,
+        old_items_json: "[]".into(),
+        new_items_json: "[]".into(),
+        diff_summary: "added 2 items".into(),
+        fingerprint: "f".into(),
+        dedupe_key: "d".into(),
+        image_urls_json: "[]".into(),
+        detected_at: Utc::now(),
+    };
+    let text = reading_steiner::notifier::render_event_message(
+        &event,
+        &[],
+        "<b>{label}</b> {watch} @ {time} {tz}\n{summary}",
+        "Asia/Shanghai",
+    );
+    assert!(text.contains("NEW"));
+    assert!(text.contains("watch1"));
+    assert!(text.contains("added 2 items"));
+    assert!(text.contains("Asia/Shanghai"));
+}
