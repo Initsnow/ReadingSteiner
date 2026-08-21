@@ -314,26 +314,6 @@ export function SettingsPage() {
                 }
               />
             </Field>
-            <Field label="默认检查间隔（秒）" hint="监控源未单独覆盖时使用，默认 3600（1h）">
-              <input
-                type="number"
-                className={inputCls}
-                value={settings.interval_secs}
-                onChange={(e) =>
-                  setSettings({ ...settings, interval_secs: Number(e.target.value) })
-                }
-              />
-            </Field>
-            <Field label="默认随机抖动（秒）" hint="监控源未单独覆盖时使用，默认 60s">
-              <input
-                type="number"
-                className={inputCls}
-                value={settings.jitter_secs}
-                onChange={(e) =>
-                  setSettings({ ...settings, jitter_secs: Number(e.target.value) })
-                }
-              />
-            </Field>
             <Field label="单事件最多附带图片数">
               <input
                 type="number"
