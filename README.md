@@ -61,9 +61,9 @@ reading-steiner diff <event-id>       # 查看变更 diff
 reading-steiner notify test           # 发测试 Telegram 消息
 reading-steiner history <id>          # 变更历史
 reading-steiner settings             # 查看全局设置
-reading-steiner backup               # 备份（db + media + config）
+reading-steiner backup               # 备份（db + media + config，并打包 zip）
 reading-steiner backups              # 列出已有备份
-reading-steiner restore <name>       # 从备份恢复（需 daemon 停止）
+reading-steiner restore <name>       # 从备份恢复（在线，无需停止 daemon）
 ```
 
 ### 全局设置（Web「设置」页 / `reading-steiner settings`）
@@ -75,22 +75,25 @@ reading-steiner restore <name>       # 从备份恢复（需 daemon 停止）
 - `daemon.default_user_agent`——默认 User-Agent（HTTP 抓取与图片下载）。
 - `daemon.history_limit_per_source`——每个监控源保留的历史变更事件条数（0 不限制）。
 - `daemon.failure_notify_threshold`——连续失败达到多少次后发送 Telegram 失败告警（0 禁用）。
-- `daemon.timezone`——调度器/告警展示时区（IANA 名称，如 `Asia/Shanghai`）。
+- `daemon.timezone`——调度器/告警展示时区（IANA 名称，如 `Asia/Shanghai`；留空使用系统本地时区）。
+- `daemon.interval_secs`——全局默认检查间隔（秒，源未单独覆盖时使用，默认 3600 = 1h）。
+- `daemon.jitter_secs`——全局默认检查间隔随机抖动秒数（源未单独覆盖时使用，默认 60s）。
 - `telegram.template`——变更通知模板，占位符：`{label}` `{watch}` `{time}` `{tz}` `{summary}` `{items}`。
 - `telegram.max_images_per_event`、`telegram.default_chat_id` 等。
 
 ### 备份与恢复
 
 ```bash
-# 备份（在线一致性快照，含 db + media + config）
+# 备份（在线一致性快照，含 db + media + config，并打包 zip）
 reading-steiner backup --config config.local.yaml
 # 列出备份
 reading-steiner backups
-# 恢复（先停止 daemon）
+# 恢复（在线，无需停止 daemon；daemon 未运行时自动回退到离线恢复）
 reading-steiner restore <备份名> --config config.local.yaml
 ```
 
-备份保存在 `state/backups/<时间戳>/`。Web 控制台「设置」页也提供一键备份与备份列表。
+备份保存在 `state/backups/<时间戳>/`，并打包为同名 `<时间戳>.zip` 供下载。
+Web 控制台「设置」页提供一键备份、备份列表、**zip 下载**与**在线恢复**（无需停止 daemon）。
 
 ## 配置
 
@@ -98,9 +101,10 @@ reading-steiner restore <备份名> --config config.local.yaml
 
 监控源通过 **Web 控制台**或 **CLI**（`reading-steiner sources add <file>`）添加，格式见 `src/config.rs::SourceConfig`。每个源只需配置：抓什么（fetch）、提取什么（extract，整页文本或结构化条目）、多久检测一次（schedule）。变更检测完全自动。
 
-**调度与队列参数**：
-- `schedule.interval_secs` + `schedule.jitter_secs`——每次调度在基础间隔上叠加随机抖动（均匀分布在 ±jitter/2），避免大量源同一瞬间同时唤醒抢锁。
-- `priority`——到期的源按优先级从高到低依次检测（数值越大越先处理）。
+**调度与队列参数**（检查间隔与抖动默认走全局设置，可按源覆盖）：
+- `daemon.interval_secs`——全局默认检查间隔（秒，默认 3600 = 1h）。
+- `daemon.jitter_secs`——全局默认随机抖动（秒，默认 60s），在基础间隔上叠加随机抖动（均匀分布在 ±jitter/2），避免大量源同一瞬间同时唤醒抢锁。
+- `schedule.interval_secs` / `schedule.jitter_secs`——单个监控源可**覆盖**全局值；留空（0）则使用全局默认。
 - `daemon.queue_capacity`——每个轮询 tick 最多入队的检测任务数（有界队列，超出部分下个 tick 再处理），防止突发积压。
 - `daemon.concurrency`——并发检测的最大任务数（信号量）。
 
@@ -121,7 +125,7 @@ fetch:
   engine: http
   url: https://example.com
 schedule:
-  interval_secs: 300
+  # interval_secs / jitter_secs 省略时使用全局默认（默认 1h / 60s）
 extract:
   type: text
   images:
@@ -136,21 +140,20 @@ name: Shop
 fetch:
   engine: http
   url: https://example.com/list
-schedule:
-  interval_secs: 60
 extract:
   type: items
   selector:
     kind: css
     selector: ".product"
   images:
-    kind: items
+    kind: changed   # 只发有变化的条目相关图片
 ```
 
 `images` 取值：
 
 - `kind: none`（默认）——不附带图片。
 - `kind: items`——发送结构化条目提取时自动带出的图片（仅适用于 `type: items`）。
+- `kind: changed`——**只发送发生变更的条目**相关图片：取其元素自身子树（子节点）的 `<img>`，以及父容器中紧邻的直接 `<img>` 兄弟（如缩略图）。不会把整页全部图片都发出去（仅适用于 `type: items`）。
 - `kind: css` + `selector`——用 CSS 选择器从页面挑选图片元素（取其 `src`/`data-src`）。
 
 同一事件最多发送的图片数由 `telegram.max_images_per_event` 控制（默认 10）。图片在本地 `media_dir` 缓存，重复图片自动去重。

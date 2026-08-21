@@ -36,6 +36,11 @@ impl Db {
         &self.conn
     }
 
+    /// 可变地暴露底层连接，供在线恢复等需要写入实时连接的场景使用。
+    pub fn connection_mut(&mut self) -> &mut Connection {
+        &mut self.conn
+    }
+
     pub fn open_in_memory() -> Result<Self> {
         let conn = Connection::open_in_memory()?;
         conn.pragma_update(None, "journal_mode", "WAL")?;

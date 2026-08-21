@@ -66,6 +66,8 @@ fn collect_image_urls(
             }
             dedupe_urls(urls)
         }
+        // `Changed` 模式需结合本次变更（diff）定位变更元素，由调度器在处理变更时收集。
+        Some(ImageSelector::Changed) => Vec::new(),
         Some(ImageSelector::Css { selector }) => {
             // CSS 图片选择器仅适用于 HTML 内容。对 JSON/纯文本等非 HTML 内容
             // 直接跳过，避免把文本当 HTML 解析产生无意义的匹配。
@@ -110,6 +112,91 @@ fn collect_img_urls_from_doc(doc: &FetchedDocument, selector_str: &str) -> Vec<S
         }
     }
     urls
+}
+
+/// 只收集**发生变更的元素**相关图片：其自身子树（子节点）及其父容器中的 `<img>`。
+/// 避免把整页全部图片都发出去。
+///
+/// `item_selector` 用于在 HTML 中重新定位条目元素，`changed_stable_ids` 为本次
+/// 变更中新增 / 更新的条目 stable_id 集合。稳定 id 为 `item-{idx}`（无 id 字段时）
+/// 时，按枚举索引定位元素；否则按条目字段值匹配。
+/// 对外暴露：按变更 stable_id 收集变更元素相关图片。
+pub fn collect_changed_element_images(
+    doc: &FetchedDocument,
+    item_selector: &ItemSelector,
+    fields: &[ItemField],
+    changed_stable_ids: &std::collections::HashSet<String>,
+) -> Vec<String> {
+    if !is_html_doc(doc) {
+        return Vec::new();
+    }
+    // JSONPath 提取无法定位 HTML 元素，无法做变更元素定位，直接返回空。
+    let ItemSelector::Css { selector } = item_selector else {
+        return Vec::new();
+    };
+    let html = Html::parse_document(&doc.text);
+    let Ok(sel) = Selector::parse(selector) else {
+        return Vec::new();
+    };
+    let elements: Vec<_> = html.select(&sel).collect();
+
+    let mut urls = Vec::new();
+    for (idx, el) in elements.iter().enumerate() {
+        let stable_id = element_stable_id(el, fields, idx);
+        if !changed_stable_ids.contains(&stable_id) {
+            continue;
+        }
+        // 1) 自身子树（子节点）中的 img。
+        urls.extend(collect_img_urls_from_element(el));
+        // 2) 父容器（父节点）中、但不属于变更元素自身的 img（即直接兄弟 img）。
+        if let Some(parent) = el.parent()
+            && let Some(parent_el) = scraper::ElementRef::wrap(parent)
+        {
+            urls.extend(collect_sibling_imgs(&parent_el, el));
+        }
+    }
+    dedupe_urls(urls)
+}
+
+/// 收集父容器中除指定子元素外、位于同一层级的**直接 `<img>` 兄弟**。
+/// 仅取父容器下紧邻的 `<img>`（如缩略图），不递归进其他兄弟容器，避免把整页图片都带出来。
+fn collect_sibling_imgs(
+    parent: &scraper::ElementRef<'_>,
+    exclude: &scraper::ElementRef<'_>,
+) -> Vec<String> {
+    let mut urls = Vec::new();
+    for child in parent.children() {
+        // 跳过变更元素自身（其 img 已由子树收集），只取父容器内紧邻的直接 `<img>`。
+        if child.id() == exclude.id() {
+            continue;
+        }
+        if let Some(child_el) = scraper::ElementRef::wrap(child)
+            && child_el.value().name() == "img"
+        {
+            for attr in ["src", "data-src", "data-lazy-src"] {
+                if let Some(v) = child_el.value().attr(attr) {
+                    urls.push(v.to_string());
+                    break;
+                }
+            }
+        }
+    }
+    urls
+}
+
+/// 复现 extract_css 中 stable_id 的计算逻辑，用于把变更条目映射回 HTML 元素。
+fn element_stable_id(el: &scraper::ElementRef<'_>, fields: &[ItemField], idx: usize) -> String {
+    if fields.is_empty() {
+        // 未配置字段时 extract_css 会捕获完整文本，stable_id 也用 index。
+        return format!("item-{idx}");
+    }
+    if let Some(id_field) = fields.iter().find(|f| f.name == "id") {
+        let v = extract_css_field(el, id_field);
+        if !v.is_empty() {
+            return v;
+        }
+    }
+    format!("item-{idx}")
 }
 
 fn dedupe_urls(urls: Vec<String>) -> Vec<String> {
@@ -540,6 +627,24 @@ mod tests {
         assert_eq!(out.items.len(), 2);
         // 去重后保留顺序。
         assert_eq!(out.image_urls, vec!["/1.jpg", "/2.jpg"]);
+    }
+
+    #[test]
+    fn test_collect_changed_element_images_only_changed() {
+        // `Changed` 模式：只收集发生变更条目的元素（自身子树 + 父容器）的 img，
+        // 不会把整页所有图片都发出去。
+        let html = r#"<html><body>
+            <div class="item"><img src="/a.jpg"><p>item-a</p></div>
+            <div class="item"><img src="/b.jpg"><p>item-b</p></div>
+        </body></html>"#;
+        let selector = ItemSelector::Css {
+            selector: ".item".into(),
+        };
+        let fields = vec![];
+        let changed = std::collections::HashSet::from(["item-1".to_string()]);
+        let urls = collect_changed_element_images(&doc(html), &selector, &fields, &changed);
+        // 只应包含变更元素 item-1 的 /b.jpg，而非全部图片。
+        assert_eq!(urls, vec!["/b.jpg"]);
     }
 
     #[test]

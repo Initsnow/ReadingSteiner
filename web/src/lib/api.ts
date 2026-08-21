@@ -26,10 +26,9 @@ export interface SourceConfig {
     screenshot?: boolean
   }
   schedule: {
-    interval_secs: number
+    interval_secs?: number
     jitter_secs?: number
   }
-  priority: number
   // 内容提取：决定「把抓到的内容变成什么拿来比对」
   extract: ExtractConfig
 }
@@ -39,6 +38,7 @@ export type ImageSelector =
   | { kind: "none" }
   | { kind: "items" }
   | { kind: "css"; selector: string }
+  | { kind: "changed" }
 
 // 内容提取方式
 export type ExtractConfig =
@@ -108,6 +108,8 @@ export interface EditableSettings {
   history_limit_per_source: number
   failure_notify_threshold: number
   timezone: string
+  interval_secs: number
+  jitter_secs: number
   template: string
   default_chat_id: string
   max_images_per_event: number
@@ -188,9 +190,12 @@ export const api = {
     ),
 
   createBackup: () =>
-    request<{ path: string; name: string }>("/api/backup", { method: "POST" }),
+    request<{ path: string; name: string; has_zip: boolean }>("/api/backup", { method: "POST" }),
 
-  listBackups: () => request<{ backups: string[] }>("/api/backups"),
+  listBackups: () =>
+    request<{ backups: { name: string; has_zip: boolean }[] }>("/api/backups"),
+
+  downloadBackup: (name: string) => `/api/backups/${encodeURIComponent(name)}/download`,
 
   restoreBackup: (name: string) =>
     request<unknown>("/api/restore", {

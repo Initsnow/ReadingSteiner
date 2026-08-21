@@ -120,7 +120,8 @@ impl TelegramNotifier {
         new_items: &[Item],
         image_entries: &[MediaCacheEntry],
     ) -> Result<Vec<i64>> {
-        let text = render_event_message(event, new_items, &self.cfg.event_template(), &self.timezone);
+        let text =
+            render_event_message(event, new_items, &self.cfg.event_template(), &self.timezone);
         let max = self.cfg.max_images_per_event.max(1);
         let entries: Vec<_> = image_entries.iter().take(max).collect();
 

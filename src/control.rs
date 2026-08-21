@@ -276,10 +276,20 @@ pub(crate) async fn handle_request(state: &Arc<AppState>, req: ControlRequest) -
         ControlRequest::Backup => {
             let db = state.db.lock().await;
             match crate::backup::backup(db.connection(), &state.cfg, state.config_path.as_deref()) {
-                Ok(dir) => ControlResponse::ok(json!({
-                    "path": dir.display().to_string(),
-                    "name": dir.file_name().and_then(|s| s.to_str()).unwrap_or(""),
-                })),
+                Ok(dir) => {
+                    let name = dir.file_name().and_then(|s| s.to_str()).unwrap_or("");
+                    let has_zip = state
+                        .runtime
+                        .state_dir
+                        .join("backups")
+                        .join(format!("{name}.zip"))
+                        .exists();
+                    ControlResponse::ok(json!({
+                        "path": dir.display().to_string(),
+                        "name": name,
+                        "has_zip": has_zip,
+                    }))
+                }
                 Err(e) => ControlResponse::err(e.to_string()),
             }
         }
@@ -290,14 +300,26 @@ pub(crate) async fn handle_request(state: &Arc<AppState>, req: ControlRequest) -
             }
         }
         ControlRequest::Restore { name } => {
-            // 恢复需停止 daemon 后由 CLI 执行；这里仅校验备份存在并给出提示。
+            let mut db = state.db.lock().await;
             let dir = state.runtime.state_dir.join("backups").join(&name);
             if !dir.join("reading-steiner.db").exists() {
                 return ControlResponse::err(format!("backup {name} not found"));
             }
-            ControlResponse::err(format!(
-                "restore must be run with daemon stopped: reading-steiner restore {name}"
-            ))
+            // 在线恢复：通过 SQLite 备份接口把备份库写进实时连接，并刷新内存中的监控源。
+            match crate::backup::restore(&dir, &state.cfg, Some(db.connection_mut())) {
+                Ok(()) => {
+                    // 恢复后重新从数据库加载监控源到内存。
+                    let mut sources = state.sources.lock().await;
+                    *sources = db.list_sources().unwrap_or_default();
+                    drop(sources);
+                    ControlResponse::ok(json!({
+                        "restored": true,
+                        "name": name,
+                        "note": "数据库与 media 已在线恢复"
+                    }))
+                }
+                Err(e) => ControlResponse::err(e.to_string()),
+            }
         }
         ControlRequest::Shutdown => {
             state

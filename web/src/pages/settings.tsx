@@ -54,6 +54,7 @@ export function SettingsPage() {
   const [serverTimeUtc, setServerTimeUtc] = useState<string | null>(null)
   const [serverTz, setServerTz] = useState("UTC")
   const [browserNow, setBrowserNow] = useState(new Date())
+  const [backups, setBackups] = useState<{ name: string; has_zip: boolean }[]>([])
 
   async function load() {
     try {
@@ -70,8 +71,18 @@ export function SettingsPage() {
     }
   }
 
+  async function loadBackups() {
+    try {
+      const res = await api.listBackups()
+      setBackups(res.backups ?? [])
+    } catch (e) {
+      setError((e as Error).message)
+    }
+  }
+
   useEffect(() => {
     load()
+    loadBackups()
   }, [])
 
   // 浏览器本地时间持续刷新
@@ -103,22 +114,22 @@ export function SettingsPage() {
     try {
       const res = await api.createBackup()
       setNotice(`备份已创建：${res.name}（${res.path}）`)
+      loadBackups()
     } catch (e) {
       setError((e as Error).message)
     }
   }
 
-  async function handleRestore() {
+  async function handleRestore(name: string) {
     setNotice(null)
     setError(null)
-    const name = window.prompt("输入要恢复的备份名称（仅允许在 daemon 停止时恢复）")
-    if (!name) return
+    if (!window.confirm(`确定要从备份 ${name} 恢复吗？当前数据库与 media 将被覆盖。`)) return
     try {
       const res = (await api.restoreBackup(name)) as { error?: string }
       if (res.error) {
         setError(res.error)
       } else {
-        setNotice("恢复指令已提交。")
+        setNotice(`已从备份 ${name} 在线恢复。`)
       }
     } catch (e) {
       setError((e as Error).message)
@@ -257,12 +268,32 @@ export function SettingsPage() {
                 }
               />
             </Field>
-            <Field label="调度器时区" hint="IANA 名称，如 Asia/Shanghai、UTC">
+            <Field label="调度器时区" hint="IANA 名称，如 Asia/Shanghai；留空使用系统本地时区">
               <input
                 className={inputCls}
                 value={settings.timezone}
                 onChange={(e) =>
                   setSettings({ ...settings, timezone: e.target.value })
+                }
+              />
+            </Field>
+            <Field label="默认检查间隔（秒）" hint="监控源未单独覆盖时使用，默认 3600（1h）">
+              <input
+                type="number"
+                className={inputCls}
+                value={settings.interval_secs}
+                onChange={(e) =>
+                  setSettings({ ...settings, interval_secs: Number(e.target.value) })
+                }
+              />
+            </Field>
+            <Field label="默认随机抖动（秒）" hint="监控源未单独覆盖时使用，默认 60s">
+              <input
+                type="number"
+                className={inputCls}
+                value={settings.jitter_secs}
+                onChange={(e) =>
+                  setSettings({ ...settings, jitter_secs: Number(e.target.value) })
                 }
               />
             </Field>
@@ -324,7 +355,7 @@ export function SettingsPage() {
             <Archive className="h-5 w-5" /> 备份与恢复
           </CardTitle>
           <CardDescription>
-            备份包含数据库、media 与配置。恢复需先停止 daemon，用 CLI 执行。
+            备份包含数据库、media 与配置，打包为 zip 可下载；支持在线恢复（无需停止 daemon）。
           </CardDescription>
         </CardHeader>
         <CardContent>
@@ -332,15 +363,44 @@ export function SettingsPage() {
             <Button variant="outline" onClick={handleBackup}>
               <Archive className="h-4 w-4" /> 立即备份
             </Button>
-            <Button variant="outline" onClick={handleRestore}>
-              <History className="h-4 w-4" /> 恢复…
+            <Button variant="ghost" size="sm" onClick={loadBackups}>
+              <RefreshCw className="h-3.5 w-3.5" /> 刷新列表
             </Button>
           </div>
           <p className="mt-3 text-xs text-muted-foreground">
-            备份保存在 <code>state/backups/&lt;时间戳&gt;/</code>。恢复方式：
-            <code className="ml-1">reading-steiner restore &lt;名称&gt; --config config.yaml</code>
-            （需 daemon 停止）。
+            备份保存在 <code>state/backups/&lt;时间戳&gt;/</code>，并打包为同名的{" "}
+            <code>.zip</code> 供下载。恢复会在线覆盖当前数据库与 media。
           </p>
+
+          {backups.length > 0 && (
+            <div className="mt-4 divide-y rounded-md border">
+              {backups.map((b) => (
+                <div
+                  key={b.name}
+                  className="flex items-center justify-between gap-2 px-3 py-2 text-sm"
+                >
+                  <span className="font-mono text-xs">{b.name}</span>
+                  <div className="flex items-center gap-1">
+                    <a href={api.downloadBackup(b.name)} download>
+                      <Button variant="outline" size="sm">
+                        下载 zip
+                      </Button>
+                    </a>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() => handleRestore(b.name)}
+                    >
+                      <History className="h-3.5 w-3.5" /> 恢复
+                    </Button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+          {backups.length === 0 && !loading && (
+            <p className="mt-3 text-xs text-muted-foreground">暂无备份。</p>
+          )}
         </CardContent>
       </Card>
     </div>

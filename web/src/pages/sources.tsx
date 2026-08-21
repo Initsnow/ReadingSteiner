@@ -47,7 +47,7 @@ interface FormState {
   selector: string
   fieldsJson: string
   // 图片选择器
-  imageKind: "none" | "items" | "css"
+  imageKind: "none" | "items" | "css" | "changed"
   imageSelector: string
 }
 
@@ -59,8 +59,8 @@ function emptyForm(): FormState {
     url: "",
     engine: "http",
     method: "GET",
-    interval_secs: 60,
-    jitter_secs: 5,
+    interval_secs: 0, // 0 = 使用全局默认检查间隔
+    jitter_secs: 0, // 0 = 使用全局默认抖动
     timeout_secs: 30,
     tags: "",
     extractType: "text",
@@ -73,11 +73,12 @@ function emptyForm(): FormState {
 }
 
 function imageToForm(image: ImageSelector | undefined): {
-  imageKind: "none" | "items" | "css"
+  imageKind: "none" | "items" | "css" | "changed"
   imageSelector: string
 } {
   if (!image || image.kind === "none") return { imageKind: "none", imageSelector: "" }
   if (image.kind === "items") return { imageKind: "items", imageSelector: "" }
+  if (image.kind === "changed") return { imageKind: "changed", imageSelector: "" }
   return { imageKind: "css", imageSelector: image.selector }
 }
 
@@ -113,8 +114,8 @@ function sourceToForm(s: SourceConfig): FormState {
     url: s.fetch.url,
     engine: s.fetch.engine,
     method: s.fetch.method,
-    interval_secs: s.schedule.interval_secs,
-    jitter_secs: s.schedule.jitter_secs ?? 5,
+    interval_secs: s.schedule.interval_secs ?? 0,
+    jitter_secs: s.schedule.jitter_secs ?? 0,
     timeout_secs: s.fetch.timeout_secs ?? 30,
     tags: (s.tags ?? []).join(","),
     ...ex,
@@ -124,6 +125,7 @@ function sourceToForm(s: SourceConfig): FormState {
 function buildImageSelector(f: FormState): ImageSelector | undefined {
   if (f.imageKind === "none") return undefined
   if (f.imageKind === "items") return { kind: "items" }
+  if (f.imageKind === "changed") return { kind: "changed" }
   return { kind: "css", selector: f.imageSelector.trim() }
 }
 
@@ -170,8 +172,9 @@ function formToSource(f: FormState, existing?: SourceConfig): SourceConfig {
     },
     schedule: {
       ...base.schedule,
-      interval_secs: f.interval_secs || 60,
-      jitter_secs: f.jitter_secs || 5,
+      // 0/空表示使用全局默认检查间隔与抖动（由后端兜底为 None）。
+      interval_secs: f.interval_secs > 0 ? f.interval_secs : undefined,
+      jitter_secs: f.jitter_secs > 0 ? f.jitter_secs : undefined,
     },
     extract: buildExtract(f),
   }
@@ -183,10 +186,12 @@ const labelCls = "text-xs font-medium text-muted-foreground"
 
 function Field({
   label,
+  hint,
   children,
   className,
 }: {
   label: string
+  hint?: string
   children: React.ReactNode
   className?: string
 }) {
@@ -194,6 +199,7 @@ function Field({
     <div className={className}>
       <label className={labelCls}>{label}</label>
       <div className="mt-1">{children}</div>
+      {hint && <p className="mt-1 text-xs text-muted-foreground">{hint}</p>}
     </div>
   )
 }
@@ -371,14 +377,15 @@ export function SourcesPage() {
               <CardContent>
                 <div className="flex flex-wrap items-center gap-4 text-xs text-muted-foreground">
                   <span>engine: {s.fetch.engine}</span>
-                  <span>interval: {s.schedule.interval_secs}s</span>
+                  <span>
+                    interval: {s.schedule.interval_secs ? `${s.schedule.interval_secs}s` : "全局默认"}
+                  </span>
                   <span>
                     extract:{" "}
                     {s.extract?.type === "items"
                       ? `${s.extract.selector.kind} (${s.extract.selector.kind === "css" ? s.extract.selector.selector : s.extract.selector.path})`
                       : "整页文本"}
                   </span>
-                  <span>priority: {s.priority}</span>
                 </div>
                 {s.tags.length > 0 && (
                   <div className="mt-3 flex flex-wrap gap-1">
@@ -509,7 +516,7 @@ export function SourcesPage() {
                 </select>
               </Field>
 
-              <Field label="检测间隔（秒）">
+              <Field label="检测间隔（秒）" hint="0 表示使用全局默认（默认 1h）">
                 <input
                   type="number"
                   className={inputCls}
@@ -519,7 +526,7 @@ export function SourcesPage() {
                   }
                 />
               </Field>
-              <Field label="抖动（秒）">
+              <Field label="抖动（秒）" hint="0 表示使用全局默认（默认 60s）">
                 <input
                   type="number"
                   className={inputCls}
@@ -614,13 +621,22 @@ export function SourcesPage() {
                         onChange={(e) =>
                           setForm({
                             ...form,
-                            imageKind: e.target.value as "none" | "items" | "css",
+                            imageKind: e.target.value as
+                              | "none"
+                              | "items"
+                              | "css"
+                              | "changed",
                           })
                         }
                       >
                         <option value="none">不附带图片</option>
                         {form.extractType === "items" && (
                           <option value="items">条目的图片（结构化提取）</option>
+                        )}
+                        {form.extractType === "items" && (
+                          <option value="changed">
+                            变更元素的图片（只发有变化的条目相关 img）
+                          </option>
                         )}
                         <option value="css">按 CSS 选择器</option>
                       </select>

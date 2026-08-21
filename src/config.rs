@@ -91,6 +91,10 @@ pub struct DaemonConfig {
     /// 监控检查调度器使用的时区（IANA 名称，如 Asia/Shanghai、UTC）。
     /// 影响基于本地时间的显示与告警时间戳；调度仍以 UTC 内部计算，仅做展示/告警换算。
     pub timezone: String,
+    /// 全局默认检查间隔（秒）。监控源未单独覆盖时使用；默认 3600（1h）。
+    pub interval_secs: u64,
+    /// 全局默认检查间隔随机抖动秒数。监控源未单独覆盖时使用；默认 60s。
+    pub jitter_secs: u64,
 }
 
 impl DaemonConfig {
@@ -112,9 +116,26 @@ impl DaemonConfig {
         }
     }
 
+    /// 全局默认检查间隔（秒），0 时回退到 3600（1h）。
+    pub fn effective_interval(&self) -> u64 {
+        if self.interval_secs > 0 {
+            self.interval_secs
+        } else {
+            3600
+        }
+    }
+    /// 全局默认随机抖动（秒），0 时回退到 60s。
+    pub fn effective_jitter(&self) -> u64 {
+        if self.jitter_secs > 0 {
+            self.jitter_secs
+        } else {
+            60
+        }
+    }
+
     pub fn effective_timezone(&self) -> String {
         if self.timezone.trim().is_empty() {
-            "UTC".to_string()
+            system_local_timezone()
         } else {
             self.timezone.trim().to_string()
         }
@@ -173,6 +194,10 @@ pub struct EditableSettings {
     pub failure_notify_threshold: u32,
     /// 调度器时区（IANA 名称）。
     pub timezone: String,
+    /// 全局默认检查间隔（秒），源未覆盖时使用。
+    pub interval_secs: u64,
+    /// 全局默认随机抖动（秒），源未覆盖时使用。
+    pub jitter_secs: u64,
     /// 通知模板。
     pub template: String,
     /// Telegram 默认 chat id。
@@ -191,6 +216,8 @@ impl EditableSettings {
             history_limit_per_source: cfg.daemon.history_limit_per_source,
             failure_notify_threshold: cfg.daemon.failure_notify_threshold,
             timezone: cfg.daemon.timezone.clone(),
+            interval_secs: cfg.daemon.effective_interval(),
+            jitter_secs: cfg.daemon.effective_jitter(),
             template: cfg.telegram.template.clone(),
             default_chat_id: cfg.telegram.default_chat_id.clone(),
             max_images_per_event: cfg.telegram.max_images_per_event,
@@ -206,6 +233,8 @@ impl EditableSettings {
         cfg.daemon.history_limit_per_source = self.history_limit_per_source;
         cfg.daemon.failure_notify_threshold = self.failure_notify_threshold;
         cfg.daemon.timezone = self.timezone.clone();
+        cfg.daemon.interval_secs = self.interval_secs;
+        cfg.daemon.jitter_secs = self.jitter_secs;
         cfg.telegram.template = self.template.clone();
         cfg.telegram.default_chat_id = self.default_chat_id.clone();
         cfg.telegram.max_images_per_event = self.max_images_per_event;
@@ -238,7 +267,6 @@ pub struct SourceConfig {
     pub tags: Vec<String>,
     pub fetch: FetchConfig,
     pub schedule: ScheduleConfig,
-    pub priority: i32,
     /// 内容提取方式。决定「把抓到的内容变成什么拿来比对」。
     #[serde(default)]
     pub extract: ExtractConfig,
@@ -253,7 +281,6 @@ impl Default for SourceConfig {
             tags: Vec::new(),
             fetch: FetchConfig::default(),
             schedule: ScheduleConfig::default(),
-            priority: 0,
             extract: ExtractConfig::default(),
         }
     }
@@ -298,19 +325,27 @@ pub struct WaitConfig {
     pub timeout: Option<u64>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// 调度配置。`interval_secs` / `jitter_secs` 可选：留空（None）时使用全局设置
+/// （`DaemonConfig.interval_secs` / `DaemonConfig.jitter_secs`）中的值。
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(default)]
 pub struct ScheduleConfig {
-    pub interval_secs: u64,
-    pub jitter_secs: u64,
+    /// 检查间隔秒数，None 表示使用全局默认（默认 3600s = 1h）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub interval_secs: Option<u64>,
+    /// 检查间隔随机抖动秒数，None 表示使用全局默认（默认 60s）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub jitter_secs: Option<u64>,
 }
 
-impl Default for ScheduleConfig {
-    fn default() -> Self {
-        Self {
-            interval_secs: 60,
-            jitter_secs: 5,
-        }
+impl ScheduleConfig {
+    /// 返回该源的有效检查间隔（秒）：优先用源自身的覆盖值，否则用全局默认。
+    pub fn effective_interval(&self, global: u64) -> u64 {
+        self.interval_secs.filter(|&v| v > 0).unwrap_or(global)
+    }
+    /// 返回该源的有效随机抖动（秒）。
+    pub fn effective_jitter(&self, global: u64) -> u64 {
+        self.jitter_secs.unwrap_or(global)
     }
 }
 
@@ -343,9 +378,11 @@ pub enum ExtractConfig {
 
 /// 图片通知链路：如何从页面 / 条目中挑选要随变更通知附带的图片。
 ///
+/// - `none`（默认）：不附带图片。
 /// - `items`：收集结构化条目提取时自动带出的 `image_urls`。
 /// - `css { selector }`：用 CSS 选择器从整页匹配 `<img>`，取其 `src`/`data-src`。
-/// - `none`（默认）：不附带图片。
+/// - `changed`：只收集**发生变更的元素**相关（其自身子树与父容器）的 `<img>`，
+///   避免把整页全部图片都发出去。仅对结构化条目（Items 提取）生效。
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ImageSelector {
@@ -356,6 +393,8 @@ pub enum ImageSelector {
     Items,
     /// 用 CSS 选择器从页面匹配图片元素，取其 `src`/`data-src` 等属性。
     Css { selector: String },
+    /// 只收集发生变更的元素相关的图片（其自身子树 + 父容器的 img）。
+    Changed,
 }
 
 impl Default for ExtractConfig {
@@ -404,6 +443,10 @@ pub struct RuntimeConfig {
     pub history_limit_per_source: usize,
     pub failure_notify_threshold: u32,
     pub timezone: String,
+    /// 全局默认检查间隔（秒，已应用有效值）。
+    pub interval_secs: u64,
+    /// 全局默认随机抖动（秒，已应用有效值）。
+    pub jitter_secs: u64,
     pub template: String,
 }
 
@@ -428,7 +471,32 @@ impl RuntimeConfig {
             history_limit_per_source: cfg.daemon.history_limit_per_source,
             failure_notify_threshold: cfg.daemon.failure_notify_threshold,
             timezone: cfg.daemon.effective_timezone(),
+            interval_secs: cfg.daemon.effective_interval(),
+            jitter_secs: cfg.daemon.effective_jitter(),
             template: cfg.telegram.event_template(),
         }
     }
+
+    /// 全局默认检查间隔（秒）。
+    pub fn interval_secs(&self) -> u64 {
+        if self.interval_secs > 0 {
+            self.interval_secs
+        } else {
+            3600
+        }
+    }
+    /// 全局默认随机抖动（秒）。
+    pub fn jitter_secs(&self) -> u64 {
+        if self.jitter_secs > 0 {
+            self.jitter_secs
+        } else {
+            60
+        }
+    }
+}
+
+/// 返回系统本地时区的 IANA 名称（如 `Asia/Shanghai`、`America/New_York`）。
+/// 检测失败时回退到 `UTC`。
+pub fn system_local_timezone() -> String {
+    iana_time_zone::get_timezone().unwrap_or_else(|_| "UTC".to_string())
 }

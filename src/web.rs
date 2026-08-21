@@ -59,6 +59,7 @@ fn build_router(state: Arc<AppState>) -> Router {
         .route("/settings", get(api_get_settings).put(api_update_settings))
         .route("/backup", post(api_backup))
         .route("/backups", get(api_list_backups))
+        .route("/backups/{name}/download", get(api_download_backup))
         .route("/restore", post(api_restore))
         .with_state(state);
 
@@ -263,6 +264,62 @@ async fn api_backup(State(state): State<Arc<AppState>>) -> (StatusCode, Json<Val
 
 async fn api_list_backups(State(state): State<Arc<AppState>>) -> (StatusCode, Json<Value>) {
     json_response(control::handle_request(&state, ControlRequest::ListBackups).await).await
+}
+
+/// 下载指定备份的 zip 包。若 zip 不存在则尝试现场打包后返回。
+async fn api_download_backup(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+) -> std::result::Result<axum::response::Response, (StatusCode, Json<Value>)> {
+    use axum::body::Body;
+    use axum::http::header;
+
+    let state_dir = state.runtime.state_dir.clone();
+    let dir = state_dir.join("backups").join(&name);
+    if !dir.join("reading-steiner.db").exists() {
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(json!({ "ok": false, "error": "backup not found" })),
+        ));
+    }
+    // 若 zip 尚未生成，则现场打包。
+    let zip_path = state_dir.join("backups").join(format!("{name}.zip"));
+    if !zip_path.exists()
+        && let Err(e) = crate::backup::pack_zip(&dir, &zip_path)
+    {
+        return Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "ok": false, "error": e.to_string() })),
+        ));
+    }
+    let file = match tokio::fs::File::open(&zip_path).await {
+        Ok(f) => f,
+        Err(e) => {
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "ok": false, "error": e.to_string() })),
+            ));
+        }
+    };
+    let stream = tokio_util::io::ReaderStream::new(file);
+    let body = Body::from_stream(stream);
+    let mut builder = axum::response::Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, "application/zip")
+        .header(
+            header::CONTENT_DISPOSITION,
+            format!("attachment; filename=\"{name}.zip\""),
+        );
+    if let Ok(meta) = std::fs::metadata(&zip_path) {
+        builder = builder.header(header::CONTENT_LENGTH, meta.len().to_string());
+    }
+    match builder.body(body) {
+        Ok(resp) => Ok(resp),
+        Err(e) => Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "ok": false, "error": e.to_string() })),
+        )),
+    }
 }
 
 #[derive(Deserialize)]

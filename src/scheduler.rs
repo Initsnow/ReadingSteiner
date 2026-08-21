@@ -9,7 +9,9 @@ use serde_json::{Value, json};
 use tokio::sync::{Mutex, Semaphore};
 use tracing::{debug, error, info, warn};
 
-use crate::config::{ChangeType, Config, RuntimeConfig, SourceConfig};
+use crate::config::{
+    ChangeType, Config, ExtractConfig, ImageSelector, RuntimeConfig, SourceConfig,
+};
 use crate::db::Db;
 use crate::differ;
 use crate::error::Result;
@@ -133,7 +135,7 @@ pub async fn run_daemon(state: Arc<AppState>) -> Result<()> {
         let due = {
             let db = state.db.lock().await;
             let now = Utc::now();
-            let mut due: Vec<(i32, SourceConfig)> = Vec::new();
+            let mut due: Vec<SourceConfig> = Vec::new();
             let sources = state.sources.lock().await;
             for source in sources.iter() {
                 if !source.enabled {
@@ -156,18 +158,16 @@ pub async fn run_daemon(state: Arc<AppState>) -> Result<()> {
                     continue;
                 }
                 if sched.next_due_at <= now {
-                    due.push((source.priority, source.clone()));
+                    due.push(source.clone());
                 }
             }
-            // 按优先级从高到低排序（priority 越大越先处理）。
-            due.sort_by_key(|b| std::cmp::Reverse(b.0));
             // 有界队列：每 tick 最多入队 queue_capacity 个任务，超出部分下个 tick 再处理。
             due.truncate(state.runtime.queue_capacity.max(1));
             due
         };
 
         state.queue_depth.store(due.len(), Ordering::Relaxed);
-        for (_prio, source) in due {
+        for source in due {
             let state = state.clone();
             let semaphore = semaphore.clone();
             tokio::spawn(async move {
@@ -228,9 +228,21 @@ pub async fn run_daemon(state: Arc<AppState>) -> Result<()> {
     Ok(())
 }
 
+/// 返回某源的有效检查间隔与随机抖动（源可覆盖全局，否则用全局默认）。
+fn source_schedule(source: &SourceConfig, state: &AppState) -> (u64, u64) {
+    let interval = source
+        .schedule
+        .effective_interval(state.runtime.interval_secs());
+    let jitter = source
+        .schedule
+        .effective_jitter(state.runtime.jitter_secs());
+    (interval, jitter)
+}
+
 pub async fn check_source(state: &Arc<AppState>, source_id: &str) -> Result<()> {
     let source = get_live_source(state, source_id).await?;
     let extract_cfg = source.extract.clone();
+    let (interval_secs, jitter_secs) = source_schedule(&source, state);
 
     let (prev_etag, prev_lm, prev_fp, prev_items_json) = {
         let db = state.db.lock().await;
@@ -259,7 +271,15 @@ pub async fn check_source(state: &Arc<AppState>, source_id: &str) -> Result<()> 
         debug!(source = %source.id, "304 not modified");
         let db = state.db.lock().await;
         let prev = db.get_schedule_state(&source.id)?;
-        db.upsert_schedule_state(&next_schedule(&source, 0, None, false, prev.as_ref()))?;
+        db.upsert_schedule_state(&next_schedule(
+            &source,
+            interval_secs,
+            jitter_secs,
+            0,
+            None,
+            false,
+            prev.as_ref(),
+        ))?;
         return Ok(());
     }
 
@@ -306,6 +326,8 @@ pub async fn check_source(state: &Arc<AppState>, source_id: &str) -> Result<()> 
         let prev = db.get_schedule_state(&source.id)?;
         db.upsert_schedule_state(&next_schedule(
             &source,
+            interval_secs,
+            jitter_secs,
             0,
             Some(Utc::now()),
             false,
@@ -329,6 +351,8 @@ pub async fn check_source(state: &Arc<AppState>, source_id: &str) -> Result<()> 
         {
             db.upsert_schedule_state(&next_schedule(
                 &source,
+                interval_secs,
+                jitter_secs,
                 0,
                 Some(Utc::now()),
                 true,
@@ -336,6 +360,43 @@ pub async fn check_source(state: &Arc<AppState>, source_id: &str) -> Result<()> 
             ))?;
             debug!(source = %source.id, "duplicate change, suppressed");
             return Ok(());
+        }
+    }
+
+    // 图片来源：若选用 `Changed`（只发变更元素相关图片），则根据 diff 计算变更元素图片。
+    let mut image_urls = out.image_urls.clone();
+    if matches!(
+        extract_cfg,
+        ExtractConfig::Items {
+            images: Some(ImageSelector::Changed),
+            ..
+        }
+    ) {
+        // 本次变更中新增 / 更新的条目 stable_id。
+        let changed_ids: std::collections::HashSet<String> = {
+            let old_ids: std::collections::HashSet<&str> = diff_result
+                .old_items
+                .iter()
+                .map(|i| i.stable_id.as_str())
+                .collect();
+            diff_result
+                .new_items
+                .iter()
+                .filter(|i| {
+                    !old_ids.contains(i.stable_id.as_str())
+                        || old_items.iter().any(|o| {
+                            o.stable_id == i.stable_id && o.fingerprint(&[]) != i.fingerprint(&[])
+                        })
+                })
+                .map(|i| i.stable_id.clone())
+                .collect()
+        };
+        if let ExtractConfig::Items {
+            selector, fields, ..
+        } = &extract_cfg
+        {
+            image_urls =
+                pipeline::collect_changed_element_images(&doc, selector, fields, &changed_ids);
         }
     }
 
@@ -348,7 +409,7 @@ pub async fn check_source(state: &Arc<AppState>, source_id: &str) -> Result<()> 
         diff_summary: diff_result.diff_summary,
         fingerprint: diff_result.fingerprint,
         dedupe_key: diff_result.dedupe_key,
-        image_urls_json: serde_json::to_string(&out.image_urls)?,
+        image_urls_json: serde_json::to_string(&image_urls)?,
         detected_at: Utc::now(),
     };
 
@@ -378,7 +439,15 @@ pub async fn check_source(state: &Arc<AppState>, source_id: &str) -> Result<()> 
             }
         }
         let prev = db.get_schedule_state(&source.id)?;
-        let mut sched = next_schedule(&source, 0, Some(Utc::now()), true, prev.as_ref());
+        let mut sched = next_schedule(
+            &source,
+            interval_secs,
+            jitter_secs,
+            0,
+            Some(Utc::now()),
+            true,
+            prev.as_ref(),
+        );
         sched.last_notified_fingerprint = Some(event.dedupe_key.clone());
         sched.last_notified_at = Some(Utc::now());
         db.upsert_schedule_state(&sched)?;
@@ -426,17 +495,19 @@ fn stable_jitter(source_id: &str, spread: i64) -> i64 {
 ///   基于指纹的重复告警抑制跨轮生效。
 fn next_schedule(
     source: &crate::config::SourceConfig,
+    interval_secs: u64,
+    jitter_secs: u64,
     failures: u32,
     last_success: Option<DateTime<Utc>>,
     had_change: bool,
     prev: Option<&ScheduleState>,
 ) -> ScheduleState {
-    let mut interval = source.schedule.interval_secs.max(1) as i64;
+    let mut interval = interval_secs.max(1) as i64;
     if failures > 0 {
         interval = (interval as u64 * 2u64.pow(failures.min(6))).min(3600) as i64;
     }
     // 应用随机抖动（jitter_secs），避免大量监控源在同一瞬间同时唤醒抢锁。
-    let jitter = source.schedule.jitter_secs as i64;
+    let jitter = jitter_secs as i64;
     let next_due_at = if jitter > 0 {
         // 抖动均匀分布在 [-jitter/2, +jitter/2]，围绕基础间隔上下浮动。
         let spread = jitter / 2;

@@ -263,12 +263,16 @@ pub async fn run(cli: Cli) -> Result<()> {
         Command::Backups { config } => {
             let cfg = Config::load(&config)?;
             match crate::backup::list_backups(&cfg.state_dir) {
-                Ok(names) => {
-                    if names.is_empty() {
+                Ok(infos) => {
+                    if infos.is_empty() {
                         println!("no backups found");
                     } else {
-                        for n in &names {
-                            println!("{n}");
+                        for b in &infos {
+                            println!(
+                                "{}\t{}",
+                                b.name,
+                                if b.has_zip { "(zip available)" } else { "" }
+                            );
                         }
                     }
                     Ok(())
@@ -278,15 +282,27 @@ pub async fn run(cli: Cli) -> Result<()> {
         }
         Command::Restore { name, config } => {
             let cfg = Config::load(&config)?;
-            // 恢复会覆盖当前数据库与 media，需 daemon 停止。
             let dir = cfg.state_dir.join("backups").join(&name);
             if !dir.exists() {
                 return Err(Error::other(format!("backup {name} not found")));
             }
-            println!("restoring from backup {name} ...");
-            crate::backup::restore(&dir, &cfg)?;
-            println!("restore complete. restart daemon to load restored data.");
-            Ok(())
+            // 优先通过 daemon 在线恢复（无需停止）；daemon 不可用时回退到离线恢复。
+            let resp =
+                control::send_request(cfg.socket_path(), &ControlRequest::Restore { name }).await;
+            match resp {
+                Ok(r) if r.ok => {
+                    print_response(&r, false);
+                    Ok(())
+                }
+                _ => {
+                    println!(
+                        "daemon not reachable, restoring offline (requires daemon stopped) ..."
+                    );
+                    crate::backup::restore(&dir, &cfg, None)?;
+                    println!("restore complete. restart daemon to load restored data.");
+                    Ok(())
+                }
+            }
         }
     }
 }

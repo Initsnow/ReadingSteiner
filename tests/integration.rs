@@ -286,14 +286,13 @@ fetch:
   url: https://example.com
 schedule:
   interval_secs: 30
-priority: 0
 extract:
   type: text
 "#,
     )
     .unwrap();
     assert_eq!(src.id, "s1");
-    assert_eq!(src.schedule.interval_secs, 30);
+    assert_eq!(src.schedule.interval_secs, Some(30));
     assert_eq!(src.extract, ExtractConfig::Text { images: None });
 }
 

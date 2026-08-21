@@ -22,6 +22,8 @@ pub enum Error {
     Base64(#[from] base64::DecodeError),
     #[error("url parse error: {0}")]
     Url(#[from] url::ParseError),
+    #[error("zip error: {0}")]
+    Zip(#[from] zip::result::ZipError),
 }
 
 impl Error {

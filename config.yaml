@@ -14,8 +14,12 @@ daemon:
   history_limit_per_source: 0
   # 连续失败达到多少次后发送 Telegram 失败通知（0 禁用）
   failure_notify_threshold: 0
-  # 监控检查调度器/告警展示使用的时区（IANA 名称，如 Asia/Shanghai）
-  timezone: UTC
+  # 监控检查调度器/告警展示使用的时区（IANA 名称，如 Asia/Shanghai；留空使用系统本地时区）
+  timezone: ""
+  # 全局默认检查间隔秒数（源未单独覆盖时使用，默认 3600 = 1h）
+  interval_secs: 3600
+  # 全局默认检查间隔随机抖动秒数（源未单独覆盖时使用，默认 60s）
+  jitter_secs: 60
 
 web:
   listen: 127.0.0.1:8901
