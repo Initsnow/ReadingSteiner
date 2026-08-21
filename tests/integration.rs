@@ -285,14 +285,14 @@ fetch:
   engine: http
   url: https://example.com
 schedule:
-  interval_secs: 30
+  cron: "*/30 * * * *"
 extract:
   type: text
 "#,
     )
     .unwrap();
     assert_eq!(src.id, "s1");
-    assert_eq!(src.schedule.interval_secs, Some(30));
+    assert_eq!(src.schedule.cron.as_deref(), Some("*/30 * * * *"));
     assert_eq!(src.extract, ExtractConfig::Text { images: None });
 }
 
@@ -306,7 +306,7 @@ fetch:
   engine: http
   url: https://example.com
 schedule:
-  interval_secs: 60
+  cron: "0 * * * *"
 extract:
   type: items
   selector:

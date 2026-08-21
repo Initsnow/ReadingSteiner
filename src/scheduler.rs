@@ -1,10 +1,12 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::str::FromStr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Local, Utc};
+use cron::Schedule as CronSchedule;
 use serde_json::{Value, json};
 use tokio::sync::{Mutex, Semaphore};
 use tracing::{debug, error, info, warn};
@@ -228,21 +230,9 @@ pub async fn run_daemon(state: Arc<AppState>) -> Result<()> {
     Ok(())
 }
 
-/// 返回某源的有效检查间隔与随机抖动（源可覆盖全局，否则用全局默认）。
-fn source_schedule(source: &SourceConfig, state: &AppState) -> (u64, u64) {
-    let interval = source
-        .schedule
-        .effective_interval(state.runtime.interval_secs());
-    let jitter = source
-        .schedule
-        .effective_jitter(state.runtime.jitter_secs());
-    (interval, jitter)
-}
-
 pub async fn check_source(state: &Arc<AppState>, source_id: &str) -> Result<()> {
     let source = get_live_source(state, source_id).await?;
     let extract_cfg = source.extract.clone();
-    let (interval_secs, jitter_secs) = source_schedule(&source, state);
 
     let (prev_etag, prev_lm, prev_fp, prev_items_json) = {
         let db = state.db.lock().await;
@@ -273,12 +263,11 @@ pub async fn check_source(state: &Arc<AppState>, source_id: &str) -> Result<()> 
         let prev = db.get_schedule_state(&source.id)?;
         db.upsert_schedule_state(&next_schedule(
             &source,
-            interval_secs,
-            jitter_secs,
             0,
             None,
             false,
             prev.as_ref(),
+            &state.runtime.timezone,
         ))?;
         return Ok(());
     }
@@ -326,12 +315,11 @@ pub async fn check_source(state: &Arc<AppState>, source_id: &str) -> Result<()> 
         let prev = db.get_schedule_state(&source.id)?;
         db.upsert_schedule_state(&next_schedule(
             &source,
-            interval_secs,
-            jitter_secs,
             0,
             Some(Utc::now()),
             false,
             prev.as_ref(),
+            &state.runtime.timezone,
         ))?;
         debug!(source = %source.id, "no change");
         return Ok(());
@@ -351,12 +339,11 @@ pub async fn check_source(state: &Arc<AppState>, source_id: &str) -> Result<()> 
         {
             db.upsert_schedule_state(&next_schedule(
                 &source,
-                interval_secs,
-                jitter_secs,
                 0,
                 Some(Utc::now()),
                 true,
                 Some(&sched),
+                &state.runtime.timezone,
             ))?;
             debug!(source = %source.id, "duplicate change, suppressed");
             return Ok(());
@@ -446,12 +433,11 @@ pub async fn check_source(state: &Arc<AppState>, source_id: &str) -> Result<()> 
         let prev = db.get_schedule_state(&source.id)?;
         let mut sched = next_schedule(
             &source,
-            interval_secs,
-            jitter_secs,
             0,
             Some(Utc::now()),
             true,
             prev.as_ref(),
+            &state.runtime.timezone,
         );
         sched.last_notified_fingerprint = Some(event.dedupe_key.clone());
         sched.last_notified_at = Some(Utc::now());
@@ -469,24 +455,169 @@ pub async fn check_source(state: &Arc<AppState>, source_id: &str) -> Result<()> 
     Ok(())
 }
 
-/// 基于源 ID 生成稳定、均匀分散在 [-spread, +spread] 的确定性抖动偏移（秒）。
-///
-/// 相比基于纳秒时钟的随机抖动，用源 ID 做哈希能让每个源获得**固定**的错峰偏移：
-/// 同一源每轮调度偏移一致，不同源之间偏移相互错开，从而真正避免大量源在同一瞬间
-/// 同时唤醒抢锁；而随机抖动每次调用取值都不同，仍可能让部分源在某轮重新"撞车"。
-fn stable_jitter(source_id: &str, spread: i64) -> i64 {
-    if spread <= 0 {
-        return 0;
+/// 把标准 cron 的星期值（0-7，0/7=周日）转为 cron crate 的星期值（1-7，1=周日）。
+/// 不支持命名形式（SUN/MON 等）——它们会原样透传，由 cron crate 解析。
+fn map_cron_dow_num(v: i32) -> i32 {
+    match v {
+        0 | 7 => 1,  // 周日 → 1
+        n if (1..=6).contains(&n) => n + 1, // 周一~周六 → 2~7
+        _ => v,
     }
-    // 用 FNV-1a 对源 ID 做非加密哈希，得到 32 位无符号散列值。
-    let mut hash: u32 = 0x811c_9dc5;
-    for &b in source_id.as_bytes() {
-        hash ^= b as u32;
-        hash = hash.wrapping_mul(0x0100_0193);
+}
+
+/// 在标准 cron 星期环（0-6，0/7=周日）上展开范围 `a-b`，返回标准 cron 星期值序列。
+/// 支持跨周范围（如 `5-7` → [5,6,0]，`6-1` → [6,0,1]），`7` 视为周日（0）。
+fn expand_std_dow_range(a: i32, b: i32) -> Vec<i32> {
+    let norm = |v: i32| if v == 7 { 0 } else { v };
+    let na = norm(a);
+    let nb = norm(b);
+    let mut out = Vec::new();
+    if na <= nb {
+        for v in na..=nb {
+            out.push(v);
+        }
+    } else {
+        // 跨周：a..6 再接 0..b
+        for v in na..=6 {
+            out.push(v);
+        }
+        for v in 0..=nb {
+            out.push(v);
+        }
     }
-    // 把哈希映射到 [-spread, +spread] 闭区间，均匀分布。
-    let span = (spread * 2 + 1) as u64;
-    (hash as u64 % span) as i64 - spread
+    out
+}
+
+/// 把标准 cron 星期值列表映射为 cron crate 星期值（1-7，1=周日）字符串列表。
+fn map_dow_list(values: &[i32]) -> Vec<String> {
+    values
+        .iter()
+        .map(|&v| map_cron_dow_num(v).to_string())
+        .collect()
+}
+
+/// 把标准 cron 的星期字段（第 5 段）转为 cron crate 的星期字段。
+/// 支持 `*`、`n`、`a-b`、`a-b/n`、`*/n`、`n/n`、逗号列表（含范围）。
+/// 正确处理跨周范围（如 `5-7` 周五~周日、`6-1` 周六~周一）。
+/// 命名（SUN/MON 等）原样透传，由 cron crate 自己解析。
+fn convert_dow_field(field: &str) -> Result<String> {
+    let field = field.trim();
+    if field == "*" {
+        return Ok("*".to_string());
+    }
+    // 命名形式（如 SUN、MON）直接透传，由 cron crate 自己解析（sun=1, mon=2...）。
+    if field.chars().all(|c| c.is_ascii_alphabetic()) {
+        return Ok(field.to_string());
+    }
+
+    let mut out: Vec<String> = Vec::new();
+    for item in field.split(',') {
+        let item = item.trim();
+        // 形如 a-b/n 或 a-b
+        if let Some((range_part, step)) = item.split_once('/') {
+            let step: i32 = step.parse().map_err(|_| {
+                crate::error::Error::other(format!("无效的步进值: '{item}'"))
+            })?;
+            if step < 1 {
+                return Err(crate::error::Error::other(format!(
+                    "步进值必须为正: '{item}'"
+                )));
+            }
+            if range_part == "*" {
+                // 标准环 0-6 到 cron crate 1-7 是线性偏移，*/n 结构保持不变，直接透传。
+                out.push(format!("*/{step}"));
+            } else if let Some((a, b)) = range_part.split_once('-') {
+                let a: i32 = a.trim().parse().map_err(|_| {
+                    crate::error::Error::other(format!("无效的星期值: '{a}'"))
+                })?;
+                let b: i32 = b.trim().parse().map_err(|_| {
+                    crate::error::Error::other(format!("无效的星期值: '{b}'"))
+                })?;
+                let vals = expand_std_dow_range(a, b);
+                // 范围 + 步进：在展开后的序列上按 step 取样。
+                let stepped: Vec<i32> = vals.iter().step_by(step as usize).copied().collect();
+                out.push(map_dow_list(&stepped).join(","));
+            } else {
+                // 单个值 + 步进（Vixie 语义，如 1/2 = 周一/三/五）：
+                // 从起点在标准环上每隔 step 取一个值。
+                let v: i32 = range_part.trim().parse().map_err(|_| {
+                    crate::error::Error::other(format!("无效的星期值: '{range_part}'"))
+                })?;
+                let start = if v == 7 { 0 } else { v };
+                let mut vals = Vec::new();
+                let mut cur = start;
+                while cur <= 6 {
+                    vals.push(cur);
+                    cur += step;
+                }
+                out.push(map_dow_list(&vals).join(","));
+            }
+        } else if let Some((a, b)) = item.split_once('-') {
+            let a: i32 = a.trim().parse().map_err(|_| {
+                crate::error::Error::other(format!("无效的星期值: '{a}'"))
+            })?;
+            let b: i32 = b.trim().parse().map_err(|_| {
+                crate::error::Error::other(format!("无效的星期值: '{b}'"))
+            })?;
+            if a == b {
+                out.push(map_cron_dow_num(a).to_string());
+            } else {
+                let vals = expand_std_dow_range(a, b);
+                out.push(map_dow_list(&vals).join(","));
+            }
+        } else {
+            // 单个值
+            let v: i32 = item.parse().map_err(|_| {
+                crate::error::Error::other(format!("无效的星期值: '{item}'"))
+            })?;
+            out.push(map_cron_dow_num(v).to_string());
+        }
+    }
+    Ok(out.join(","))
+}
+
+/// 把标准 5 段 cron 表达式（`分 时 日 月 周`）转为 cron crate 的 7 段格式
+/// （`秒 分 时 日 月 周 年`），秒固定为 0、年不限。
+/// 星期字段做标准 cron（0/7=周日）→ cron crate（1=周日）的映射。
+/// 失败时返回描述性错误（原始表达式附在消息里）。
+fn cron_5field_to_7field(expr: &str) -> Result<String> {
+    let expr = expr.trim();
+    let parts: Vec<&str> = expr.split_whitespace().collect();
+    if parts.len() != 5 {
+        return Err(crate::error::Error::other(format!(
+            "cron 表达式需要 5 段（分 时 日 月 周），实际得到 {} 段: '{expr}'",
+            parts.len()
+        )));
+    }
+    let dow = convert_dow_field(parts[4])?;
+    // 标准 5 段 → 7 段：前插 0（秒），末尾追加 *（年不限）。
+    Ok(format!("0 {} {} {} {} {} *", parts[0], parts[1], parts[2], parts[3], dow))
+}
+
+/// 按 cron 表达式计算下一次应触发的时间（配置时区的本地时间）。
+/// `after` 为当前时间，返回严格晚于它的下一个匹配时刻。
+/// 解析失败或没有下一次触发时返回 Err。
+fn next_cron_due(expr: &str, tz: &str, after: DateTime<Utc>) -> Result<DateTime<Utc>> {
+    let seven = cron_5field_to_7field(expr)?;
+    let sched = CronSchedule::from_str(&seven).map_err(|e| {
+        crate::error::Error::other(format!("cron 表达式解析失败 '{expr}': {e}"))
+    })?;
+    // 优先使用配置的 IANA 时区；解析失败时回退到系统本地时区。
+    let next = match tz.parse::<chrono_tz::Tz>() {
+        Ok(zone) => sched
+            .after(&after.with_timezone(&zone))
+            .take(1)
+            .next()
+            .map(|t| t.with_timezone(&Utc)),
+        Err(_) => sched
+            .after(&after.with_timezone(&Local))
+            .take(1)
+            .next()
+            .map(|t| t.with_timezone(&Utc)),
+    };
+    next.ok_or_else(|| {
+        crate::error::Error::other(format!("cron 表达式没有可用的下一次触发时间: '{expr}'"))
+    })
 }
 
 /// 计算下一轮调度状态。
@@ -498,33 +629,18 @@ fn stable_jitter(source_id: &str, spread: i64) -> i64 {
 ///   避免连续变化计数被意外清零。
 /// - `prev`：上一轮调度状态。用于**保留** `last_notified_*`，从而让
 ///   基于指纹的重复告警抑制跨轮生效。
+/// - `tz`：cron 表达式使用的 IANA 时区名称。
+///
+/// 调度完全由源的 `schedule.cron` 表达式驱动：按 cron 精确计算下一次触发时间；
+/// 表达式为空或无效时退化为 60s 短间隔重试，避免 daemon 因单个源卡死。
 fn next_schedule(
     source: &crate::config::SourceConfig,
-    interval_secs: u64,
-    jitter_secs: u64,
     failures: u32,
     last_success: Option<DateTime<Utc>>,
     had_change: bool,
     prev: Option<&ScheduleState>,
+    tz: &str,
 ) -> ScheduleState {
-    let mut interval = interval_secs.max(1) as i64;
-    if failures > 0 {
-        interval = (interval as u64 * 2u64.pow(failures.min(6))).min(3600) as i64;
-    }
-    // 应用随机抖动（jitter_secs），避免大量监控源在同一瞬间同时唤醒抢锁。
-    let jitter = jitter_secs as i64;
-    let next_due_at = if jitter > 0 {
-        // 抖动均匀分布在 [-jitter/2, +jitter/2]，围绕基础间隔上下浮动。
-        let spread = jitter / 2;
-        let offset = if spread > 0 {
-            stable_jitter(&source.id, spread)
-        } else {
-            0
-        };
-        Utc::now() + chrono::Duration::seconds((interval + offset).max(1))
-    } else {
-        Utc::now() + chrono::Duration::seconds(interval)
-    };
     // 连续变化计数：本次有变化时保留/递增；无变化时清零。
     let consecutive_changes = if had_change {
         prev.map(|p| p.consecutive_changes.saturating_add(1))
@@ -532,6 +648,21 @@ fn next_schedule(
     } else {
         0
     };
+
+    // —— cron 表达式驱动：按表达式精确调度。 ——
+    let next_due_at = match next_cron_due(
+        source.schedule.cron.as_deref().unwrap_or_default(),
+        tz,
+        Utc::now(),
+    ) {
+        Ok(t) => t,
+        Err(e) => {
+            // 表达式缺失或无效时退化为短间隔重试，避免 daemon 因单个源卡死。
+            warn!(source = %source.id, error = %e, "invalid cron, falling back to 60s retry");
+            Utc::now() + chrono::Duration::seconds(60)
+        }
+    };
+
     ScheduleState {
         source_id: source.id.clone(),
         next_due_at,
@@ -596,4 +727,113 @@ pub async fn test_source(state: &Arc<AppState>, source: &SourceConfig) -> Result
         "text_len": doc.text.len(),
         "items": out.items,
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::TimeZone;
+
+    #[test]
+    fn test_cron_5field_to_7field() {
+        // 标准 1-5 = 周一~周五 → cron crate 2,3,4,5,6。
+        assert_eq!(
+            cron_5field_to_7field("0 9 * * 1-5").unwrap(),
+            "0 0 9 * * 2,3,4,5,6 *"
+        );
+        assert_eq!(cron_5field_to_7field("*/15 * * * *").unwrap(), "0 */15 * * * * *");
+        // 标准 0,6 = 周日,周六 → cron crate 1,7。
+        assert_eq!(cron_5field_to_7field("30 8,20 * * 0,6").unwrap(), "0 30 8,20 * * 1,7 *");
+        // 7 也代表周日 → 1。
+        assert_eq!(cron_5field_to_7field("0 9 * * 7").unwrap(), "0 0 9 * * 1 *");
+    }
+
+    #[test]
+    fn test_cron_5field_to_7field_cross_week_range() {
+        // 跨周范围 5-7：周五(5)周六(6)周日(0) → cron crate 6,7,1。
+        assert_eq!(
+            cron_5field_to_7field("0 9 * * 5-7").unwrap(),
+            "0 0 9 * * 6,7,1 *"
+        );
+        // 跨周范围 6-1：周六(6)周日(0)周一(1) → cron crate 7,1,2。
+        assert_eq!(
+            cron_5field_to_7field("0 9 * * 6-1").unwrap(),
+            "0 0 9 * * 7,1,2 *"
+        );
+        // 完整周 0-6 → cron crate 1..7。
+        assert_eq!(
+            cron_5field_to_7field("0 9 * * 0-6").unwrap(),
+            "0 0 9 * * 1,2,3,4,5,6,7 *"
+        );
+    }
+
+    #[test]
+    fn test_cron_5field_to_7field_steps() {
+        // 单值步进 1/2（Vixie）：周一(1)/三(3)/五(5) → cron crate 2,4,6。
+        assert_eq!(
+            cron_5field_to_7field("0 9 * * 1/2").unwrap(),
+            "0 0 9 * * 2,4,6 *"
+        );
+        // 范围步进 1-5/2：1,3,5 → cron crate 2,4,6。
+        assert_eq!(
+            cron_5field_to_7field("0 9 * * 1-5/2").unwrap(),
+            "0 0 9 * * 2,4,6 *"
+        );
+        // 跨周范围步进 5-1/2：周五(5)周日(0) → cron crate 6,1。
+        assert_eq!(
+            cron_5field_to_7field("0 9 * * 5-1/2").unwrap(),
+            "0 0 9 * * 6,1 *"
+        );
+    }
+
+    #[test]
+    fn test_cron_5field_to_7field_bad_arity() {
+        assert!(cron_5field_to_7field("0 9 * *").is_err());
+        assert!(cron_5field_to_7field("0 9 * * 1 2 3").is_err());
+        assert!(cron_5field_to_7field("").is_err());
+    }
+
+    #[test]
+    fn test_next_cron_due_daily() {
+        // 每天 09:30 UTC，给定 after=2026-01-01 00:00，应得到 2026-01-01 09:30。
+        let after = Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap();
+        let due = next_cron_due("30 9 * * *", "UTC", after).unwrap();
+        assert_eq!(due, Utc.with_ymd_and_hms(2026, 1, 1, 9, 30, 0).unwrap());
+    }
+
+    #[test]
+    fn test_next_cron_due_next_day_when_past() {
+        // 每天 09:30，after 已过 09:30，应得到次日 09:30。
+        let after = Utc.with_ymd_and_hms(2026, 1, 1, 12, 0, 0).unwrap();
+        let due = next_cron_due("30 9 * * *", "UTC", after).unwrap();
+        assert_eq!(due, Utc.with_ymd_and_hms(2026, 1, 2, 9, 30, 0).unwrap());
+    }
+
+    #[test]
+    fn test_next_cron_due_weekday() {
+        // 2026-01-01 是周四。工作日（1-5）每天 09:00。
+        // after = 周四 08:00 → 周四 09:00。
+        let after = Utc.with_ymd_and_hms(2026, 1, 1, 8, 0, 0).unwrap();
+        let due = next_cron_due("0 9 * * 1-5", "UTC", after).unwrap();
+        assert_eq!(due, Utc.with_ymd_and_hms(2026, 1, 1, 9, 0, 0).unwrap());
+
+        // after = 周五 10:00 → 下周一 09:00。
+        let after2 = Utc.with_ymd_and_hms(2026, 1, 2, 10, 0, 0).unwrap();
+        let due2 = next_cron_due("0 9 * * 1-5", "UTC", after2).unwrap();
+        assert_eq!(due2, Utc.with_ymd_and_hms(2026, 1, 5, 9, 0, 0).unwrap());
+    }
+
+    #[test]
+    fn test_next_cron_due_every_15_min() {
+        let after = Utc.with_ymd_and_hms(2026, 1, 1, 10, 7, 0).unwrap();
+        let due = next_cron_due("*/15 * * * *", "UTC", after).unwrap();
+        // 10:07 → 下一个 15 分钟边界为 10:15。
+        assert_eq!(due, Utc.with_ymd_and_hms(2026, 1, 1, 10, 15, 0).unwrap());
+    }
+
+    #[test]
+    fn test_next_cron_due_invalid_expr() {
+        assert!(next_cron_due("61 * * * *", "UTC", Utc::now()).is_err());
+        assert!(next_cron_due("bad", "UTC", Utc::now()).is_err());
+    }
 }
