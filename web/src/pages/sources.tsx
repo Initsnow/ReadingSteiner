@@ -40,6 +40,9 @@ interface FormState {
   method: string
   interval_secs: number
   jitter_secs: number
+  cron: string
+  // 调度模式：interval=固定间隔；cron=精确 cron
+  scheduleMode: "interval" | "cron"
   timeout_secs: number
   tags: string
   // 内容提取
@@ -63,6 +66,8 @@ function emptyForm(): FormState {
     method: "GET",
     interval_secs: 0, // 0 = 使用全局默认检查间隔
     jitter_secs: 0, // 0 = 使用全局默认抖动
+    cron: "",
+    scheduleMode: "interval",
     timeout_secs: 30,
     tags: "",
     extractType: "text",
@@ -119,6 +124,8 @@ function sourceToForm(s: SourceConfig): FormState {
     method: s.fetch.method,
     interval_secs: s.schedule.interval_secs ?? 0,
     jitter_secs: s.schedule.jitter_secs ?? 0,
+    cron: s.schedule.cron ?? "",
+    scheduleMode: s.schedule.cron?.trim() ? "cron" : "interval",
     timeout_secs: s.fetch.timeout_secs ?? 30,
     tags: (s.tags ?? []).join(","),
     ...ex,
@@ -176,9 +183,13 @@ function formToSource(f: FormState, existing?: SourceConfig): SourceConfig {
     },
     schedule: {
       ...base.schedule,
+      // cron 模式：设置 cron，清空 interval/jitter；否则反之。
+      cron: f.scheduleMode === "cron" && f.cron.trim() ? f.cron.trim() : undefined,
       // 0/空表示使用全局默认检查间隔与抖动（由后端兜底为 None）。
-      interval_secs: f.interval_secs > 0 ? f.interval_secs : undefined,
-      jitter_secs: f.jitter_secs > 0 ? f.jitter_secs : undefined,
+      interval_secs:
+        f.scheduleMode === "cron" ? undefined : f.interval_secs > 0 ? f.interval_secs : undefined,
+      jitter_secs:
+        f.scheduleMode === "cron" ? undefined : f.jitter_secs > 0 ? f.jitter_secs : undefined,
     },
     extract: buildExtract(f),
   }
@@ -511,7 +522,9 @@ export function SourcesPage() {
                 <div className="flex flex-wrap items-center gap-4 text-xs text-muted-foreground">
                   <span>engine: {s.fetch.engine}</span>
                   <span>
-                    interval: {s.schedule.interval_secs ? `${s.schedule.interval_secs}s` : "全局默认"}
+                    {s.schedule.cron?.trim()
+                      ? `cron: ${s.schedule.cron}`
+                      : `interval: ${s.schedule.interval_secs ? `${s.schedule.interval_secs}s` : "全局默认"}`}
                   </span>
                   <span>
                     extract:{" "}
@@ -684,26 +697,59 @@ export function SourcesPage() {
                 </select>
               </Field>
 
-              <Field label="检测间隔（秒）" hint="0 表示使用全局默认（默认 1h）">
-                <input
-                  type="number"
+              <Field label="调度模式">
+                <select
                   className={inputCls}
-                  value={form.interval_secs}
+                  value={form.scheduleMode}
                   onChange={(e) =>
-                    setForm({ ...form, interval_secs: Number(e.target.value) })
+                    setForm({
+                      ...form,
+                      scheduleMode: e.target.value as "interval" | "cron",
+                    })
                   }
-                />
+                >
+                  <option value="interval">固定间隔（秒）</option>
+                  <option value="cron">cron 表达式</option>
+                </select>
               </Field>
-              <Field label="抖动（秒）" hint="0 表示使用全局默认（默认 60s）">
-                <input
-                  type="number"
-                  className={inputCls}
-                  value={form.jitter_secs}
-                  onChange={(e) =>
-                    setForm({ ...form, jitter_secs: Number(e.target.value) })
-                  }
-                />
-              </Field>
+              {form.scheduleMode === "interval" ? (
+                <>
+                  <Field label="检测间隔（秒）" hint="0 表示使用全局默认（默认 1h）">
+                    <input
+                      type="number"
+                      className={inputCls}
+                      value={form.interval_secs}
+                      onChange={(e) =>
+                        setForm({ ...form, interval_secs: Number(e.target.value) })
+                      }
+                    />
+                  </Field>
+                  <Field label="抖动（秒）" hint="0 表示使用全局默认（默认 60s）">
+                    <input
+                      type="number"
+                      className={inputCls}
+                      value={form.jitter_secs}
+                      onChange={(e) =>
+                        setForm({ ...form, jitter_secs: Number(e.target.value) })
+                      }
+                    />
+                  </Field>
+                </>
+              ) : (
+                <Field
+                  label="cron 表达式（分 时 日 月 周）"
+                  className="col-span-2"
+                  hint={"例：*/15 * * * *（每 15 分钟）、0 9,18 * * 1-5（工作日 9:00/18:00）。留空则退回固定间隔。"}
+                >
+                  <input
+                    type="text"
+                    className={inputCls}
+                    placeholder="0 9 * * 1-5"
+                    value={form.cron}
+                    onChange={(e) => setForm({ ...form, cron: e.target.value })}
+                  />
+                </Field>
+              )}
 
               <Field label="内容提取" className="col-span-2">
                 <select

@@ -31,6 +31,8 @@ export interface SourceConfig {
   schedule: {
     interval_secs?: number
     jitter_secs?: number
+    /** 可选 cron 表达式（标准 5 段），设置后优先于 interval_secs / jitter_secs。 */
+    cron?: string
   }
   // 内容提取：决定「把抓到的内容变成什么拿来比对」
   extract: ExtractConfig

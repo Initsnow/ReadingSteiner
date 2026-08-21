@@ -338,6 +338,7 @@ pub struct WaitConfig {
 
 /// 调度配置。`interval_secs` / `jitter_secs` 可选：留空（None）时使用全局设置
 /// （`DaemonConfig.interval_secs` / `DaemonConfig.jitter_secs`）中的值。
+/// 若设置了 `cron`，则按 cron 表达式调度，`interval_secs` / `jitter_secs` 被忽略。
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(default)]
 pub struct ScheduleConfig {
@@ -347,10 +348,20 @@ pub struct ScheduleConfig {
     /// 检查间隔随机抖动秒数，None 表示使用全局默认（默认 60s）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub jitter_secs: Option<u64>,
+    /// 可选 cron 表达式（标准 5 段：`分 时 日 月 周`）。
+    /// 设置后按 cron 精确调度，忽略 interval_secs / jitter_secs。
+    /// 例：`*/15 * * * *`（每 15 分钟）、`0 9,18 * * 1-5`（工作日 9:00/18:00）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cron: Option<String>,
 }
 
 impl ScheduleConfig {
+    /// 该源是否使用 cron 精确调度（而非固定间隔）。
+    pub fn uses_cron(&self) -> bool {
+        self.cron.as_deref().is_some_and(|c| !c.trim().is_empty())
+    }
     /// 返回该源的有效检查间隔（秒）：优先用源自身的覆盖值，否则用全局默认。
+    /// 仅在非 cron 模式下有意义。
     pub fn effective_interval(&self, global: u64) -> u64 {
         self.interval_secs.filter(|&v| v > 0).unwrap_or(global)
     }
