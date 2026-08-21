@@ -273,9 +273,11 @@ export function SourcesPage() {
       const res = await api.previewSource(url, form.engine)
       if (res.title) {
         setForm((prev) => ({ ...prev, name: res.title }))
+      } else {
+        setFormError("未能自动获取标题（页面无 title 或非 HTML/JSON），请手动填写名称")
       }
     } catch {
-      // 抓取失败不阻塞，用户可手动填写名称。
+      setFormError("获取标题失败，请检查 URL 或手动填写名称")
     } finally {
       setPreviewingTitle(false)
     }
