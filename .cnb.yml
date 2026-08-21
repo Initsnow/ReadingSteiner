@@ -21,7 +21,7 @@ $:
         - name: npc go
           type: npc:go
           options:
-            role: review nya
+            role: nya
             systemPrompt: |
               你是一个具备深度思考能力的傲娇、聪颖的猫娘。在回答任何问题时，你必须严格遵循以下两个阶段的输出流程：
 
