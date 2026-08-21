@@ -232,28 +232,40 @@ pub(crate) async fn handle_request(state: &Arc<AppState>, req: ControlRequest) -
             enabled,
             notify_enabled,
         } => {
-            // 空 id 列表直接返回成功（幂等，避免前端空选误报错）。
-            if source_ids.is_empty() {
+            // 空 id 列表或两个开关均未指定时直接返回成功（幂等，避免前端空选/误报错，
+            // 也避免对每个源做无意义的 upsert 写库）。
+            if source_ids.is_empty() || (enabled.is_none() && notify_enabled.is_none()) {
                 return ControlResponse::ok(json!({"updated": 0}));
             }
             // 同一把 db → sources 锁内完成校验、写库与内存更新，保证原子性。
             let db = state.db.lock().await;
             let mut sources = state.sources.lock().await;
-            let mut updated = 0usize;
+            // 基于快照先写库成功后再写回内存，避免写库失败时内存已被修改导致
+            // 内存与 DB 不一致；先收集全部修改后的快照并统一写库，中途失败则
+            // 返回错误且内存保持原状（与原实现「逐个 upsert 留部分成功状态」相比更安全）。
+            let mut snapshots: Vec<SourceConfig> = Vec::new();
             for sid in &source_ids {
-                let Some(source) = sources.iter_mut().find(|s| s.id == *sid) else {
+                let Some(source) = sources.iter().find(|s| s.id == *sid) else {
                     continue;
                 };
+                let mut snapshot = source.clone();
                 if let Some(e) = enabled {
-                    source.enabled = e;
+                    snapshot.enabled = e;
                 }
                 if let Some(n) = notify_enabled {
-                    source.notify_enabled = n;
+                    snapshot.notify_enabled = n;
                 }
-                if let Err(e) = db.upsert_source(source) {
-                    return ControlResponse::err(format!("failed to update {}: {e}", source.id));
+                if let Err(e) = db.upsert_source(&snapshot) {
+                    return ControlResponse::err(format!("failed to update {}: {e}", snapshot.id));
                 }
-                updated += 1;
+                snapshots.push(snapshot);
+            }
+            // 全部写库成功后统一写回内存，保持内存与 DB 一致。
+            let updated = snapshots.len();
+            for snapshot in &snapshots {
+                if let Some(s) = sources.iter_mut().find(|s| s.id == snapshot.id) {
+                    *s = snapshot.clone();
+                }
             }
             ControlResponse::ok(json!({"updated": updated}))
         }
