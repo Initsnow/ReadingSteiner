@@ -36,6 +36,18 @@ export interface SourceConfig {
   extract: ExtractConfig
 }
 
+/** 监控源列表项：在 SourceConfig 基础上附加展示用元信息。 */
+export interface SourceMeta extends SourceConfig {
+  /** 最近一次检查时间。 */
+  last_check_at: string | null
+  /** 最近一次检测到变更的时间。 */
+  last_change_at: string | null
+  /** 未读变更事件数。 */
+  unread_count: number
+  /** 是否处于错误状态（连续失败次数 > 0）。 */
+  has_error: boolean
+}
+
 // 图片选择器：如何挑选要随变更通知附带的图片。
 export type ImageSelector =
   | { kind: "none" }
@@ -88,6 +100,10 @@ export interface ChangeEvent {
   fingerprint: string
   dedupe_key: string
   detected_at: string
+  /** 是否已读。 */
+  read: boolean
+  /** camofox 截图路径（相对 media_dir）。 */
+  screenshot_path: string | null
 }
 
 export interface DaemonStatus {
@@ -130,7 +146,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 }
 
 export const api = {
-  listSources: () => request<SourceConfig[]>("/api/sources"),
+  listSources: () => request<SourceMeta[]>("/api/sources"),
 
   addSource: (source: SourceConfig) =>
     request<{ source_id: string; added: boolean }>("/api/sources", {
@@ -172,6 +188,16 @@ export const api = {
     request<ChangeEvent[]>(`/api/events?limit=${limit}`),
 
   getEvent: (id: number) => request<ChangeEvent>(`/api/events/${id}`),
+
+  markEventRead: (id: number) =>
+    request<{ updated: number }>(`/api/events/${id}/read`, { method: "POST" }),
+
+  markSourceRead: (sourceId: string) =>
+    request<{ updated: number }>(`/api/sources/${encodeURIComponent(sourceId)}/read`, {
+      method: "POST",
+    }),
+
+  eventScreenshotUrl: (id: number) => `/api/events/${id}/screenshot`,
 
   check: (sourceId: string) =>
     request<{ source_id: string; checked: boolean }>("/api/check", {

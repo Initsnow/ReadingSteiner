@@ -394,6 +394,22 @@ pub async fn check_source(state: &Arc<AppState>, source_id: &str) -> Result<()> 
         }
     }
 
+    // camofox 源开启截图时，保存截图文件供 Web 控制台展示。
+    // 文件命名 `event-{id}.png`，落在 media_dir/screenshots/ 下。
+    let screenshot_path = if source.fetch.engine == "camofox"
+        && source.fetch.screenshot
+        && let Some(data) = &doc.screenshot
+    {
+        let dir = state.runtime.media_dir.join("screenshots");
+        std::fs::create_dir_all(&dir).ok();
+        let fname = format!("event-tmp-{}.png", Utc::now().timestamp_nanos_opt().unwrap_or(0));
+        let path = dir.join(&fname);
+        std::fs::write(&path, data).ok();
+        Some(format!("screenshots/{fname}"))
+    } else {
+        None
+    };
+
     let event = ChangeEvent {
         id: 0,
         watchpoint_id: source.id.clone(),
@@ -405,6 +421,8 @@ pub async fn check_source(state: &Arc<AppState>, source_id: &str) -> Result<()> 
         dedupe_key: diff_result.dedupe_key,
         image_urls_json: serde_json::to_string(&image_urls)?,
         detected_at: Utc::now(),
+        read: false,
+        screenshot_path,
     };
 
     // 图片下载不阻塞检测：把挑选出的图片 URL 存入事件，
@@ -413,6 +431,18 @@ pub async fn check_source(state: &Arc<AppState>, source_id: &str) -> Result<()> 
     {
         let db = state.db.lock().await;
         event_id = db.insert_change_event(&event)?;
+        // 插入成功后把临时文件名改为以事件 id 命名，便于后续引用。
+        if let Some(rel) = &event.screenshot_path {
+            let old = state.runtime.media_dir.join(rel);
+            let new = state.runtime.media_dir.join(format!("screenshots/event-{event_id}.png"));
+            if old.exists() {
+                let _ = std::fs::rename(&old, &new);
+                let _ = db.update_event_screenshot(
+                    event_id,
+                    &format!("screenshots/event-{event_id}.png"),
+                );
+            }
+        }
         // 仅当该源开启了通知（notify_enabled）且已配置 notifier 与默认 chat 时才排队发送。
         if source.notify_enabled && state.notifier.is_some() {
             let chat_id = if state.cfg.telegram.default_chat_id.is_empty() {
