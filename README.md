@@ -78,8 +78,6 @@ reading-steiner restore-from-zip --file x.zip  # 从上传/本地的 zip 备份�
 - `daemon.history_limit_per_source`——每个监控源保留的历史变更事件条数（0 不限制）。
 - `daemon.failure_notify_threshold`——连续失败达到多少次后发送 Telegram 失败告警（0 禁用）。
 - `daemon.timezone`——调度器/告警展示时区（IANA 名称，如 `Asia/Shanghai`；留空使用系统本地时区）。
-- `daemon.interval_secs`——全局默认检查间隔（秒，源未单独覆盖时使用，默认 3600 = 1h）。
-- `daemon.jitter_secs`——全局默认检查间隔随机抖动秒数（源未单独覆盖时使用，默认 60s）。
 - `telegram.template`——变更通知模板，占位符：`{label}` `{watch}` `{time}` `{tz}` `{summary}` `{items}`。
 - `telegram.max_images_per_event`、`telegram.default_chat_id` 等。
 
@@ -114,14 +112,29 @@ Web 控制台「设置」页提供一键备份、备份列表、**zip 下载**�
 
 见 [`config.yaml`](./config.yaml)。config.yaml 只负责**全局配置**（state_dir、telegram、camofox、web），**不包含监控源（sources）定义**——监控源统一存于 SQLite，通过 Web 控制台或 CLI 管理。
 
-监控源通过 **Web 控制台**或 **CLI**（`reading-steiner sources add <file>`）添加，格式见 `src/config.rs::SourceConfig`。每个源只需配置：抓什么（fetch）、提取什么（extract，整页文本或结构化条目）、多久检测一次（schedule）。变更检测完全自动。
+监控源通过 **Web 控制台**或 **CLI**（`reading-steiner sources add <file>`）添加，格式见 `src/config.rs::SourceConfig`。每个源只需配置：抓什么（fetch）、提取什么（extract，整页文本或结构化条目）、何时检测（schedule）。变更检测完全自动。
 
-**调度与队列参数**（检查间隔与抖动默认走全局设置，可按源覆盖）：
-- `daemon.interval_secs`——全局默认检查间隔（秒，默认 3600 = 1h）。
-- `daemon.jitter_secs`——全局默认随机抖动（秒，默认 60s），在基础间隔上叠加随机抖动（均匀分布在 ±jitter/2），避免大量源同一瞬间同时唤醒抢锁。
-- `schedule.interval_secs` / `schedule.jitter_secs`——单个监控源可**覆盖**全局值；留空（0）则使用全局默认。
+**调度与队列参数**（调度统一走 cron 表达式，队列参数为全局设置）：
+- `schedule.cron`——每个监控源使用 **cron 表达式**（标准 5 段：`分 时 日 月 周`）精确调度，在指定时刻触发。
 - `daemon.queue_capacity`——每个轮询 tick 最多入队的检测任务数（有界队列，超出部分下个 tick 再处理），防止突发积压。
 - `daemon.concurrency`——并发检测的最大任务数（信号量）。
+
+**cron 调度示例**（在源配置的 `schedule` 下）：
+
+```yaml
+schedule:
+  # 工作日每天 9:00 与 18:00 各检查一次
+  cron: "0 9,18 * * 1-5"
+```
+
+```yaml
+schedule:
+  # 每 15 分钟检查一次
+  cron: "*/15 * * * *"
+```
+
+支持的语法：`*`（任意）、`*/n`（步进）、`a,b,c`（列表）、`a-b`（范围）、`a-b/n`（范围步进）。
+周字段 `0-6` 对应周日到周六（0 或 7 均为周日）。时区跟随 `daemon.timezone`（缺省为系统本地时区）。
 
 **提取能力**：
 - 结构化条目（`extract.type: items`）的 JSONPath 选择器支持 `$.items[*].id`、`$.items[0].name` 等链式导航（`[*]` 通配、`[n]` 索引可出现在任意层级）。
@@ -140,7 +153,7 @@ fetch:
   engine: http
   url: https://example.com
 schedule:
-  # interval_secs / jitter_secs 省略时使用全局默认（默认 1h / 60s）
+  # cron 表达式（可选，缺失时该源不按固定节奏调度）
 extract:
   type: text
   images:
