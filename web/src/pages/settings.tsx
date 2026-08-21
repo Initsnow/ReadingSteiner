@@ -270,6 +270,19 @@ export function SettingsPage() {
                 }
               />
             </Field>
+            <Field
+              label="默认 cron 表达式"
+              hint="新建监控源未单独配置时使用；留空回退到每小时（0 * * * *）"
+            >
+              <input
+                className={inputCls}
+                value={settings.default_cron}
+                placeholder="0 * * * *"
+                onChange={(e) =>
+                  setSettings({ ...settings, default_cron: e.target.value })
+                }
+              />
+            </Field>
             <Field label="默认 User-Agent" hint="留空使用内置默认值">
               <input
                 className={inputCls}

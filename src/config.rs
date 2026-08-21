@@ -83,6 +83,9 @@ pub struct DaemonConfig {
     pub log_level: String,
     /// 全局默认请求超时秒数（单个监控源可覆盖，见 FetchConfig::timeout_secs）。
     pub default_timeout_secs: u64,
+    /// 全局默认 cron 表达式（单个监控源可覆盖，见 ScheduleConfig::cron）。
+    /// 留空时回退到每小时（`0 * * * *`）。
+    pub default_cron: String,
     /// 全局默认 User-Agent（HTTP 抓取与图片下载使用）。
     pub default_user_agent: String,
     /// 每个监控源最多保留的历史变更事件条数（超出部分自动清理，0 表示不限制）。
@@ -102,6 +105,16 @@ impl DaemonConfig {
             self.default_timeout_secs
         } else {
             30
+        }
+    }
+
+    /// 全局默认 cron 表达式。单个监控源未配置 cron 时使用该值；
+    /// 留空时回退到每小时（`0 * * * *`）。
+    pub fn effective_cron(&self) -> String {
+        if self.default_cron.trim().is_empty() {
+            "0 * * * *".to_string()
+        } else {
+            self.default_cron.trim().to_string()
         }
     }
 
@@ -167,6 +180,8 @@ pub struct EditableSettings {
     pub queue_capacity: usize,
     /// 默认请求超时秒数。
     pub default_timeout_secs: u64,
+    /// 默认 cron 表达式（新建监控源未单独配置时使用）。
+    pub default_cron: String,
     /// 默认 User-Agent。
     pub default_user_agent: String,
     /// 每个监控源保留历史条数（0 不限制）。
@@ -189,6 +204,7 @@ impl EditableSettings {
             concurrency: cfg.daemon.concurrency,
             queue_capacity: cfg.daemon.queue_capacity,
             default_timeout_secs: cfg.daemon.default_timeout_secs,
+            default_cron: cfg.daemon.default_cron.clone(),
             default_user_agent: cfg.daemon.default_user_agent.clone(),
             history_limit_per_source: cfg.daemon.history_limit_per_source,
             failure_notify_threshold: cfg.daemon.failure_notify_threshold,
@@ -204,6 +220,7 @@ impl EditableSettings {
         cfg.daemon.concurrency = self.concurrency;
         cfg.daemon.queue_capacity = self.queue_capacity;
         cfg.daemon.default_timeout_secs = self.default_timeout_secs;
+        cfg.daemon.default_cron = self.default_cron.clone();
         cfg.daemon.default_user_agent = self.default_user_agent.clone();
         cfg.daemon.history_limit_per_source = self.history_limit_per_source;
         cfg.daemon.failure_notify_threshold = self.failure_notify_threshold;
@@ -469,6 +486,7 @@ pub struct RuntimeConfig {
     pub concurrency: usize,
     pub queue_capacity: usize,
     pub default_timeout_secs: u64,
+    pub default_cron: String,
     pub default_user_agent: String,
     pub history_limit_per_source: usize,
     pub failure_notify_threshold: u32,
@@ -493,6 +511,7 @@ impl RuntimeConfig {
                 cfg.daemon.queue_capacity
             },
             default_timeout_secs: cfg.daemon.default_timeout_secs,
+            default_cron: cfg.daemon.effective_cron(),
             default_user_agent: cfg.daemon.effective_user_agent(),
             history_limit_per_source: cfg.daemon.history_limit_per_source,
             failure_notify_threshold: cfg.daemon.failure_notify_threshold,
