@@ -11,7 +11,10 @@ export interface ApiEnvelope<T = unknown> {
 export interface SourceConfig {
   id: string
   name: string
+  /** 是否启用监控（调度检查）。false 时该源不会被调度器抓取检测。 */
   enabled: boolean
+  /** 是否发送变更通知。false 时仍正常监控检测，但变更不推送 Telegram 通知。 */
+  notify_enabled: boolean
   tags: string[]
   fetch: {
     engine: string
@@ -145,6 +148,13 @@ export const api = {
   deleteSource: (id: string) =>
     request<{ source_id: string; deleted: boolean }>(`/api/sources/${encodeURIComponent(id)}`, {
       method: "DELETE",
+    }),
+
+  /** 批量更新多个监控源的监控开关 / 通知开关。 */
+  batchSetFlags: (sourceIds: string[], flags: { enabled?: boolean; notify_enabled?: boolean }) =>
+    request<{ updated: number }>("/api/sources/batch", {
+      method: "POST",
+      body: JSON.stringify({ source_ids: sourceIds, ...flags }),
     }),
 
   testSource: (id: string) =>
