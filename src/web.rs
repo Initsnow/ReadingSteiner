@@ -22,6 +22,11 @@ use crate::control::{self, ControlRequest, ControlResponse};
 use crate::error::Result;
 use crate::scheduler::AppState;
 
+/// 上传 zip 备份的最大允许体积（默认 4 GiB，覆盖绝大多数含 media 的备份）。
+/// 由于上传会先在内存中缓冲（`field.bytes()` 后再落盘），此上限用于防止
+/// 超大/恶意上传导致内存耗尽。
+const MAX_UPLOAD_BYTES: usize = 4 * 1024 * 1024 * 1024;
+
 /// 启动 Web 控制台 HTTP 服务（阻塞直至监听器结束）。
 pub async fn serve_web(state: Arc<AppState>) -> Result<()> {
     let app = build_router(state.clone());
@@ -407,6 +412,15 @@ async fn api_restore_upload(
             return json_response(ControlResponse::err("未收到 zip 文件")).await;
         }
     };
+
+    // 防止超大/恶意上传耗尽内存（上传与后续解压均会先在内存中缓冲）。
+    if bytes.len() > MAX_UPLOAD_BYTES {
+        return json_response(ControlResponse::err(format!(
+            "上传的 zip 超过大小上限 ({} MiB)",
+            MAX_UPLOAD_BYTES / (1024 * 1024)
+        )))
+        .await;
+    }
 
     // 校验是合法 zip 头（PK\x03\x04 / PK\x05\x06 / PK\x07\x08）避免无意义落盘。
     if bytes.len() < 4 || &bytes[0..2] != b"PK" {

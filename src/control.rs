@@ -371,18 +371,25 @@ pub(crate) async fn handle_request(state: &Arc<AppState>, req: ControlRequest) -
                 Ok(f) => f,
                 Err(e) => return ControlResponse::err(format!("无法读取上传文件: {e}")),
             };
-            let mut db = state.db.lock().await;
-            let restored_dir = match crate::backup::restore_from_zip(
-                file,
-                &state.cfg,
-                Some(db.connection_mut()),
-            ) {
+            // 先无锁解压：解压不涉及数据库，若在 DB 锁内执行大体积 media 解压
+            // 会长时间阻塞 daemon 的其它数据库访问。
+            let restored_dir = match crate::backup::extract_zip(file, &state.cfg) {
                 Ok(dir) => dir,
                 Err(e) => {
                     let _ = std::fs::remove_file(&path);
                     return ControlResponse::err(e.to_string());
                 }
             };
+            // 再单独持有 DB 锁执行恢复与刷新内存监控源，锁占用时间最小化。
+            let mut db = state.db.lock().await;
+            if let Err(e) = crate::backup::restore(&restored_dir, &state.cfg, Some(db.connection_mut()))
+            {
+                drop(db);
+                // 恢复失败时清理解压残留，避免遗留无 zip 的“半成品”备份。
+                let _ = crate::backup::cleanup_backup_dir(&restored_dir);
+                let _ = std::fs::remove_file(&path);
+                return ControlResponse::err(e.to_string());
+            }
             // 恢复后重新从数据库加载监控源到内存（同步完成，不在 await 期间持有 &Db）。
             let sources = db.list_sources().unwrap_or_default();
             *state.sources.lock().await = sources;

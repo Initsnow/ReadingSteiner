@@ -177,16 +177,51 @@ pub fn delete_backup(state_dir: &Path, name: &str) -> Result<bool> {
     Ok(deleted)
 }
 
+/// 清理某个备份目录（删除目录及其对应 zip）。用于恢复失败时移除解压残留，
+/// 避免遗留无 zip 的“半成品”备份。目录名仅接受合法备份名（时间戳）。
+pub fn cleanup_backup_dir(backup_dir: &Path) -> Result<()> {
+    let name = match backup_dir.file_name().and_then(|s| s.to_str()) {
+        Some(n) if is_valid_backup_name(n) => n.to_string(),
+        _ => return Ok(()),
+    };
+    // backup_dir = <state>/backups/<ts>，故 state_dir = <state>。
+    let state_dir = backup_dir
+        .parent()
+        .and_then(Path::parent)
+        .map(Path::to_path_buf)
+        .unwrap_or_default();
+    let _ = delete_backup(&state_dir, &name);
+    Ok(())
+}
+
 /// 从用户上传的 zip 备份中恢复。
 ///
 /// 把 zip 解压到 `state/backups/<新时间戳>/`（仅接受内部安全的相对路径，
 /// 拒绝 `../`、绝对路径、符号链接等），随后复用 `restore` 恢复数据库与 media。
 /// 返回新备份目录路径。
+///
+/// 注意：本函数在调用前**不应**持有 DB 锁——解压本身不涉及数据库，若在线恢复
+/// 请先调用 [`extract_zip`]（无锁）再单独持有锁执行 [`restore`]，避免大体积
+/// media 解压期间长时间阻塞 daemon 的数据库访问。
 pub fn restore_from_zip<R: Read + Send>(
     zip_reader: R,
     cfg: &Config,
     db_conn: Option<&mut Connection>,
 ) -> Result<PathBuf> {
+    let backup_dir = extract_zip(zip_reader, cfg)?;
+    // 解压成功但恢复失败时清理残留目录，避免遗留无 zip 的“半成品”备份。
+    if let Err(e) = restore(&backup_dir, cfg, db_conn) {
+        let _ = fs::remove_dir_all(&backup_dir);
+        return Err(e);
+    }
+    Ok(backup_dir)
+}
+
+/// 把上传的 zip 备份解压到 `state/backups/<新时间戳>/`（同秒冲突追加序号），
+/// 仅接受安全的相对路径，并校验 zip 内含备份数据库。返回解压出的备份目录。
+///
+/// 本函数不触碰运行中的数据库，可在无 DB 锁的情况下调用。
+pub fn extract_zip<R: Read + Send>(zip_reader: R, cfg: &Config) -> Result<PathBuf> {
     use std::io::Cursor;
 
     // 先把整个 zip 读进内存，便于多遍读取（解压 + 校验备份元信息）。
@@ -249,11 +284,6 @@ pub fn restore_from_zip<R: Read + Send>(
     {
         let _ = conn.pragma_update(None, "journal_mode", "DELETE");
     }
-
-    // 复用 restore 把解压出的备份恢复到运行中状态。
-    // 注意：这里不在 DB 锁内重新打包 zip——打包由调用方在无锁场景
-    // （CLI 离线 / daemon 释放 DB 锁后）执行，避免大 media 备份压缩阻塞 daemon。
-    restore(&backup_dir, cfg, db_conn)?;
 
     Ok(backup_dir)
 }
