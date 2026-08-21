@@ -446,6 +446,8 @@ fn test_prune_history_per_source() {
                 dedupe_key: "d".into(),
                 image_urls_json: "[]".into(),
                 detected_at: Utc::now(),
+                read: false,
+                screenshot_path: None,
             })
             .unwrap();
         }
@@ -496,6 +498,8 @@ fn test_event_template_rendering() {
         dedupe_key: "d".into(),
         image_urls_json: "[]".into(),
         detected_at: Utc::now(),
+        read: false,
+        screenshot_path: None,
     };
     let text = reading_steiner::notifier::render_event_message(
         &event,

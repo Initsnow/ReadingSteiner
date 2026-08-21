@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react"
 import { Link } from "react-router-dom"
-import { Loader2, RefreshCw } from "lucide-react"
+import { Eye, Loader2, RefreshCw } from "lucide-react"
 import { api, type ChangeEvent } from "@/lib/api"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
@@ -74,7 +74,11 @@ export function EventsPage() {
         <div className="space-y-2">
           {events.map((e) => (
             <Link key={e.id} to={`/events/${e.id}`}>
-              <Card className="transition-colors hover:border-primary">
+              <Card
+                className={`transition-colors hover:border-primary ${
+                  !e.read ? "bg-primary/5" : ""
+                }`}
+              >
                 <CardHeader className="flex flex-row items-center justify-between space-y-0">
                   <div className="flex items-center gap-2">
                     <span className="text-muted-foreground">#{e.id}</span>
@@ -84,6 +88,9 @@ export function EventsPage() {
                     <CardTitle className="text-sm">
                       {e.watchpoint_id}
                     </CardTitle>
+                    {!e.read && (
+                      <Eye className="h-3.5 w-3.5 text-primary" />
+                    )}
                   </div>
                   <CardDescription>{formatTime(e.detected_at)}</CardDescription>
                 </CardHeader>

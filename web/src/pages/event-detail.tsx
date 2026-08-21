@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react"
 import { useParams, Link } from "react-router-dom"
-import { ArrowLeft, Loader2 } from "lucide-react"
+import { ArrowLeft, Eye, Loader2 } from "lucide-react"
 import { api, type ChangeEvent } from "@/lib/api"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
@@ -24,7 +24,14 @@ export function EventDetailPage() {
     api
       .getEvent(Number(id))
       .then((e) => {
-        if (active) setEvent(e)
+        if (active) {
+          setEvent(e)
+          // 打开事件详情时自动标记已读
+          if (!e.read) {
+            api.markEventRead(e.id).catch(() => {})
+            setEvent({ ...e, read: true })
+          }
+        }
       })
       .catch((e) => {
         if (active) setError((e as Error).message)
@@ -59,6 +66,11 @@ export function EventDetailPage() {
             <CardTitle className="flex items-center gap-2">
               事件 #{event.id}
               <Badge variant="outline">{event.change_type}</Badge>
+              {!event.read && (
+                <Badge variant="warning" className="flex items-center gap-1">
+                  <Eye className="h-3 w-3" /> 未读
+                </Badge>
+              )}
             </CardTitle>
             <CardDescription>
               {event.watchpoint_id} ·{" "}
@@ -73,6 +85,17 @@ export function EventDetailPage() {
                 {event.diff_summary || "（无摘要）"}
               </p>
             </div>
+
+            {event.screenshot_path && (
+              <div>
+                <div className="mb-1 text-sm font-medium">截图</div>
+                <img
+                  src={api.eventScreenshotUrl(event.id)}
+                  alt={`截图 #${event.id}`}
+                  className="max-h-96 rounded-md border object-contain"
+                />
+              </div>
+            )}
 
             <div className="grid gap-4 md:grid-cols-2">
               <div>

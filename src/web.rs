@@ -60,6 +60,9 @@ fn build_router(state: Arc<AppState>) -> Router {
         .route("/sources/batch", post(api_batch_sources))
         .route("/events", get(api_list_events))
         .route("/events/{id}", get(api_get_event))
+        .route("/events/{id}/read", post(api_mark_event_read))
+        .route("/events/{id}/screenshot", get(api_event_screenshot))
+        .route("/sources/{id}/read", post(api_mark_source_read))
         .route("/check", post(api_check))
         .route("/history", get(api_history))
         .route("/notify-test", post(api_notify_test))
@@ -236,6 +239,93 @@ async fn api_get_event(
 ) -> (StatusCode, Json<Value>) {
     json_response(control::handle_request(&state, ControlRequest::Diff { event_id: id }).await)
         .await
+}
+
+/// 标记单个变更事件为已读。
+async fn api_mark_event_read(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<i64>,
+) -> (StatusCode, Json<Value>) {
+    json_response(
+        control::handle_request(&state, ControlRequest::MarkEventRead { event_id: id }).await,
+    )
+    .await
+}
+
+/// 标记某个监控源的全部变更事件为已读。
+async fn api_mark_source_read(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> (StatusCode, Json<Value>) {
+    json_response(
+        control::handle_request(&state, ControlRequest::MarkSourceRead { source_id: id }).await,
+    )
+    .await
+}
+
+/// 获取变更事件的 camofox 截图（二进制图片流）。
+async fn api_event_screenshot(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<i64>,
+) -> std::result::Result<axum::response::Response, (StatusCode, Json<Value>)> {
+    use axum::body::Body;
+    use axum::http::header;
+
+    let db = state.db.lock().await;
+    let ev = match db.get_change_event(id) {
+        Ok(Some(e)) => e,
+        Ok(None) => {
+            return Err((
+                StatusCode::NOT_FOUND,
+                Json(json!({ "ok": false, "error": format!("event {id} not found") })),
+            ));
+        }
+        Err(e) => {
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "ok": false, "error": e.to_string() })),
+            ));
+        }
+    };
+    let Some(rel) = ev.screenshot_path else {
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(json!({ "ok": false, "error": "event has no screenshot" })),
+        ));
+    };
+    // 路径安全校验：只允许 media_dir 下的文件，拒绝路径遍历。
+    let media_dir = state.runtime.media_dir.clone();
+    let file = media_dir.join(&rel);
+    let canonical = file.canonicalize().unwrap_or_else(|_| file.clone());
+    let media_canonical = media_dir
+        .canonicalize()
+        .unwrap_or_else(|_| media_dir.clone());
+    if !canonical.starts_with(&media_canonical) {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(json!({ "ok": false, "error": "invalid screenshot path" })),
+        ));
+    }
+    match tokio::fs::read(&canonical).await {
+        Ok(bytes) => {
+            let mime = if rel.ends_with(".jpg") || rel.ends_with(".jpeg") {
+                "image/jpeg"
+            } else if rel.ends_with(".webp") {
+                "image/webp"
+            } else {
+                "image/png"
+            };
+            let mut builder = axum::response::Response::builder()
+                .status(StatusCode::OK)
+                .header(header::CONTENT_TYPE, mime);
+            builder = builder.header(header::CACHE_CONTROL, "public, max-age=3600");
+            Ok(builder.body(Body::from(bytes)).unwrap())
+        }
+        Err(e) => Err((
+            StatusCode::NOT_FOUND,
+            Json(json!({ "ok": false, "error": format!("screenshot not found: {e}") })),
+        )),
+    }
 }
 
 #[derive(Deserialize)]
