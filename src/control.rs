@@ -274,24 +274,46 @@ pub(crate) async fn handle_request(state: &Arc<AppState>, req: ControlRequest) -
             }))
         }
         ControlRequest::Backup => {
-            let db = state.db.lock().await;
-            match crate::backup::backup(db.connection(), &state.cfg, state.config_path.as_deref()) {
-                Ok(dir) => {
-                    let name = dir.file_name().and_then(|s| s.to_str()).unwrap_or("");
-                    let has_zip = state
-                        .runtime
-                        .state_dir
-                        .join("backups")
-                        .join(format!("{name}.zip"))
-                        .exists();
-                    ControlResponse::ok(json!({
-                        "path": dir.display().to_string(),
-                        "name": name,
-                        "has_zip": has_zip,
-                    }))
+            // 仅在线备份需要持有 DB 锁（SQLite 快照）；zip 打包放在释放锁之后，
+            // 避免大库打包阻塞 daemon 的其它请求。
+            let (name, dir) = {
+                let db = state.db.lock().await;
+                match crate::backup::backup(
+                    db.connection(),
+                    &state.cfg,
+                    state.config_path.as_deref(),
+                ) {
+                    Ok(dir) => {
+                        let name = dir
+                            .file_name()
+                            .and_then(|s| s.to_str())
+                            .unwrap_or("")
+                            .to_string();
+                        (name, dir)
+                    }
+                    Err(e) => return ControlResponse::err(e.to_string()),
                 }
-                Err(e) => ControlResponse::err(e.to_string()),
-            }
+            };
+            // 释放锁后异步打包 zip（阻塞 I/O 用 spawn_blocking，不阻塞 async 执行器）。
+            let dir_for_zip = dir.clone();
+            tokio::task::spawn_blocking(move || {
+                if let Err(e) = crate::backup::pack_backup_zip(&dir_for_zip) {
+                    tracing::warn!(error = %e, "zip packing failed for backup");
+                }
+            })
+            .await
+            .unwrap_or(());
+            let has_zip = state
+                .runtime
+                .state_dir
+                .join("backups")
+                .join(format!("{name}.zip"))
+                .exists();
+            ControlResponse::ok(json!({
+                "path": dir.display().to_string(),
+                "name": name,
+                "has_zip": has_zip,
+            }))
         }
         ControlRequest::ListBackups => {
             match crate::backup::list_backups(&state.runtime.state_dir) {
@@ -300,6 +322,10 @@ pub(crate) async fn handle_request(state: &Arc<AppState>, req: ControlRequest) -
             }
         }
         ControlRequest::Restore { name } => {
+            // 校验备份名，防止路径遍历注入。
+            if !crate::backup::is_valid_backup_name(&name) {
+                return ControlResponse::err("invalid backup name");
+            }
             let mut db = state.db.lock().await;
             let dir = state.runtime.state_dir.join("backups").join(&name);
             if !dir.join("reading-steiner.db").exists() {

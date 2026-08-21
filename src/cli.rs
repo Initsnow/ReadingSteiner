@@ -282,6 +282,9 @@ pub async fn run(cli: Cli) -> Result<()> {
         }
         Command::Restore { name, config } => {
             let cfg = Config::load(&config)?;
+            if !crate::backup::is_valid_backup_name(&name) {
+                return Err(Error::other("invalid backup name"));
+            }
             let dir = cfg.state_dir.join("backups").join(&name);
             if !dir.exists() {
                 return Err(Error::other(format!("backup {name} not found")));

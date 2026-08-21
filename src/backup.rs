@@ -65,11 +65,16 @@ pub fn backup(db_conn: &Connection, cfg: &Config, config_path: Option<&Path>) ->
         serde_json::to_string_pretty(&meta)?,
     )?;
 
-    // 4) 打包为 zip，供 Web 控制台下载。
-    let zip_path = backup_dir.with_extension("zip");
-    let _ = pack_zip(&backup_dir, &zip_path);
-
     Ok(backup_dir)
+}
+
+/// 把备份目录打包成 `<name>.zip`，返回 zip 路径。
+///
+/// 供调用方在释放 DB 锁 / 不在锁内时调用，避免大库打包阻塞 daemon。
+pub fn pack_backup_zip(backup_dir: &Path) -> Result<PathBuf> {
+    let zip_path = backup_dir.with_extension("zip");
+    pack_zip(backup_dir, &zip_path)?;
+    Ok(zip_path)
 }
 
 /// 把备份目录打包成一个 zip 文件（目录名 = `<ts>.zip`），便于用户整体下载迁移。
@@ -143,6 +148,12 @@ pub struct BackupInfo {
 pub fn backup_zip_path(state_dir: &Path, name: &str) -> Option<PathBuf> {
     let p = state_dir.join(BACKUP_SUBDIR).join(format!("{name}.zip"));
     if p.exists() { Some(p) } else { None }
+}
+
+/// 校验备份名是否合法：备份目录名固定为 `YYYYMMDD-HHMMSS` 时间戳，
+/// 仅允许数字与连字符。用于阻止 `../` 等路径遍历注入。
+pub fn is_valid_backup_name(name: &str) -> bool {
+    !name.is_empty() && name.len() <= 32 && name.bytes().all(|b| b.is_ascii_digit() || b == b'-')
 }
 
 /// 从指定备份恢复数据库与 media。
@@ -227,5 +238,7 @@ pub fn backup_from_path(cfg: &Config, config_path: Option<&Path>) -> Result<Path
         Duration::from_secs(5).as_millis() as i64,
     );
     let dir = backup(&conn, cfg, config_path)?;
+    // CLI 场景 daemon 未运行，无锁阻塞问题，直接打包 zip。
+    pack_backup_zip(&dir)?;
     Ok(dir)
 }

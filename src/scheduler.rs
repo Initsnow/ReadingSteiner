@@ -10,7 +10,7 @@ use tokio::sync::{Mutex, Semaphore};
 use tracing::{debug, error, info, warn};
 
 use crate::config::{
-    ChangeType, Config, ExtractConfig, ImageSelector, RuntimeConfig, SourceConfig,
+    ChangeType, Config, ExtractConfig, ImageSelector, ItemSelector, RuntimeConfig, SourceConfig,
 };
 use crate::db::Db;
 use crate::differ;
@@ -395,8 +395,12 @@ pub async fn check_source(state: &Arc<AppState>, source_id: &str) -> Result<()> 
             selector, fields, ..
         } = &extract_cfg
         {
-            image_urls =
-                pipeline::collect_changed_element_images(&doc, selector, fields, &changed_ids);
+            // Changed 模式依赖 CSS 定位 HTML 元素；JSONPath 源无法定位元素，
+            // 会静默丢弃全部图片，此时回退到整页 image_urls，避免丢图。
+            if matches!(selector, ItemSelector::Css { .. }) {
+                image_urls =
+                    pipeline::collect_changed_element_images(&doc, selector, fields, &changed_ids);
+            }
         }
     }
 

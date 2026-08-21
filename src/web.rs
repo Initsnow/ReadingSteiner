@@ -274,6 +274,15 @@ async fn api_download_backup(
     use axum::body::Body;
     use axum::http::header;
 
+    // 备份名固定为 `YYYYMMDD-HHMMSS` 时间戳，仅允许数字与连字符，
+    // 杜绝 `../` 等路径遍历（URL 编码后仍可能被解码拼接进文件路径）。
+    if !crate::backup::is_valid_backup_name(&name) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "ok": false, "error": "invalid backup name" })),
+        ));
+    }
+
     let state_dir = state.runtime.state_dir.clone();
     let dir = state_dir.join("backups").join(&name);
     if !dir.join("reading-steiner.db").exists() {
@@ -331,6 +340,10 @@ async fn api_restore(
     State(state): State<Arc<AppState>>,
     Json(body): Json<RestoreBody>,
 ) -> (StatusCode, Json<Value>) {
+    // 备份名同样校验，避免通过 restore 接口注入路径遍历。
+    if !crate::backup::is_valid_backup_name(&body.name) {
+        return json_response(ControlResponse::err("invalid backup name")).await;
+    }
     json_response(
         control::handle_request(&state, ControlRequest::Restore { name: body.name }).await,
     )

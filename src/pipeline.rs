@@ -249,9 +249,12 @@ fn extract_css(
             let value = extract_css_field(&el, f);
             item_fields.insert(f.name.clone(), value);
         }
+        // 与 element_stable_id 保持一致：id 字段值为空时回退到 `item-{idx}`，
+        // 避免 Changed 模式因 stable_id 不一致而漏发该条目图片。
         let stable_id = item_fields
             .get("id")
             .cloned()
+            .filter(|v| !v.is_empty())
             .unwrap_or_else(|| format!("item-{idx}"));
         let image_urls = collect_img_urls_from_element(&el);
         let text = item_fields
@@ -332,9 +335,11 @@ fn extract_json_path(doc: &FetchedDocument, path: &str, fields: &[ItemField]) ->
                 item_fields.insert(f.name.clone(), val);
             }
         }
+        // id 字段值为空时回退到 `json-{idx}`，保持 stable_id 非空且稳定。
         let stable_id = item_fields
             .get("id")
             .cloned()
+            .filter(|v| !v.is_empty())
             .unwrap_or_else(|| format!("json-{idx}"));
         items.push(Item {
             stable_id,
@@ -691,5 +696,33 @@ mod tests {
         let matches = eval_json_path(&binding, "$.items[1].name").unwrap();
         assert_eq!(matches.len(), 1);
         assert_eq!(matches[0].as_str(), Some("second"));
+    }
+
+    #[test]
+    fn test_extract_css_empty_id_falls_back_to_index() {
+        // id 字段值为空时，extract_css 与 element_stable_id 都应回退到 `item-{idx}`，
+        // 保证 Changed 模式能正确匹配到变更元素（不会因 stable_id 不一致而漏发图片）。
+        let extract = ExtractConfig::Items {
+            selector: ItemSelector::Css {
+                selector: ".item".into(),
+            },
+            fields: vec![ItemField {
+                name: "id".into(),
+                selector: Some("span.id".into()),
+                attr: None,
+                path: None,
+            }],
+            dedupe_key: None,
+            images: None,
+        };
+        let out = run_pipeline(
+            &doc(
+                r#"<html><body><div class="item"><span class="id"></span><img src="/a.jpg"></div></body></html>"#,
+            ),
+            &extract,
+        )
+        .unwrap();
+        assert_eq!(out.items.len(), 1);
+        assert_eq!(out.items[0].stable_id, "item-0");
     }
 }
