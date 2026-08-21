@@ -293,10 +293,30 @@ async fn api_event_screenshot(
             Json(json!({ "ok": false, "error": "event has no screenshot" })),
         ));
     };
-    // 路径安全校验：只允许 media_dir 下的文件，拒绝路径遍历。
+    // 路径安全校验：拒绝绝对路径与 `..` 路径段，仅允许 media_dir 内的相对路径。
+    // 先用纯路径字符串校验避免 TOCTOU：即使文件被替换/移除，也绝不拼出越界路径。
+    if rel.starts_with('/')
+        || rel.starts_with('\\')
+        || rel.split(['/', '\\']).any(|seg| seg == "..")
+        || rel.split(['/', '\\']).any(|seg| seg.is_empty())
+    {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(json!({ "ok": false, "error": "invalid screenshot path" })),
+        ));
+    }
     let media_dir = state.runtime.media_dir.clone();
     let file = media_dir.join(&rel);
-    let canonical = file.canonicalize().unwrap_or_else(|_| file.clone());
+    // canonicalize 失败（文件不存在等）时直接拒绝，不再 fallback 到未规范化的 file。
+    let canonical = match file.canonicalize() {
+        Ok(c) => c,
+        Err(_) => {
+            return Err((
+                StatusCode::NOT_FOUND,
+                Json(json!({ "ok": false, "error": "screenshot file not found" })),
+            ));
+        }
+    };
     let media_canonical = media_dir
         .canonicalize()
         .unwrap_or_else(|_| media_dir.clone());

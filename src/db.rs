@@ -341,11 +341,11 @@ impl Db {
             .execute("UPDATE change_events SET read=1 WHERE watchpoint_id=?1", [source_id])?)
     }
 
-    /// 标记指定变更事件为已读。
-    pub fn mark_event_read(&self, event_id: i64) -> Result<()> {
-        self.conn
-            .execute("UPDATE change_events SET read=1 WHERE id=?1", [event_id])?;
-        Ok(())
+    /// 标记指定变更事件为已读。返回受影响的行数。
+    pub fn mark_event_read(&self, event_id: i64) -> Result<usize> {
+        Ok(self
+            .conn
+            .execute("UPDATE change_events SET read=1 WHERE id=?1", [event_id])?)
     }
 
     /// 统计指定监控源未读变更事件数。
@@ -385,28 +385,79 @@ impl Db {
     /// 获取所有监控源的展示用元信息。
     pub fn list_source_meta(&self, sources: &[SourceConfig]) -> Result<Vec<crate::models::SourceMeta>> {
         use crate::models::SourceMeta;
+        use std::collections::HashMap;
+
+        // 最近检查时间：每个源取最新快照的 fetched_at。
+        let mut last_check_at: HashMap<String, DateTime<Utc>> = HashMap::new();
+        {
+            let mut stmt = self.conn.prepare(
+                "SELECT watchpoint_id, MAX(fetched_at) AS latest FROM snapshots GROUP BY watchpoint_id",
+            )?;
+            let rows = stmt.query_map([], |r| {
+                Ok((r.get::<_, String>(0)?, parse_ts(&r.get::<_, String>(1)?)))
+            })?;
+            for row in rows {
+                let (wp, ts) = row?;
+                last_check_at.insert(wp, ts);
+            }
+        }
+
+        // 最近变更时间：每个源取最新事件的 detected_at。
+        let mut last_change_at: HashMap<String, DateTime<Utc>> = HashMap::new();
+        {
+            let mut stmt = self.conn.prepare(
+                "SELECT watchpoint_id, MAX(detected_at) AS latest FROM change_events GROUP BY watchpoint_id",
+            )?;
+            let rows = stmt.query_map([], |r| {
+                Ok((r.get::<_, String>(0)?, parse_ts(&r.get::<_, String>(1)?)))
+            })?;
+            for row in rows {
+                let (wp, ts) = row?;
+                last_change_at.insert(wp, ts);
+            }
+        }
+
+        // 未读事件数：每个源统计 read=0 的事件。
+        let mut unread_count: HashMap<String, u32> = HashMap::new();
+        {
+            let mut stmt = self.conn.prepare(
+                "SELECT watchpoint_id, COUNT(*) FROM change_events WHERE read=0 GROUP BY watchpoint_id",
+            )?;
+            let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?;
+            for row in rows {
+                let (wp, n) = row?;
+                unread_count.insert(wp, n as u32);
+            }
+        }
+
+        // 错误状态：schedule_state 中连续失败次数 > 0。
+        let mut has_error: HashMap<String, bool> = HashMap::new();
+        {
+            let mut stmt = self.conn.prepare(
+                "SELECT source_id FROM schedule_state WHERE consecutive_failures > 0",
+            )?;
+            let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+            for row in rows {
+                let sid = row?;
+                has_error.insert(sid, true);
+            }
+        }
+
         let mut out = Vec::with_capacity(sources.len());
         for s in sources {
-            let last_check = self.last_check_at(&s.id)?;
-            let last_change = self.last_change_at(&s.id)?;
-            let unread = self.unread_count(&s.id)?;
-            let has_error = self
-                .get_schedule_state(&s.id)?
-                .map(|st| st.consecutive_failures > 0)
-                .unwrap_or(false);
             out.push(SourceMeta {
                 source: s.clone(),
-                last_check_at: last_check,
-                last_change_at: last_change,
-                unread_count: unread,
-                has_error,
+                last_check_at: last_check_at.get(&s.id).copied(),
+                last_change_at: last_change_at.get(&s.id).copied(),
+                unread_count: unread_count.get(&s.id).copied().unwrap_or(0),
+                has_error: has_error.get(&s.id).copied().unwrap_or(false),
             });
         }
         Ok(out)
     }
 
-    /// 更新变更事件的截图路径。
-    pub fn update_event_screenshot(&self, event_id: i64, path: &str) -> Result<()> {
+    /// 更新变更事件的截图路径。传 `None` 时清空截图路径。
+    pub fn update_event_screenshot(&self, event_id: i64, path: Option<&str>) -> Result<()> {
         self.conn.execute(
             "UPDATE change_events SET screenshot_path=?1 WHERE id=?2",
             params![path, event_id],

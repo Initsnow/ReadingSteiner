@@ -23,13 +23,16 @@ export function EventDetailPage() {
     let active = true
     api
       .getEvent(Number(id))
-      .then((e) => {
-        if (active) {
-          setEvent(e)
-          // 打开事件详情时自动标记已读
-          if (!e.read) {
-            api.markEventRead(e.id).catch(() => {})
-            setEvent({ ...e, read: true })
+      .then(async (e) => {
+        if (!active) return
+        setEvent(e)
+        // 打开事件详情时自动标记已读；失败时不乐观更新 UI，保持实际状态一致
+        if (!e.read) {
+          try {
+            await api.markEventRead(e.id)
+            if (active) setEvent({ ...e, read: true })
+          } catch {
+            // 标记已读失败：保留未读状态，UI 与后端保持一致
           }
         }
       })
