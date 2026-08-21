@@ -209,6 +209,16 @@ export function SourcesPage() {
   const [selected, setSelected] = useState<Set<string>>(new Set())
   const [batchBusy, setBatchBusy] = useState(false)
 
+  // 按 tag 筛选：null 表示全部，"__untagged__" 表示无标签的源。
+  const [tagFilter, setTagFilter] = useState<string | null>(null)
+  const allTags = Array.from(new Set(sources.flatMap((s) => s.tags))).sort()
+  const filteredSources = sources.filter((s) => {
+    if (tagFilter === null) return true
+    if (tagFilter === "__untagged__") return s.tags.length === 0
+    return s.tags.includes(tagFilter)
+  })
+  const hasUntagged = sources.some((s) => s.tags.length === 0)
+
   // add/edit modal state
   const [modalOpen, setModalOpen] = useState(false)
   const [editing, setEditing] = useState<SourceConfig | null>(null)
@@ -354,10 +364,6 @@ export function SourcesPage() {
     })
   }
 
-  function toggleSelectAll(checked: boolean) {
-    setSelected(checked ? new Set(sources.map((s) => s.id)) : new Set())
-  }
-
   async function runBatch(
     flags: { enabled?: boolean; notify_enabled?: boolean },
     confirmText?: string,
@@ -469,25 +475,79 @@ export function SourcesPage() {
               <input
                 type="checkbox"
                 className="h-4 w-4 accent-primary"
-                checked={selected.size > 0 && selected.size === sources.length}
+                checked={selected.size > 0 && selected.size === filteredSources.length}
                 ref={(el) => {
                   if (el) {
                     el.indeterminate =
-                      selected.size > 0 && selected.size < sources.length
+                      selected.size > 0 && selected.size < filteredSources.length
                   }
                 }}
-                onChange={(e) => toggleSelectAll(e.target.checked)}
+                onChange={(e) =>
+                  setSelected(e.target.checked ? new Set(filteredSources.map((s) => s.id)) : new Set())
+                }
               />
               全选
             </label>
           </div>
-          {sources.map((s) => (
-            <Card
-              key={s.id}
-              className={
-                selected.has(s.id) ? "ring-2 ring-primary/60" : undefined
-              }
-            >
+
+          {/* 按 tag 筛选栏 */}
+          {(allTags.length > 0 || hasUntagged) && (
+            <div className="flex flex-wrap items-center gap-2 px-1">
+              <span className="text-xs text-muted-foreground">按标签：</span>
+              <button
+                onClick={() => setTagFilter(null)}
+                className={`rounded-full px-2.5 py-0.5 text-xs transition-colors ${
+                  tagFilter === null
+                    ? "bg-primary text-primary-foreground"
+                    : "bg-muted text-muted-foreground hover:bg-muted/70"
+                }`}
+              >
+                全部
+              </button>
+              {allTags.map((t) => (
+                <button
+                  key={t}
+                  onClick={() => setTagFilter(tagFilter === t ? null : t)}
+                  className={`rounded-full px-2.5 py-0.5 text-xs transition-colors ${
+                    tagFilter === t
+                      ? "bg-primary text-primary-foreground"
+                      : "bg-muted text-muted-foreground hover:bg-muted/70"
+                  }`}
+                >
+                  {t}
+                </button>
+              ))}
+              {hasUntagged && (
+                <button
+                  onClick={() =>
+                    setTagFilter(
+                      tagFilter === "__untagged__" ? null : "__untagged__",
+                    )
+                  }
+                  className={`rounded-full px-2.5 py-0.5 text-xs transition-colors ${
+                    tagFilter === "__untagged__"
+                      ? "bg-primary text-primary-foreground"
+                      : "bg-muted text-muted-foreground hover:bg-muted/70"
+                  }`}
+                >
+                  无标签
+                </button>
+              )}
+            </div>
+          )}
+
+          {filteredSources.length === 0 ? (
+            <p className="px-1 text-sm text-muted-foreground">
+              没有符合该标签的监控源。
+            </p>
+          ) : (
+            filteredSources.map((s) => (
+              <Card
+                key={s.id}
+                className={
+                  selected.has(s.id) ? "ring-2 ring-primary/60" : undefined
+                }
+              >
               <CardContent className="flex flex-wrap items-center gap-x-3 gap-y-2 px-4 py-3">
                 <input
                   type="checkbox"
@@ -574,8 +634,8 @@ export function SourcesPage() {
                   </Button>
                 </div>
               </CardContent>
-            </Card>
-          ))}
+              </Card>
+            )))}
         </div>
       )}
 
