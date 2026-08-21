@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
@@ -56,6 +56,13 @@ pub enum ControlRequest {
     ListBackups,
     Restore {
         name: String,
+    },
+    DeleteBackup {
+        name: String,
+    },
+    RestoreUpload {
+        /// 上传的 zip 备份在本机临时路径。
+        path: PathBuf,
     },
     Shutdown,
 }
@@ -334,10 +341,9 @@ pub(crate) async fn handle_request(state: &Arc<AppState>, req: ControlRequest) -
             // 在线恢复：通过 SQLite 备份接口把备份库写进实时连接，并刷新内存中的监控源。
             match crate::backup::restore(&dir, &state.cfg, Some(db.connection_mut())) {
                 Ok(()) => {
-                    // 恢复后重新从数据库加载监控源到内存。
-                    let mut sources = state.sources.lock().await;
-                    *sources = db.list_sources().unwrap_or_default();
-                    drop(sources);
+                    // 恢复后重新从数据库加载监控源到内存（同步完成，不在 await 期间持有 &Db）。
+                    let sources = db.list_sources().unwrap_or_default();
+                    *state.sources.lock().await = sources;
                     ControlResponse::ok(json!({
                         "restored": true,
                         "name": name,
@@ -346,6 +352,55 @@ pub(crate) async fn handle_request(state: &Arc<AppState>, req: ControlRequest) -
                 }
                 Err(e) => ControlResponse::err(e.to_string()),
             }
+        }
+        ControlRequest::DeleteBackup { name } => {
+            if !crate::backup::is_valid_backup_name(&name) {
+                return ControlResponse::err("invalid backup name");
+            }
+            match crate::backup::delete_backup(&state.runtime.state_dir, &name) {
+                Ok(deleted) if deleted => ControlResponse::ok(json!({
+                    "deleted": true,
+                    "name": name,
+                })),
+                Ok(_) => ControlResponse::err(format!("backup {name} not found")),
+                Err(e) => ControlResponse::err(e.to_string()),
+            }
+        }
+        ControlRequest::RestoreUpload { path } => {
+            let file = match std::fs::File::open(&path) {
+                Ok(f) => f,
+                Err(e) => return ControlResponse::err(format!("无法读取上传文件: {e}")),
+            };
+            let mut db = state.db.lock().await;
+            let restored_dir = match crate::backup::restore_from_zip(
+                file,
+                &state.cfg,
+                Some(db.connection_mut()),
+            ) {
+                Ok(dir) => dir,
+                Err(e) => {
+                    let _ = std::fs::remove_file(&path);
+                    return ControlResponse::err(e.to_string());
+                }
+            };
+            // 恢复后重新从数据库加载监控源到内存（同步完成，不在 await 期间持有 &Db）。
+            let sources = db.list_sources().unwrap_or_default();
+            *state.sources.lock().await = sources;
+            drop(db); // 释放 DB 锁后再打包 zip，避免大 media 压缩阻塞 daemon。
+
+            // 补一个 zip（便于与其它备份一致地下载/管理）。失败仅记录，不影响恢复结果。
+            let _ = crate::backup::pack_backup_zip(&restored_dir);
+            // 清理上传产生的临时文件。
+            let _ = std::fs::remove_file(&path);
+            ControlResponse::ok(json!({
+                "restored": true,
+                "name": restored_dir
+                    .file_name()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or_default()
+                    .to_string(),
+                "note": "已从上传的 zip 备份在线恢复"
+            }))
         }
         ControlRequest::Shutdown => {
             state

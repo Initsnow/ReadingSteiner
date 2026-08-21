@@ -84,9 +84,22 @@ pub enum Command {
         #[arg(long, default_value = "config.yaml")]
         config: PathBuf,
     },
-    /// Restore from a backup by name (requires daemon stopped)
+    /// Restore from a backup by name (daemon running → online restore)
     Restore {
         name: String,
+        #[arg(long, default_value = "config.yaml")]
+        config: PathBuf,
+    },
+    /// Delete a backup by name
+    BackupDelete {
+        name: String,
+        #[arg(long, default_value = "config.yaml")]
+        config: PathBuf,
+    },
+    /// Restore from an uploaded zip backup (daemon running → online restore)
+    RestoreFromZip {
+        #[arg(long)]
+        file: PathBuf,
         #[arg(long, default_value = "config.yaml")]
         config: PathBuf,
     },
@@ -302,6 +315,60 @@ pub async fn run(cli: Cli) -> Result<()> {
                         "daemon not reachable, restoring offline (requires daemon stopped) ..."
                     );
                     crate::backup::restore(&dir, &cfg, None)?;
+                    println!("restore complete. restart daemon to load restored data.");
+                    Ok(())
+                }
+            }
+        }
+        Command::BackupDelete { name, config } => {
+            let cfg = Config::load(&config)?;
+            let resp = control::send_request(
+                cfg.socket_path(),
+                &ControlRequest::DeleteBackup { name: name.clone() },
+            )
+            .await;
+            match resp {
+                Ok(r) if r.ok => {
+                    print_response(&r, false);
+                    Ok(())
+                }
+                Ok(r) => Err(Error::other(r.error.unwrap_or_default())),
+                Err(_) => {
+                    // daemon 未运行：直接删除本地备份目录。
+                    match crate::backup::delete_backup(&cfg.state_dir, &name) {
+                        Ok(true) => {
+                            println!("backup {name} deleted");
+                            Ok(())
+                        }
+                        Ok(false) => Err(Error::other(format!("backup {name} not found"))),
+                        Err(e) => Err(e),
+                    }
+                }
+            }
+        }
+        Command::RestoreFromZip { file, config } => {
+            let cfg = Config::load(&config)?;
+            if !file.exists() {
+                return Err(Error::other(format!("file not found: {}", file.display())));
+            }
+            // 优先通过 daemon 在线恢复；daemon 不可用时回退到离线恢复。
+            let resp = control::send_request(
+                cfg.socket_path(),
+                &ControlRequest::RestoreUpload { path: file.clone() },
+            )
+            .await;
+            match resp {
+                Ok(r) if r.ok => {
+                    print_response(&r, false);
+                    Ok(())
+                }
+                Ok(r) => Err(Error::other(r.error.unwrap_or_default())),
+                Err(_) => {
+                    println!("daemon not reachable, restoring offline ...");
+                    let dir =
+                        crate::backup::restore_from_zip(std::fs::File::open(&file)?, &cfg, None)?;
+                    // 离线恢复：无 DB 锁，补打一个 zip 便于与其它备份一致地下载/管理。
+                    let _ = crate::backup::pack_backup_zip(&dir);
                     println!("restore complete. restart daemon to load restored data.");
                     Ok(())
                 }

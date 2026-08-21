@@ -8,9 +8,9 @@ use std::sync::Arc;
 
 use axum::{
     Json, Router,
-    extract::{Path, Query, State},
+    extract::{Multipart, Path, Query, State},
     http::StatusCode,
-    routing::{get, post, put},
+    routing::{delete, get, post, put},
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -59,8 +59,10 @@ fn build_router(state: Arc<AppState>) -> Router {
         .route("/settings", get(api_get_settings).put(api_update_settings))
         .route("/backup", post(api_backup))
         .route("/backups", get(api_list_backups))
+        .route("/backups/{name}", delete(api_delete_backup))
         .route("/backups/{name}/download", get(api_download_backup))
         .route("/restore", post(api_restore))
+        .route("/restore/upload", post(api_restore_upload))
         .with_state(state);
 
     Router::new()
@@ -346,6 +348,90 @@ async fn api_restore(
     }
     json_response(
         control::handle_request(&state, ControlRequest::Restore { name: body.name }).await,
+    )
+    .await
+}
+
+async fn api_delete_backup(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+) -> (StatusCode, Json<Value>) {
+    // 备份名固定为时间戳，仅允许数字与连字符，杜绝路径遍历。
+    if !crate::backup::is_valid_backup_name(&name) {
+        return json_response(ControlResponse::err("invalid backup name")).await;
+    }
+    json_response(control::handle_request(&state, ControlRequest::DeleteBackup { name }).await)
+        .await
+}
+
+/// 处理上传 zip 备份并恢复。
+///
+/// multipart 表单字段名固定为 `file`。先把上传内容落盘到临时文件，
+/// 再交给 control 层（持有 DB 锁）完成解压与在线恢复。
+async fn api_restore_upload(
+    State(state): State<Arc<AppState>>,
+    mut multipart: Multipart,
+) -> (StatusCode, Json<Value>) {
+    // 从 multipart 中取出第一个 file 字段。
+    let mut bytes: Option<Vec<u8>> = None;
+    loop {
+        let field = match multipart.next_field().await {
+            Ok(Some(f)) => f,
+            Ok(None) => break,
+            Err(e) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({ "ok": false, "error": format!("multipart 解析失败: {e}") })),
+                );
+            }
+        };
+        if field.name() == Some("file") {
+            match field.bytes().await {
+                Ok(data) if !data.is_empty() => {
+                    bytes = Some(data.to_vec());
+                    break;
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        Json(json!({ "ok": false, "error": format!("读取上传内容失败: {e}") })),
+                    );
+                }
+            }
+        }
+    }
+    let bytes = match bytes {
+        Some(b) if !b.is_empty() => b,
+        _ => {
+            return json_response(ControlResponse::err("未收到 zip 文件")).await;
+        }
+    };
+
+    // 校验是合法 zip 头（PK\x03\x04 / PK\x05\x06 / PK\x07\x08）避免无意义落盘。
+    if bytes.len() < 4 || &bytes[0..2] != b"PK" {
+        return json_response(ControlResponse::err("上传的不是 zip 备份包")).await;
+    }
+
+    // 落盘到系统临时目录（用时间戳保证唯一，避免并发上传互相覆盖），交给 control 层恢复后清理。
+    let uniq = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or_default();
+    let tmp = state
+        .runtime
+        .state_dir
+        .join("backups")
+        .join(format!("upload-restore-{uniq}.zip"));
+    if let Some(parent) = tmp.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if let Err(e) = std::fs::write(&tmp, &bytes) {
+        return json_response(ControlResponse::err(format!("写入临时文件失败: {e}"))).await;
+    }
+
+    json_response(
+        control::handle_request(&state, ControlRequest::RestoreUpload { path: tmp.clone() }).await,
     )
     .await
 }
