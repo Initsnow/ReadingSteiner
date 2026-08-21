@@ -365,7 +365,10 @@ pub async fn run(cli: Cli) -> Result<()> {
                 Ok(r) => Err(Error::other(r.error.unwrap_or_default())),
                 Err(_) => {
                     println!("daemon not reachable, restoring offline ...");
-                    crate::backup::restore_from_zip(std::fs::File::open(&file)?, &cfg, None)?;
+                    let dir =
+                        crate::backup::restore_from_zip(std::fs::File::open(&file)?, &cfg, None)?;
+                    // 离线恢复：无 DB 锁，补打一个 zip 便于与其它备份一致地下载/管理。
+                    let _ = crate::backup::pack_backup_zip(&dir);
                     println!("restore complete. restart daemon to load restored data.");
                     Ok(())
                 }

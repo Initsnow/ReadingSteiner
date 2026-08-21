@@ -571,5 +571,15 @@ fn test_backup_delete_and_zip_restore_roundtrip() {
     assert!(restored_dir.join("reading-steiner.db").exists());
     // 恢复后应把数据库复制到目标 state 目录。
     assert!(restore_state_dir.join("reading-steiner.db").exists());
+    // 离线恢复后调用方应补打包 zip（与 CLI 离线路径一致），便于后续下载/管理。
+    let restored_name = restored_dir
+        .file_name()
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_string();
+    let restored_zip = reading_steiner::backup::pack_backup_zip(&restored_dir).unwrap();
+    assert!(restored_zip.exists());
+    assert!(reading_steiner::backup::backup_zip_path(&restore_state_dir, &restored_name).is_some());
     let _ = backup_dir; // zip 已生成，目录保留
 }

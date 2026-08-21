@@ -372,27 +372,35 @@ pub(crate) async fn handle_request(state: &Arc<AppState>, req: ControlRequest) -
                 Err(e) => return ControlResponse::err(format!("无法读取上传文件: {e}")),
             };
             let mut db = state.db.lock().await;
-            match crate::backup::restore_from_zip(file, &state.cfg, Some(db.connection_mut())) {
-                Ok(dir) => {
-                    let sources = db.list_sources().unwrap_or_default();
-                    *state.sources.lock().await = sources;
-                    // 清理上传产生的临时文件。
-                    let _ = std::fs::remove_file(&path);
-                    ControlResponse::ok(json!({
-                        "restored": true,
-                        "name": dir
-                            .file_name()
-                            .and_then(|s| s.to_str())
-                            .unwrap_or_default()
-                            .to_string(),
-                        "note": "已从上传的 zip 备份在线恢复"
-                    }))
-                }
+            let restored_dir = match crate::backup::restore_from_zip(
+                file,
+                &state.cfg,
+                Some(db.connection_mut()),
+            ) {
+                Ok(dir) => dir,
                 Err(e) => {
                     let _ = std::fs::remove_file(&path);
-                    ControlResponse::err(e.to_string())
+                    return ControlResponse::err(e.to_string());
                 }
-            }
+            };
+            // 恢复后重新从数据库加载监控源到内存（同步完成，不在 await 期间持有 &Db）。
+            let sources = db.list_sources().unwrap_or_default();
+            *state.sources.lock().await = sources;
+            drop(db); // 释放 DB 锁后再打包 zip，避免大 media 压缩阻塞 daemon。
+
+            // 补一个 zip（便于与其它备份一致地下载/管理）。失败仅记录，不影响恢复结果。
+            let _ = crate::backup::pack_backup_zip(&restored_dir);
+            // 清理上传产生的临时文件。
+            let _ = std::fs::remove_file(&path);
+            ControlResponse::ok(json!({
+                "restored": true,
+                "name": restored_dir
+                    .file_name()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or_default()
+                    .to_string(),
+                "note": "已从上传的 zip 备份在线恢复"
+            }))
         }
         ControlRequest::Shutdown => {
             state
