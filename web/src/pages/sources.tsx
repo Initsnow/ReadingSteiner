@@ -19,6 +19,7 @@ import {
   type ItemField,
   type ImageSelector,
 } from "@/lib/api"
+import { validateCron } from "@/lib/utils"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription } from "@/components/ui/card"
@@ -290,6 +291,17 @@ export function SourcesPage() {
   async function handleSave() {
     if (!form.url.trim()) {
       setFormError("url 为必填项")
+      return
+    }
+    // 未跟随全局时 cron 必须填写，避免 UI 显示“自定义”而实际静默回退为“跟随全局”。
+    if (!form.cron_follow_global && !form.cron.trim()) {
+      setFormError("取消“跟随全局”后，需要填写 cron 表达式")
+      return
+    }
+    // 自定义 cron 时做前端格式校验（跟随全局时使用全局默认值，由设置页负责校验）。
+    const cronErr = form.cron_follow_global ? null : validateCron(form.cron)
+    if (cronErr) {
+      setFormError(cronErr)
       return
     }
     if (form.extractType === "items" && !form.selector.trim()) {
