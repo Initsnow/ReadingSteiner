@@ -10,6 +10,9 @@ use crate::config::{EditableSettings, SourceConfig};
 use crate::error::{Error, Result};
 use crate::scheduler::{self, AppState};
 
+/// 单次批量操作允许的最大监控源数量，避免持锁期间长时间执行 upsert 阻塞其他请求。
+const MAX_BATCH_SIZE: usize = 100;
+
 #[cfg(not(unix))]
 use tokio::net::{TcpListener, TcpStream};
 #[cfg(unix)]
@@ -236,6 +239,13 @@ pub(crate) async fn handle_request(state: &Arc<AppState>, req: ControlRequest) -
             // 也避免对每个源做无意义的 upsert 写库）。
             if source_ids.is_empty() || (enabled.is_none() && notify_enabled.is_none()) {
                 return ControlResponse::ok(json!({"updated": 0}));
+            }
+            // 限制单次批量数量，避免超大列表在持锁期间长时间执行 upsert 阻塞其他请求。
+            if source_ids.len() > MAX_BATCH_SIZE {
+                return ControlResponse::err(format!(
+                    "batch size {} exceeds limit {MAX_BATCH_SIZE}",
+                    source_ids.len()
+                ));
             }
             // 同一把 db → sources 锁内完成校验、写库与内存更新，保证原子性。
             let db = state.db.lock().await;
