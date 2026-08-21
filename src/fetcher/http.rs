@@ -70,6 +70,11 @@ impl HttpFetcher {
             .get("last-modified")
             .and_then(|v| v.to_str().ok())
             .map(ToOwned::to_owned);
+        let content_type = resp
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .map(ToOwned::to_owned);
 
         if status == StatusCode::NOT_MODIFIED {
             return Ok(FetchedDocument {
@@ -85,6 +90,7 @@ impl HttpFetcher {
                 normalized_fingerprint: String::new(),
                 duration_ms: started.elapsed().as_millis() as u64,
                 engine: "http".to_string(),
+                content_type,
                 not_modified: true,
             });
         }
@@ -100,13 +106,17 @@ impl HttpFetcher {
         let limit = spec.fetch.max_body_bytes.max(1024);
         let bytes = read_body_limited(resp, limit).await?;
         let content_sha256 = blake3::hash(&bytes).to_hex().to_string();
-        let text = String::from_utf8_lossy(&bytes).into_owned();
+        // 按响应 Content-Type 声明的 charset 解码，避免 GBK 等非 UTF-8 页面乱码
+        // 导致内容被误判为“变化”或漏判。未声明时默认按 UTF-8 处理（from_utf8_lossy）。
+        let charset = charset_from_content_type(content_type.as_deref());
+        let text = decode_body(&bytes, charset.as_deref());
         let normalized_fingerprint = blake3::hash(text.as_bytes()).to_hex().to_string();
 
         debug!(
             source = %spec.source_id,
             bytes = bytes.len(),
             sha = %content_sha256,
+            charset,
             "http fetch completed"
         );
 
@@ -123,8 +133,40 @@ impl HttpFetcher {
             normalized_fingerprint,
             duration_ms: started.elapsed().as_millis() as u64,
             engine: "http".to_string(),
+            content_type,
             not_modified: false,
         })
+    }
+}
+
+/// 从 Content-Type 头解析字符集名（小写）。未指定时返回 None。
+fn charset_from_content_type(content_type: Option<&str>) -> Option<String> {
+    let ct = content_type?;
+    for part in ct.split(';') {
+        let part = part.trim();
+        if let Some(rest) = part.strip_prefix("charset=") {
+            return Some(rest.trim().trim_matches('\"').to_lowercase());
+        }
+    }
+    None
+}
+
+/// 按字符集解码响应体。
+///
+/// - 未声明 charset 或声明为 UTF-8 时，按 UTF-8 解码（无效字节用替换符）。
+/// - 声明为常见单字节 / 简体中文编码时，用 encoding_rs 解码，避免乱码。
+/// - 声明为未知编码时退回 UTF-8，避免 panic。
+fn decode_body(bytes: &[u8], charset: Option<&str>) -> String {
+    let charset = charset.unwrap_or("utf-8");
+    match charset {
+        "utf-8" | "utf8" | "" => String::from_utf8_lossy(bytes).into_owned(),
+        _ => {
+            let encoding =
+                encoding_rs::Encoding::for_label(charset.as_bytes()).unwrap_or(encoding_rs::UTF_8);
+            // decode_without_bom_handling：按标签解码，遇无效序列用替换符，不抛错。
+            let (text, _) = encoding.decode_without_bom_handling(bytes);
+            text.into_owned()
+        }
     }
 }
 

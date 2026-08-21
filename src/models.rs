@@ -59,6 +59,8 @@ pub struct FetchedDocument {
     pub normalized_fingerprint: String,
     pub duration_ms: u64,
     pub engine: String,
+    /// 响应头 Content-Type（用于判断内容类型，如 text/html、application/json）。
+    pub content_type: Option<String>,
     pub not_modified: bool,
 }
 

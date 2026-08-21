@@ -416,10 +416,13 @@ impl Db {
     }
 
     pub fn pending_notifications(&self, limit: usize) -> Result<Vec<NotificationRecord>> {
+        // 只取出到期的待发送通知：`next_retry_at` 为空表示首次/立即可发，
+        // 非空则需等到重试时间点之后才允许再次尝试，避免失败通知每 500ms 疯狂重试。
+        let now = Utc::now().to_rfc3339();
         let mut stmt = self.conn.prepare(
-            "SELECT id, event_id, chat_id, message_ids_json, status, attempts, next_retry_at FROM notifications WHERE status='pending' ORDER BY id ASC LIMIT ?1",
+            "SELECT id, event_id, chat_id, message_ids_json, status, attempts, next_retry_at FROM notifications WHERE status='pending' AND (next_retry_at IS NULL OR next_retry_at <= ?1) ORDER BY id ASC LIMIT ?2",
         )?;
-        let rows = stmt.query_map([limit as i64], |r| {
+        let rows = stmt.query_map(params![now, limit as i64], |r| {
             Ok(NotificationRecord {
                 id: r.get(0)?,
                 event_id: r.get(1)?,

@@ -381,6 +381,7 @@ impl Fetcher for CamofoxFetcher {
             normalized_fingerprint,
             duration_ms: started.elapsed().as_millis() as u64,
             engine: "camofox".to_string(),
+            content_type: Some("text/html".into()),
             not_modified: false,
         })
     }

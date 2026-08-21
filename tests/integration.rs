@@ -332,3 +332,100 @@ extract:
         _ => panic!("expected items extract"),
     }
 }
+
+#[test]
+fn test_pending_notifications_respects_retry_backoff() {
+    // 修复：失败后设置了 next_retry_at 的通知，在到期前不应被取出，
+    // 否则会每 500ms 疯狂重试，退避时间完全无效。
+    let db = Db::open_in_memory().unwrap();
+    let now = Utc::now();
+
+    // 立即可发：next_retry_at 为空。
+    db.insert_notification(&reading_steiner::models::NotificationRecord {
+        id: 0,
+        event_id: 1,
+        chat_id: "c".into(),
+        message_ids_json: "[]".into(),
+        status: "pending".into(),
+        attempts: 0,
+        next_retry_at: None,
+    })
+    .unwrap();
+    // 退避中：next_retry_at 在未来（+30s），不应被取出。
+    db.insert_notification(&reading_steiner::models::NotificationRecord {
+        id: 0,
+        event_id: 2,
+        chat_id: "c".into(),
+        message_ids_json: "[]".into(),
+        status: "pending".into(),
+        attempts: 1,
+        next_retry_at: Some(now + chrono::Duration::seconds(30)),
+    })
+    .unwrap();
+    // 已到期的退避：next_retry_at 在过去，应被取出。
+    db.insert_notification(&reading_steiner::models::NotificationRecord {
+        id: 0,
+        event_id: 3,
+        chat_id: "c".into(),
+        message_ids_json: "[]".into(),
+        status: "pending".into(),
+        attempts: 2,
+        next_retry_at: Some(now - chrono::Duration::seconds(1)),
+    })
+    .unwrap();
+
+    let pending = db.pending_notifications(50).unwrap();
+    // 只有 event 1（无退避）和 event 3（已到期）应被取出，退避中的 event 2 被跳过。
+    let event_ids: Vec<i64> = pending.iter().map(|n| n.event_id).collect();
+    assert!(event_ids.contains(&1));
+    assert!(!event_ids.contains(&2), "退避中的通知不应被取出");
+    assert!(event_ids.contains(&3));
+}
+
+#[test]
+fn test_css_image_selector_ignores_non_html() {
+    // 修复：CSS 图片选择器对 JSON/纯文本等非 HTML 内容不应误解析。
+    use reading_steiner::config::ImageSelector;
+    use reading_steiner::models::FetchedDocument;
+
+    let make_doc = |content_type: Option<&str>, text: &str| FetchedDocument {
+        final_url: "https://example.com".into(),
+        status: 200,
+        text: text.into(),
+        html: None,
+        images: vec![],
+        screenshot: None,
+        etag: None,
+        last_modified: None,
+        content_sha256: "x".into(),
+        normalized_fingerprint: "x".into(),
+        duration_ms: 0,
+        engine: "http".into(),
+        content_type: content_type.map(|s| s.to_string()),
+        not_modified: false,
+    };
+
+    // JSON 内容，即使包含 <img> 字样也不应被当作 HTML 解析。
+    let json_doc = make_doc(
+        Some("application/json"),
+        r#"{"html":"<img src=\"/x.jpg\">"}"#,
+    );
+    let extract = ExtractConfig::Text {
+        images: Some(ImageSelector::Css {
+            selector: "img".into(),
+        }),
+    };
+    let out = pipeline::run_pipeline(&json_doc, &extract).unwrap();
+    assert!(
+        out.image_urls.is_empty(),
+        "非 HTML 内容不应被 CSS 图片选择器匹配"
+    );
+
+    // HTML 内容应正常匹配。
+    let html_doc = make_doc(
+        Some("text/html; charset=utf-8"),
+        r#"<html><body><img src="/a.jpg"></body></html>"#,
+    );
+    let out = pipeline::run_pipeline(&html_doc, &extract).unwrap();
+    assert_eq!(out.image_urls, vec!["/a.jpg"]);
+}
