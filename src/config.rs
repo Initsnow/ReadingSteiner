@@ -262,7 +262,11 @@ pub struct CamofoxConfig {
 pub struct SourceConfig {
     pub id: String,
     pub name: String,
+    /// 是否启用监控（调度检查）。false 时该源不会被调度器抓取检测。
     pub enabled: bool,
+    /// 是否发送变更通知。false 时仍正常监控检测，但检测到的变更不会推送 Telegram 通知。
+    #[serde(default = "default_true")]
+    pub notify_enabled: bool,
     #[serde(default)]
     pub tags: Vec<String>,
     pub fetch: FetchConfig,
@@ -272,12 +276,19 @@ pub struct SourceConfig {
     pub extract: ExtractConfig,
 }
 
+/// serde 默认值辅助：返回 `true`，用于新增布尔字段（如 `notify_enabled`）
+/// 反序列化旧配置时自动补齐默认值。
+fn default_true() -> bool {
+    true
+}
+
 impl Default for SourceConfig {
     fn default() -> Self {
         Self {
             id: String::new(),
             name: String::new(),
             enabled: true,
+            notify_enabled: true,
             tags: Vec::new(),
             fetch: FetchConfig::default(),
             schedule: ScheduleConfig::default(),
