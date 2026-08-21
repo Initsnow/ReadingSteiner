@@ -354,7 +354,7 @@ pub(crate) async fn handle_request(state: &Arc<AppState>, req: ControlRequest) -
         ControlRequest::MarkEventRead { event_id } => {
             let db = state.db.lock().await;
             match db.mark_event_read(event_id) {
-                Ok(()) => ControlResponse::ok(json!({ "updated": 1 })),
+                Ok(n) => ControlResponse::ok(json!({ "updated": n })),
                 Err(e) => ControlResponse::err(e.to_string()),
             }
         }
