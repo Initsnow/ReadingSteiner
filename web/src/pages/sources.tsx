@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react"
+import { useEffect, useMemo, useState } from "react"
 import {
   Play,
   Loader2,
@@ -214,6 +214,47 @@ export function SourcesPage() {
   const [selected, setSelected] = useState<Set<string>>(new Set())
   const [batchBusy, setBatchBusy] = useState(false)
 
+  // 按 tag 筛选：null 表示全部，"__untagged__" 表示无标签的源。
+  const [tagFilter, setTagFilter] = useState<string | null>(null)
+  const allTags = useMemo(
+    () => Array.from(new Set(sources.flatMap((s) => s.tags ?? []))).sort(),
+    [sources],
+  )
+  const filteredSources = useMemo(
+    () =>
+      sources.filter((s) => {
+        const tags = s.tags ?? []
+        if (tagFilter === null) return true
+        if (tagFilter === "__untagged__") return tags.length === 0
+        return tags.includes(tagFilter)
+      }),
+    [sources, tagFilter],
+  )
+  const hasUntagged = useMemo(
+    () => sources.some((s) => (s.tags ?? []).length === 0),
+    [sources],
+  )
+
+  // 切换标签筛选时同步清理 selected，避免批量操作作用于不可见的源。
+  // tag 为 null（全部）时保留全部选中项，为具体标签时仅保留匹配的源。
+  function applyTagFilter(tag: string | null) {
+    setTagFilter(tag)
+    setSelected((prev) => {
+      const next = new Set(prev)
+      sources.forEach((s) => {
+        const tags = s.tags ?? []
+        const match =
+          tag === null
+            ? true
+            : tag === "__untagged__"
+              ? tags.length === 0
+              : tags.includes(tag)
+        if (!match) next.delete(s.id)
+      })
+      return next
+    })
+  }
+
   // add/edit modal state
   const [modalOpen, setModalOpen] = useState(false)
   const [editing, setEditing] = useState<SourceConfig | null>(null)
@@ -370,10 +411,6 @@ export function SourcesPage() {
     })
   }
 
-  function toggleSelectAll(checked: boolean) {
-    setSelected(checked ? new Set(sources.map((s) => s.id)) : new Set())
-  }
-
   async function runBatch(
     flags: { enabled?: boolean; notify_enabled?: boolean },
     confirmText?: string,
@@ -485,113 +522,167 @@ export function SourcesPage() {
               <input
                 type="checkbox"
                 className="h-4 w-4 accent-primary"
-                checked={selected.size > 0 && selected.size === sources.length}
+                checked={selected.size > 0 && selected.size === filteredSources.length}
                 ref={(el) => {
                   if (el) {
                     el.indeterminate =
-                      selected.size > 0 && selected.size < sources.length
+                      selected.size > 0 && selected.size < filteredSources.length
                   }
                 }}
-                onChange={(e) => toggleSelectAll(e.target.checked)}
+                onChange={(e) =>
+                  setSelected(e.target.checked ? new Set(filteredSources.map((s) => s.id)) : new Set())
+                }
               />
               全选
             </label>
           </div>
-          {sources.map((s) => (
-            <Card
-              key={s.id}
-              className={
-                selected.has(s.id) ? "ring-2 ring-primary/60" : undefined
-              }
-            >
-              <CardContent className="flex flex-wrap items-center gap-x-3 gap-y-2 px-4 py-3">
-                <input
-                  type="checkbox"
-                  className="h-4 w-4 shrink-0 accent-primary"
-                  checked={selected.has(s.id)}
-                  onChange={() => toggleSelect(s.id)}
-                />
-                <div className="min-w-0 flex-1">
-                  <div className="flex flex-wrap items-center gap-2">
-                    <span className="truncate text-sm font-medium">
-                      {s.name || s.id}
-                    </span>
-                    <Badge
-                      variant={s.enabled ? "success" : "secondary"}
-                      className="px-1.5 py-0 text-[10px]"
-                    >
-                      {s.enabled ? "监控中" : "已暂停监控"}
-                    </Badge>
-                    <Badge
-                      variant={s.notify_enabled ? "success" : "secondary"}
-                      className="px-1.5 py-0 text-[10px]"
-                    >
-                      {s.notify_enabled ? "通知开" : "已暂停通知"}
-                    </Badge>
-                    {s.tags.map((t) => (
+
+          {/* 按 tag 筛选栏 */}
+          {(allTags.length > 0 || hasUntagged) && (
+            <div className="flex flex-wrap items-center gap-2 px-1">
+              <span className="text-xs text-muted-foreground">按标签：</span>
+              <button
+                onClick={() => applyTagFilter(null)}
+                className={`rounded-full px-2.5 py-0.5 text-xs transition-colors ${
+                  tagFilter === null
+                    ? "bg-primary text-primary-foreground"
+                    : "bg-muted text-muted-foreground hover:bg-muted/70"
+                }`}
+              >
+                全部
+              </button>
+              {allTags.map((t) => (
+                <button
+                  key={t}
+                  onClick={() => applyTagFilter(tagFilter === t ? null : t)}
+                  className={`rounded-full px-2.5 py-0.5 text-xs transition-colors ${
+                    tagFilter === t
+                      ? "bg-primary text-primary-foreground"
+                      : "bg-muted text-muted-foreground hover:bg-muted/70"
+                  }`}
+                >
+                  {t}
+                </button>
+              ))}
+              {hasUntagged && (
+                <button
+                  onClick={() =>
+                    applyTagFilter(
+                      tagFilter === "__untagged__" ? null : "__untagged__",
+                    )
+                  }
+                  className={`rounded-full px-2.5 py-0.5 text-xs transition-colors ${
+                    tagFilter === "__untagged__"
+                      ? "bg-primary text-primary-foreground"
+                      : "bg-muted text-muted-foreground hover:bg-muted/70"
+                  }`}
+                >
+                  无标签
+                </button>
+              )}
+            </div>
+          )}
+
+          {filteredSources.length === 0 ? (
+            <p className="px-1 text-sm text-muted-foreground">
+              没有符合该标签的监控源。
+            </p>
+          ) : (
+            filteredSources.map((s) => (
+              <Card
+                key={s.id}
+                className={
+                  selected.has(s.id) ? "ring-2 ring-primary/60" : undefined
+                }
+              >
+                <CardContent className="flex flex-wrap items-center gap-x-3 gap-y-2 px-4 py-3">
+                  <input
+                    type="checkbox"
+                    className="h-4 w-4 shrink-0 accent-primary"
+                    checked={selected.has(s.id)}
+                    onChange={() => toggleSelect(s.id)}
+                  />
+                  <div className="min-w-0 flex-1">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className="truncate text-sm font-medium">
+                        {s.name || s.id}
+                      </span>
                       <Badge
-                        key={t}
-                        variant="outline"
+                        variant={s.enabled ? "success" : "secondary"}
                         className="px-1.5 py-0 text-[10px]"
                       >
-                        {t}
+                        {s.enabled ? "监控中" : "已暂停监控"}
                       </Badge>
-                    ))}
+                      <Badge
+                        variant={s.notify_enabled ? "success" : "secondary"}
+                        className="px-1.5 py-0 text-[10px]"
+                      >
+                        {s.notify_enabled ? "通知开" : "已暂停通知"}
+                      </Badge>
+                      {s.tags.map((t) => (
+                        <Badge
+                          key={t}
+                          variant="outline"
+                          className="px-1.5 py-0 text-[10px]"
+                        >
+                          {t}
+                        </Badge>
+                      ))}
+                    </div>
+                    <div className="mt-0.5 truncate text-xs text-muted-foreground">
+                      {s.fetch.url}
+                    </div>
                   </div>
-                  <div className="mt-0.5 truncate text-xs text-muted-foreground">
-                    {s.fetch.url}
+                  <div className="flex shrink-0 items-center gap-1">
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      className="h-7 px-2 text-xs"
+                      disabled={busyId === s.id}
+                      onClick={() => runCheck(s.id)}
+                      title="立即检测"
+                    >
+                      {busyId === s.id ? (
+                        <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                      ) : (
+                        <Play className="h-3.5 w-3.5" />
+                      )}
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      className="h-7 px-2 text-xs"
+                      disabled={testingId === s.id}
+                      onClick={() => handleTest(s)}
+                      title="测试"
+                    >
+                      {testingId === s.id ? (
+                        <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                      ) : (
+                        <TestTube2 className="h-3.5 w-3.5" />
+                      )}
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      className="h-7 px-2 text-xs"
+                      onClick={() => openEdit(s)}
+                    >
+                      <Pencil className="h-3.5 w-3.5" /> 编辑
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      className="h-7 px-2 text-xs text-destructive hover:text-destructive"
+                      disabled={busyId === s.id}
+                      onClick={() => handleDelete(s)}
+                    >
+                      <Trash2 className="h-3.5 w-3.5" /> 删除
+                    </Button>
                   </div>
-                </div>
-                <div className="flex shrink-0 items-center gap-1">
-                  <Button
-                    size="sm"
-                    variant="ghost"
-                    className="h-7 px-2 text-xs"
-                    disabled={busyId === s.id}
-                    onClick={() => runCheck(s.id)}
-                    title="立即检测"
-                  >
-                    {busyId === s.id ? (
-                      <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                    ) : (
-                      <Play className="h-3.5 w-3.5" />
-                    )}
-                  </Button>
-                  <Button
-                    size="sm"
-                    variant="ghost"
-                    className="h-7 px-2 text-xs"
-                    disabled={testingId === s.id}
-                    onClick={() => handleTest(s)}
-                    title="测试"
-                  >
-                    {testingId === s.id ? (
-                      <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                    ) : (
-                      <TestTube2 className="h-3.5 w-3.5" />
-                    )}
-                  </Button>
-                  <Button
-                    size="sm"
-                    variant="ghost"
-                    className="h-7 px-2 text-xs"
-                    onClick={() => openEdit(s)}
-                  >
-                    <Pencil className="h-3.5 w-3.5" /> 编辑
-                  </Button>
-                  <Button
-                    size="sm"
-                    variant="ghost"
-                    className="h-7 px-2 text-xs text-destructive hover:text-destructive"
-                    disabled={busyId === s.id}
-                    onClick={() => handleDelete(s)}
-                  >
-                    <Trash2 className="h-3.5 w-3.5" /> 删除
-                  </Button>
-                </div>
-              </CardContent>
-            </Card>
-          ))}
+                </CardContent>
+              </Card>
+            )))}
         </div>
       )}
 
