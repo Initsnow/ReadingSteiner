@@ -502,9 +502,10 @@ fn test_event_template_rendering() {
         &event,
         &[],
         "<b>{label}</b> {watch} @ {time} {tz}\n{summary}",
+        "Asia/Shanghai",
     );
     assert!(text.contains("NEW"));
     assert!(text.contains("watch1"));
     assert!(text.contains("added 2 items"));
-    assert!(text.contains("UTC"));
+    assert!(text.contains("Asia/Shanghai"));
 }

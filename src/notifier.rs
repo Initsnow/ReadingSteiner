@@ -33,10 +33,12 @@ pub struct TelegramNotifier {
     client: Client,
     token: String,
     cfg: TelegramConfig,
+    /// 服务器展示/告警时区（IANA 名称），用于事件通知里的 {time}/{tz} 占位符。
+    timezone: String,
 }
 
 impl TelegramNotifier {
-    pub fn new(cfg: &TelegramConfig) -> Result<Self> {
+    pub fn new(cfg: &TelegramConfig, timezone: &str) -> Result<Self> {
         let token = if !cfg.token.is_empty() {
             cfg.token.clone()
         } else if !cfg.token_file.as_os_str().is_empty() && Path::new(&cfg.token_file).exists() {
@@ -52,6 +54,7 @@ impl TelegramNotifier {
             client,
             token,
             cfg: cfg.clone(),
+            timezone: timezone.to_string(),
         })
     }
 
@@ -117,7 +120,7 @@ impl TelegramNotifier {
         new_items: &[Item],
         image_entries: &[MediaCacheEntry],
     ) -> Result<Vec<i64>> {
-        let text = render_event_message(event, new_items, &self.cfg.event_template());
+        let text = render_event_message(event, new_items, &self.cfg.event_template(), &self.timezone);
         let max = self.cfg.max_images_per_event.max(1);
         let entries: Vec<_> = image_entries.iter().take(max).collect();
 
@@ -300,9 +303,14 @@ struct SendMediaGroupResponse {
 }
 
 /// 渲染一条变更通知文本。支持模板占位符：
-/// `{label}` 变化类型、`{watch}` 监控源 ID、`{time}` UTC 时间、`{tz}` 服务器时区、
-/// `{summary}` 变更摘要、`{items}` 新增条目预览列表。
-pub fn render_event_message(event: &ChangeEvent, new_items: &[Item], template: &str) -> String {
+/// `{label}` 变化类型、`{watch}` 监控源 ID、`{time}` 检测时间（按配置时区显示）、
+/// `{tz}` 服务器时区名、`{summary}` 变更摘要、`{items}` 新增条目预览列表。
+pub fn render_event_message(
+    event: &ChangeEvent,
+    new_items: &[Item],
+    template: &str,
+    tz: &str,
+) -> String {
     let change_label = match event.change_type {
         crate::config::ChangeType::New => "🆕 NEW",
         crate::config::ChangeType::Updated => "✏️ UPDATED",
@@ -333,12 +341,9 @@ pub fn render_event_message(event: &ChangeEvent, new_items: &[Item], template: &
             ("{watch}", &event.watchpoint_id),
             (
                 "{time}",
-                &event
-                    .detected_at
-                    .format("%Y-%m-%d %H:%M:%S UTC")
-                    .to_string(),
+                &crate::scheduler::format_local_time(event.detected_at, tz),
             ),
-            ("{tz}", "UTC"),
+            ("{tz}", tz),
             ("{summary}", &html_escape(&event.diff_summary)),
             ("{items}", items.trim_end()),
         ],

@@ -51,6 +51,7 @@ export function SettingsPage() {
 
   // 服务器时间显示
   const [serverTime, setServerTime] = useState<string | null>(null)
+  const [serverTimeUtc, setServerTimeUtc] = useState<string | null>(null)
   const [serverTz, setServerTz] = useState("UTC")
   const [browserNow, setBrowserNow] = useState(new Date())
 
@@ -60,6 +61,7 @@ export function SettingsPage() {
       setSettings(s)
       setServerTz(st.timezone || "UTC")
       setServerTime(st.server_time_local)
+      setServerTimeUtc(st.server_time_utc)
       setError(null)
     } catch (e) {
       setError((e as Error).message)
@@ -157,8 +159,8 @@ export function SettingsPage() {
               <Clock className="h-3.5 w-3.5" /> 服务器 UTC 时间
             </div>
             <div className="mt-1 font-mono">
-              {serverTime ? (
-                <span>{new Date(serverTime).toISOString().replace("T", " ").slice(0, 19)} UTC</span>
+              {serverTimeUtc ? (
+                <span>{serverTimeUtc.replace("T", " ").slice(0, 19)} UTC</span>
               ) : (
                 "-"
               )}

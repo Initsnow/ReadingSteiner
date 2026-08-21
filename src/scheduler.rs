@@ -46,7 +46,7 @@ impl AppState {
         std::fs::create_dir_all(&runtime.state_dir)?;
         let db_path = runtime.state_dir.join("reading-steiner.db");
         let db = Db::open(db_path)?;
-        let notifier = match TelegramNotifier::new(&cfg.telegram) {
+        let notifier = match TelegramNotifier::new(&cfg.telegram, &runtime.timezone) {
             Ok(n) => Some(Arc::new(n)),
             Err(e) => {
                 warn!(error = %e, "telegram notifier disabled");
