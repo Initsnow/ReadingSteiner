@@ -210,10 +210,11 @@ pub fn restore_from_zip<R: Read + Send>(
         ));
     }
 
-    // 解压到新的时间戳目录。
+    // 解压到新的时间戳目录（同秒冲突时追加序号避免覆盖已有备份）。
     let state_dir = cfg.state_dir.clone();
+    let backups_dir = state_dir.join(BACKUP_SUBDIR);
     let ts = Utc::now().format("%Y%m%d-%H%M%S").to_string();
-    let backup_dir = state_dir.join(BACKUP_SUBDIR).join(&ts);
+    let backup_dir = unique_backup_dir(&backups_dir, &ts);
     fs::create_dir_all(&backup_dir)?;
 
     for i in 0..archive.len() {
@@ -250,12 +251,23 @@ pub fn restore_from_zip<R: Read + Send>(
     }
 
     // 复用 restore 把解压出的备份恢复到运行中状态。
+    // 注意：这里不在 DB 锁内重新打包 zip——打包由调用方在无锁场景
+    // （CLI 离线 / daemon 释放 DB 锁后）执行，避免大 media 备份压缩阻塞 daemon。
     restore(&backup_dir, cfg, db_conn)?;
 
-    // 同时补一个 zip（便于与其它备份一致地下载/管理）。
-    let _ = pack_backup_zip(&backup_dir);
-
     Ok(backup_dir)
+}
+
+/// 返回 `backups/<base>` 下不冲突的目录路径：若已存在则追加 `-1`、`-2`… 序号。
+/// 用于避免同秒多次恢复覆盖已有备份目录或 zip。
+fn unique_backup_dir(backups_dir: &Path, base: &str) -> PathBuf {
+    let mut candidate = backups_dir.join(base);
+    let mut n = 1u32;
+    while candidate.exists() {
+        candidate = backups_dir.join(format!("{base}-{n}"));
+        n += 1;
+    }
+    candidate
 }
 
 /// 判断 zip 内路径是否安全：仅允许相对路径、无 `..`、非绝对路径、非符号链接。

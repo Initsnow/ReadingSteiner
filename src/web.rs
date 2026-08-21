@@ -413,12 +413,16 @@ async fn api_restore_upload(
         return json_response(ControlResponse::err("上传的不是 zip 备份包")).await;
     }
 
-    // 落盘到系统临时目录，交给 control 层恢复后清理。
+    // 落盘到系统临时目录（用时间戳保证唯一，避免并发上传互相覆盖），交给 control 层恢复后清理。
+    let uniq = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or_default();
     let tmp = state
         .runtime
         .state_dir
         .join("backups")
-        .join("upload-restore.zip");
+        .join(format!("upload-restore-{uniq}.zip"));
     if let Some(parent) = tmp.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
