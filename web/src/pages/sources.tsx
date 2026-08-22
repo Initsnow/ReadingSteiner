@@ -956,7 +956,7 @@ export function SourcesPage() {
                 <div className="text-sm">
                   <div className="font-medium">跟随分组设置</div>
                   <div className="mt-0.5 text-xs text-muted-foreground">
-                    开启后，该监控源继承所属分组的监控 / 通知 / 历史保留设置；关闭后使用上面自身的开关（自覆盖）。
+                    开启后，该监控源继承所属分组的历史保留 / 通知目标 / 内容提取设置；关闭后使用自身的设置（自覆盖）。监控 / 通知开关始终由本监控源控制。
                   </div>
                 </div>
                 <label className="flex cursor-pointer items-center gap-2 text-sm">

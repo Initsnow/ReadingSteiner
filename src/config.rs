@@ -259,8 +259,9 @@ pub struct SourceConfig {
     #[serde(default = "default_true")]
     pub notify_enabled: bool,
     /// 是否跟随所属分组（标签）的设置。true 时，若监控源带有已配置的分组，
-    /// 则其监控开关、通知开关与历史保留条数继承分组的设置；
-    /// false 时完全使用本监控源自己的 `enabled` / `notify_enabled` 设置（自覆盖）。
+    /// 则其历史保留条数、通知目标与内容提取配置继承分组的设置；
+    /// false 时完全使用本监控源自身的设置（自覆盖）。
+    /// 监控 / 通知开关始终由监控源自身控制，分组不参与叠加。
     #[serde(default = "default_true")]
     pub follow_group: bool,
     #[serde(default)]
