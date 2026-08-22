@@ -65,9 +65,17 @@ export function SettingsPage() {
   const [backups, setBackups] = useState<{ name: string; has_zip: boolean }[]>([])
   // 分组（标签）管理
   const [tags, setTags] = useState<TagConfig[]>([])
+  const [activeTag, setActiveTag] = useState("")
   const [tagSaving, setTagSaving] = useState(false)
   const [tagNotice, setTagNotice] = useState<string | null>(null)
   const [newTagName, setNewTagName] = useState("")
+
+  // 分组列表变化后，若当前激活的分组已被删除或尚未初始化，则回退到第一个分组
+  useEffect(() => {
+    setActiveTag((cur) =>
+      cur && tags.some((t) => t.name === cur) ? cur : tags[0]?.name ?? "",
+    )
+  }, [tags])
 
   async function load() {
     try {
@@ -180,6 +188,7 @@ export function SettingsPage() {
         ...prev,
         { name, history_limit: 0, notify_url: "", extract: null },
       ])
+      setActiveTag(name)
       setNewTagName("")
       setTagNotice(`已创建分组「${name}」。`)
     } catch (e) {
@@ -196,6 +205,7 @@ export function SettingsPage() {
     try {
       await api.deleteTag(name)
       setTags((prev) => prev.filter((t) => t.name !== name))
+      // 若删除的是当前激活的分组，useEffect 会自动回退到剩余的第一个分组
       setTagNotice(`已删除分组「${name}」的设置。`)
     } catch (e) {
       setError((e as Error).message)
@@ -501,7 +511,7 @@ export function SettingsPage() {
               暂无分组。可在监控源的“标签”字段中填写标签，然后回来为对应分组配置历史保留 / 默认提取 / 通知目标。
             </p>
           ) : (
-            <Tabs defaultValue={tags[0].name}>
+            <Tabs value={activeTag} onValueChange={setActiveTag}>
               <div className="overflow-x-auto pb-1">
                 <TabsList className="h-auto flex-wrap gap-1">
                   {tags.map((tag) => {
