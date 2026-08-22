@@ -63,9 +63,7 @@ function emptyForm(): FormState {
     name: "",
     enabled: true,
     notify_enabled: true,
-    // 新建源默认不跟随分组：新建时无分组可跟随，且界面隐藏“跟随分组”开关，
-    // 避免“提示关闭却无法操作”的矛盾；用户可在编辑已有源时再开启。
-    follow_group: false,
+    follow_group: true,
     url: "",
     engine: "http",
     method: "GET",
