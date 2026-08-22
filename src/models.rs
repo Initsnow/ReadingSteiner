@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use crate::config::{ChangeType, SourceConfig};
+use crate::config::{ChangeType, ExtractConfig, SourceConfig};
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
 pub struct Item {
@@ -158,6 +158,9 @@ pub struct NotificationRecord {
     pub id: i64,
     pub event_id: i64,
     pub chat_id: String,
+    /// 发送目标（token + chat ids）JSON，见 [`NotificationTarget`]。
+    #[serde(default)]
+    pub target_json: String,
     pub message_ids_json: String,
     pub status: String,
     pub attempts: i32,
@@ -178,6 +181,14 @@ pub struct TagConfig {
     pub notify_enabled: bool,
     /// 该分组下每个监控源最多保留的变更历史条数（0 表示不限制，使用全局设置）。
     pub history_limit: usize,
+    /// 分组默认的内容提取配置。监控源开启「跟随分组」且分组此处有配置时，
+    /// 该分组下的监控源沿用此提取设置；None 表示不覆盖，使用监控源自身 / 全局默认。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extract: Option<ExtractConfig>,
+    /// 分组的 Telegram 通知目标（`tgram://bottoken/ChatID1/ChatID2`）。
+    /// 空表示沿用全局通知设置。
+    #[serde(default)]
+    pub notify_url: String,
 }
 
 impl Default for TagConfig {
@@ -187,6 +198,42 @@ impl Default for TagConfig {
             enabled: true,
             notify_enabled: true,
             history_limit: 0,
+            extract: None,
+            notify_url: String::new(),
+        }
+    }
+}
+
+/// 解析后的 Telegram 通知目标：一个 bot token + 一个或多个 chat id。
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub struct TelegramTarget {
+    pub token: String,
+    #[serde(default)]
+    pub chat_ids: Vec<String>,
+}
+
+impl TelegramTarget {
+    /// 是否有效（token 与至少一个 chat id 均非空）。
+    pub fn is_valid(&self) -> bool {
+        !self.token.is_empty() && !self.chat_ids.is_empty()
+    }
+}
+
+/// 通知记录中携带的发送目标（token + chat ids）的 JSON 形式。
+/// 兼容旧数据：从单个 chat_id 迁移而来时，token 由发送方补齐。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct NotificationTarget {
+    pub token: String,
+    #[serde(default)]
+    pub chat_ids: Vec<String>,
+}
+
+impl Default for NotificationTarget {
+    fn default() -> Self {
+        Self {
+            token: String::new(),
+            chat_ids: Vec::new(),
         }
     }
 }
@@ -196,6 +243,9 @@ impl Default for TagConfig {
 pub struct SystemNotification {
     pub id: i64,
     pub chat_id: String,
+    /// 发送目标（token + chat ids）JSON，见 [`NotificationTarget`]。
+    #[serde(default)]
+    pub target_json: String,
     pub text: String,
     pub status: String,
     pub attempts: i32,

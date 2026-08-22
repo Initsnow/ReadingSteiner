@@ -193,8 +193,23 @@ pub async fn run_daemon(state: Arc<AppState>) -> Result<()> {
                             && sched.consecutive_failures >= threshold
                             && !sched.failure_notified
                         {
-                            let chat_id = &state.cfg.telegram.default_chat_id;
-                            if !chat_id.is_empty() {
+                            // 失败告警使用全局通知目标（tgram:// 或旧式 token/chat）。
+                            let target = state
+                                .notifier
+                                .as_ref()
+                                .and_then(|n| n.global_target());
+                            if let Some(target) = target {
+                                let target_json =
+                                    serde_json::to_string(&crate::models::NotificationTarget {
+                                        token: target.token.clone(),
+                                        chat_ids: target.chat_ids.clone(),
+                                    })
+                                    .unwrap_or_default();
+                                let chat_id = target
+                                    .chat_ids
+                                    .first()
+                                    .cloned()
+                                    .unwrap_or_default();
                                 let tz = state.runtime.timezone.clone();
                                 let text = notifier::render_failure_message(
                                     &source.id,
@@ -203,7 +218,11 @@ pub async fn run_daemon(state: Arc<AppState>) -> Result<()> {
                                     &e.to_string(),
                                     &tz,
                                 );
-                                let _ = db.insert_system_notification(chat_id, &text);
+                                let _ = db.insert_system_notification(
+                                    &chat_id,
+                                    &text,
+                                    &target_json,
+                                );
                                 sched.failure_notified = true;
                             }
                         }
@@ -257,7 +276,9 @@ pub async fn run_daemon(state: Arc<AppState>) -> Result<()> {
 
 pub async fn check_source(state: &Arc<AppState>, source_id: &str) -> Result<()> {
     let source = get_live_source(state, source_id).await?;
-    let extract_cfg = source.extract.clone();
+    // 生效的提取配置：若监控源跟随分组且所属分组配置了提取，则沿用分组的设置。
+    let tags = { state.db.lock().await.list_tags().unwrap_or_default() };
+    let extract_cfg = crate::config::resolve_effective_extract(&source, &tags);
 
     let (prev_etag, prev_lm, prev_fp, prev_items_json) = {
         let db = state.db.lock().await;
@@ -491,23 +512,41 @@ pub async fn check_source(state: &Arc<AppState>, source_id: &str) -> Result<()> 
             }
         }
         // 仅当该源开启了通知（解析分组继承后的生效通知开关）且已配置 notifier
-        // 与默认 chat 时才排队发送。
+        // 与可用通知目标时才排队发送。
         // 注意：此处直接复用外层已持有的 `db`，避免对 `tokio::sync::Mutex` 二次加锁导致死锁。
         let (_, effective_notify, _) = {
             let tags = db.list_tags().unwrap_or_default();
             crate::config::resolve_effective_source(&source, &tags, 0)
         };
         if effective_notify && state.notifier.is_some() {
-            let chat_id = if state.cfg.telegram.default_chat_id.is_empty() {
-                String::new()
-            } else {
-                state.cfg.telegram.default_chat_id.clone()
-            };
-            if !chat_id.is_empty() {
+            let tags = db.list_tags().unwrap_or_default();
+            // 解析通知目标：分组优先，回退全局（tgram:// URL 或旧式 token/chat）。
+            let target = crate::config::resolve_notify_target(
+                &source,
+                &tags,
+                &state.cfg.telegram.url,
+            )
+            .or_else(|| {
+                state
+                    .notifier
+                    .as_ref()
+                    .and_then(|n| n.global_target())
+            });
+            if let Some(target) = target {
+                let target_json = serde_json::to_string(&crate::models::NotificationTarget {
+                    token: target.token.clone(),
+                    chat_ids: target.chat_ids.clone(),
+                })?;
+                let chat_id = target
+                    .chat_ids
+                    .first()
+                    .cloned()
+                    .unwrap_or_default();
                 let notif = crate::models::NotificationRecord {
                     id: 0,
                     event_id,
                     chat_id,
+                    target_json,
                     message_ids_json: "[]".to_string(),
                     status: "pending".to_string(),
                     attempts: 0,
@@ -800,7 +839,9 @@ pub async fn get_live_source(state: &Arc<AppState>, source_id: &str) -> Result<S
 /// returning the extracted items / fingerprint without persisting any snapshot
 /// or change event. Used by the Web console "测试监控源" action.
 pub async fn test_source(state: &Arc<AppState>, source: &SourceConfig) -> Result<Value> {
-    let extract_cfg = source.extract.clone();
+    // 生效的提取配置：跟随分组时优先用分组配置的提取。
+    let tags = { state.db.lock().await.list_tags().unwrap_or_default() };
+    let extract_cfg = crate::config::resolve_effective_extract(source, &tags);
     let fetcher = fetcher::create_fetcher(&source.fetch.engine, &state.cfg)?;
     let spec = FetchSpec {
         fetch: source.fetch.clone(),

@@ -171,10 +171,12 @@ export function SettingsPage() {
         enabled: true,
         notify_enabled: true,
         history_limit: 0,
+        notify_url: "",
+        extract: null,
       })
       setTags((prev) => [
         ...prev,
-        { name, enabled: true, notify_enabled: true, history_limit: 0 },
+        { name, enabled: true, notify_enabled: true, history_limit: 0, notify_url: "", extract: null },
       ])
       setNewTagName("")
       setTagNotice(`已创建分组「${name}」。`)
@@ -428,12 +430,17 @@ export function SettingsPage() {
                 }
               />
             </Field>
-            <Field label="Telegram 默认 Chat ID" className="col-span-2">
+            <Field
+              label="Telegram 通知目标 (tgram://)"
+              hint="格式：tgram://bottoken/ChatID1/ChatID2，编码 bot token 与一个或多个接收 chat id"
+              className="col-span-2"
+            >
               <input
                 className={inputCls}
-                value={settings.default_chat_id}
+                value={settings.telegram_url}
+                placeholder="tgram://123456:ABC/12345/67890"
                 onChange={(e) =>
-                  setSettings({ ...settings, default_chat_id: e.target.value })
+                  setSettings({ ...settings, telegram_url: e.target.value })
                 }
               />
             </Field>
@@ -473,7 +480,7 @@ export function SettingsPage() {
             <Boxes className="h-5 w-5" /> 分组（标签）管理
           </CardTitle>
           <CardDescription>
-            为监控源的分组设置监控、通知开关与历史自动清理条数。分组下「跟随分组」的监控源会继承这里的设置；监控源可单独关闭“跟随分组”以自覆盖。
+            为监控源的分组设置监控、通知、历史自动清理条数、默认内容提取与通知目标。分组下「跟随分组」的监控源会继承这里的设置；监控源可单独关闭“跟随分组”以自覆盖。
           </CardDescription>
         </CardHeader>
         <CardContent>
@@ -548,6 +555,72 @@ export function SettingsPage() {
                       }
                     />
                     <span className="text-xs text-muted-foreground">条（0=不限制）</span>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <span className="text-muted-foreground">通知目标</span>
+                    <input
+                      type="text"
+                      className="w-56 rounded-md border border-input bg-background px-2 py-1 text-sm font-mono"
+                      value={tag.notify_url ?? ""}
+                      placeholder="tgram://bot/ChatID"
+                      title="留空沿用全局通知目标"
+                      onChange={(e) =>
+                        updateTagLocal(tag.name, { notify_url: e.target.value })
+                      }
+                    />
+                    <span className="text-xs text-muted-foreground">（留空沿用全局）</span>
+                  </div>
+                  <div className="flex w-full items-center gap-2">
+                    <span className="shrink-0 text-muted-foreground">默认提取</span>
+                    <select
+                      className="w-40 rounded-md border border-input bg-background px-2 py-1 text-sm"
+                      value={tag.extract?.type ?? "inherit"}
+                      onChange={(e) => {
+                        const v = e.target.value as "inherit" | "text" | "items"
+                        if (v === "inherit") {
+                          updateTagLocal(tag.name, { extract: null })
+                        } else if (v === "text") {
+                          updateTagLocal(tag.name, { extract: { type: "text" } })
+                        } else {
+                          updateTagLocal(tag.name, {
+                            extract: {
+                              type: "items",
+                              selector: { kind: "css", selector: "" },
+                            },
+                          })
+                        }
+                      }}
+                    >
+                      <option value="inherit">不覆盖（沿用源自身）</option>
+                      <option value="text">整页文本</option>
+                      <option value="items">结构化提取</option>
+                    </select>
+                    {tag.extract?.type === "items" && (
+                      <input
+                        type="text"
+                        className="w-48 rounded-md border border-input bg-background px-2 py-1 text-sm font-mono"
+                        value={
+                          tag.extract?.selector &&
+                          "selector" in tag.extract.selector
+                            ? tag.extract.selector.selector
+                            : tag.extract?.selector && "path" in tag.extract.selector
+                              ? tag.extract.selector.path
+                              : ""
+                        }
+                        placeholder="选择器（CSS/JSONPath）"
+                        onChange={(e) =>
+                          updateTagLocal(tag.name, {
+                            extract: {
+                              type: "items",
+                              selector: { kind: "css", selector: e.target.value },
+                            },
+                          })
+                        }
+                      />
+                    )}
+                    <span className="text-xs text-muted-foreground">
+                      分组下的监控源「跟随分组」时沿用此提取配置
+                    </span>
                   </div>
                   <div className="flex-1" />
                   <Button

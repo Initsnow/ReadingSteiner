@@ -130,6 +130,10 @@ export interface TagConfig {
   notify_enabled: boolean
   /** 该分组下每个监控源最多保留的变更历史条数（0 表示不限制，跟随全局）。 */
   history_limit: number
+  /** 分组默认的内容提取配置；未配置则不覆盖，监控源沿用自身/全局设置。 */
+  extract?: ExtractConfig | null
+  /** 分组的 Telegram 通知目标（tgram://bottoken/ChatID1/ChatID2）；留空沿用全局。 */
+  notify_url: string
 }
 
 export interface EditableSettings {
@@ -142,7 +146,8 @@ export interface EditableSettings {
   failure_notify_threshold: number
   timezone: string
   template: string
-  default_chat_id: string
+  /** 全局 Telegram 通知目标：tgram://bottoken/ChatID1/ChatID2 */
+  telegram_url: string
   max_images_per_event: number
 }
 
