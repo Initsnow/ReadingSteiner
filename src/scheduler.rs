@@ -117,6 +117,7 @@ pub async fn run_daemon(state: Arc<AppState>) -> Result<()> {
                     consecutive_changes: 0,
                     backoff_until: None,
                     last_success_at: None,
+                    last_error: None,
                     last_notified_fingerprint: None,
                     last_notified_at: None,
                     failure_notified: false,
@@ -154,6 +155,7 @@ pub async fn run_daemon(state: Arc<AppState>) -> Result<()> {
                     consecutive_changes: 0,
                     backoff_until: None,
                     last_success_at: None,
+                    last_error: None,
                     last_notified_fingerprint: None,
                     last_notified_at: None,
                     failure_notified: false,
@@ -183,6 +185,8 @@ pub async fn run_daemon(state: Arc<AppState>) -> Result<()> {
                     let db = state.db.lock().await;
                     if let Some(mut sched) = db.get_schedule_state(&source.id).unwrap_or(None) {
                         sched.consecutive_failures += 1;
+                        // 记录最近一次错误信息，供 Web 控制台展示错误原因。
+                        sched.last_error = Some(e.to_string());
                         let backoff = 30u64 * 2u64.pow(sched.consecutive_failures.min(5));
                         sched.backoff_until =
                             Some(Utc::now() + chrono::Duration::seconds(backoff as i64));
@@ -806,6 +810,8 @@ fn next_schedule(
         consecutive_changes,
         backoff_until: None,
         last_success_at: last_success,
+        // 成功时清空最近错误信息。
+        last_error: None,
         last_notified_fingerprint: prev.and_then(|p| p.last_notified_fingerprint.clone()),
         last_notified_at: prev.and_then(|p| p.last_notified_at),
         // 成功（无失败）路径会将失败通知标记清零。
