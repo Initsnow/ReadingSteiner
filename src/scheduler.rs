@@ -135,16 +135,33 @@ impl AppState {
             rt.default_cron = settings.default_cron.clone();
         }
         // 重建 notifier：url / 模板 / 图片数 / 时区变更即时生效。
+        // 重建失败时保留旧 notifier，避免通知功能被非法配置整体关闭。
         let new_notifier = self
             .cfg
             .telegram
             .clone()
             .with_overrides(settings)
-            .map(|telegram| TelegramNotifier::new(&telegram, &self.runtime.read().unwrap().timezone))
-            .and_then(|r| r.ok());
-        let mut guard = self.notifier.write().unwrap();
-        *guard = new_notifier.map(Arc::new);
-        info!("global settings hot-reloaded");
+            .map(|telegram| {
+                TelegramNotifier::new(&telegram, &self.runtime.read().unwrap().timezone)
+            })
+            .transpose();
+        match new_notifier {
+            Ok(Some(n)) => {
+                let mut guard = self.notifier.write().unwrap();
+                *guard = Some(Arc::new(n));
+                info!("global settings hot-reloaded (notifier rebuilt)");
+            }
+            Ok(None) => {
+                // 未配置任何通知目标（url 为空），置空 notifier。
+                let mut guard = self.notifier.write().unwrap();
+                *guard = None;
+                info!("global settings hot-reloaded (notifier disabled)");
+            }
+            Err(e) => {
+                // 重建失败：保留旧 notifier，避免通知被静默关闭。
+                warn!(error = %e, "notifier hot-reload failed, keeping previous notifier");
+            }
+        }
     }
 }
 
