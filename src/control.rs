@@ -482,17 +482,15 @@ pub(crate) async fn handle_request(state: &Arc<AppState>, req: ControlRequest) -
                     return ControlResponse::err(format!("failed to save settings: {e}"));
                 }
             }
-            // 热更新：并发 / 队列容量之外的字段立即刷新到 runtime / notifier，
-            // 无需重启 daemon。
+            // 热更新：全部字段立即刷新到 runtime / notifier，无需重启 daemon。
             state.reload_settings(&settings);
             ControlResponse::ok(json!({
                 "saved": true,
                 "config": "SQLite (settings 表)",
                 "applied": true,
-                // 前端据此展示生效档位：除并发 / 队列容量外均即时生效。
+                // 全部设置保存即生效，无需重启。
                 "restart_required": false,
                 "immediate": true,
-                "restart_only": ["concurrency", "queue_capacity"],
             }))
         }
         ControlRequest::Backup => {
