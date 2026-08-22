@@ -109,8 +109,7 @@ impl AppState {
         }
     }
 
-    /// 设置保存后调用：把新设置写入内存视图，并全部热更新到 runtime / notifier，
-    /// 无需重启 daemon。
+    /// 设置保存后调用：把新设置写入内存视图，并全部热更新到 runtime / notifier。
     ///
     /// 并发数由 daemon 调度循环在每轮按 runtime.concurrency 动态调整信号量；
     /// 队列容量在每轮入队时读取，因此同样即时生效。
@@ -191,20 +190,25 @@ pub async fn run_daemon(state: Arc<AppState>) -> Result<()> {
         }
         *state.last_tick_at.lock().await = Some(Utc::now());
 
-        // 并发数热更新：按 runtime 最新值动态调整信号量许可数，无需重启 daemon。
+        // 并发数热更新：按 runtime 最新值动态调整信号量许可数。
         let target_concurrency = state.runtime.read().unwrap().concurrency.max(1);
         if target_concurrency != last_concurrency {
+            let old_concurrency = last_concurrency;
             if target_concurrency > last_concurrency {
                 semaphore.add_permits(target_concurrency - last_concurrency);
+                last_concurrency = target_concurrency;
             } else {
-                semaphore.forget_permits(last_concurrency - target_concurrency);
+                // forget_permits 可能因当前持有许可的任务而未完全减少，
+                // 用返回值修正 last_concurrency，以便后续循环继续收敛。
+                let reduced = semaphore.forget_permits(last_concurrency - target_concurrency);
+                last_concurrency -= reduced;
             }
             info!(
-                old = last_concurrency,
-                new = target_concurrency,
+                old = old_concurrency,
+                new = last_concurrency,
+                target = target_concurrency,
                 "concurrency hot-reloaded"
             );
-            last_concurrency = target_concurrency;
         }
 
         let due = {

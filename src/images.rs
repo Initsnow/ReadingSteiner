@@ -25,7 +25,7 @@ impl ImageDownloader {
         let client = Client::builder()
             .connect_timeout(Duration::from_secs(10))
             .timeout(Duration::from_secs(30))
-            .user_agent(concat!("ReadingSteiner/", env!("CARGO_PKG_VERSION")))
+            .user_agent(crate::config::DEFAULT_USER_AGENT)
             .build()?;
         Ok(Self {
             client,

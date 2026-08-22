@@ -37,7 +37,7 @@ pub fn create_fetcher(
     match engine {
         "http" => {
             let user_agent = if settings.default_user_agent.trim().is_empty() {
-                format!("ReadingSteiner/{}", env!("CARGO_PKG_VERSION"))
+                crate::config::DEFAULT_USER_AGENT.to_string()
             } else {
                 settings.default_user_agent.clone()
             };

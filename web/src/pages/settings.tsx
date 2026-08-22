@@ -136,7 +136,7 @@ export function SettingsPage() {
     setError(null)
     try {
       await api.updateSettings(settings)
-      setNotice(`已保存并即时生效，无需重启 daemon。`)
+      setNotice(`已保存并即时生效。`)
     } catch (e) {
       setError((e as Error).message)
     } finally {
