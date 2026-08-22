@@ -7,8 +7,7 @@ $:
           type: npc:go
 
   pull_request.comment@npc:
-    default:
-      docker:
+    - docker:
         image: docker.cnb.cool/azumaseren/default-npc:latest
       stages:
         - name: npc go
