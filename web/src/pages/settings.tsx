@@ -9,8 +9,9 @@ import {
   Upload,
   Clock,
   Server,
+  Boxes,
 } from "lucide-react"
-import { api, type EditableSettings } from "@/lib/api"
+import { api, type EditableSettings, type TagConfig } from "@/lib/api"
 import { validateCron } from "@/lib/utils"
 import { Button } from "@/components/ui/button"
 import {
@@ -58,6 +59,11 @@ export function SettingsPage() {
   const [serverTz, setServerTz] = useState("UTC")
   const [browserNow, setBrowserNow] = useState(new Date())
   const [backups, setBackups] = useState<{ name: string; has_zip: boolean }[]>([])
+  // 分组（标签）管理
+  const [tags, setTags] = useState<TagConfig[]>([])
+  const [tagSaving, setTagSaving] = useState(false)
+  const [tagNotice, setTagNotice] = useState<string | null>(null)
+  const [newTagName, setNewTagName] = useState("")
 
   async function load() {
     try {
@@ -83,9 +89,18 @@ export function SettingsPage() {
     }
   }
 
+  async function loadTags() {
+    try {
+      setTags(await api.listTags())
+    } catch (e) {
+      setError((e as Error).message)
+    }
+  }
+
   useEffect(() => {
     load()
     loadBackups()
+    loadTags()
   }, [])
 
   // 浏览器本地时间持续刷新
@@ -116,6 +131,70 @@ export function SettingsPage() {
       setError((e as Error).message)
     } finally {
       setSaving(false)
+    }
+  }
+
+  function updateTagLocal(name: string, patch: Partial<TagConfig>) {
+    setTags((prev) => prev.map((t) => (t.name === name ? { ...t, ...patch } : t)))
+  }
+
+  async function handleSaveTag(tag: TagConfig) {
+    setTagSaving(true)
+    setTagNotice(null)
+    setError(null)
+    try {
+      await api.updateTag(tag.name, tag)
+      setTagNotice(`已保存分组「${tag.name}」的设置。`)
+    } catch (e) {
+      setError((e as Error).message)
+    } finally {
+      setTagSaving(false)
+    }
+  }
+
+  async function handleAddTag() {
+    const name = newTagName.trim()
+    if (!name) {
+      setError("分组名称不能为空")
+      return
+    }
+    if (tags.some((t) => t.name === name)) {
+      setError(`分组「${name}」已存在`)
+      return
+    }
+    setTagSaving(true)
+    setTagNotice(null)
+    setError(null)
+    try {
+      await api.updateTag(name, {
+        name,
+        enabled: true,
+        notify_enabled: true,
+        history_limit: 0,
+      })
+      setTags((prev) => [
+        ...prev,
+        { name, enabled: true, notify_enabled: true, history_limit: 0 },
+      ])
+      setNewTagName("")
+      setTagNotice(`已创建分组「${name}」。`)
+    } catch (e) {
+      setError((e as Error).message)
+    } finally {
+      setTagSaving(false)
+    }
+  }
+
+  async function handleDeleteTag(name: string) {
+    setTagNotice(null)
+    setError(null)
+    if (!window.confirm(`确定要删除分组「${name}」的设置吗？该标签对应的监控源将恢复为使用自身设置。`)) return
+    try {
+      await api.deleteTag(name)
+      setTags((prev) => prev.filter((t) => t.name !== name))
+      setTagNotice(`已删除分组「${name}」的设置。`)
+    } catch (e) {
+      setError((e as Error).message)
     }
   }
 
@@ -384,6 +463,117 @@ export function SettingsPage() {
               保存设置
             </Button>
           </div>
+        </CardContent>
+      </Card>
+
+      {/* 分组（标签）管理 */}
+      <Card>
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2">
+            <Boxes className="h-5 w-5" /> 分组（标签）管理
+          </CardTitle>
+          <CardDescription>
+            为监控源的分组设置监控、通知开关与历史自动清理条数。分组下「跟随分组」的监控源会继承这里的设置；监控源可单独关闭“跟随分组”以自覆盖。
+          </CardDescription>
+        </CardHeader>
+        <CardContent>
+          {tagNotice && <p className="text-sm text-green-600">{tagNotice}</p>}
+          <div className="mb-3 flex items-center gap-2">
+            <input
+              type="text"
+              className={inputCls}
+              placeholder="新建分组（标签）名称，如 news"
+              value={newTagName}
+              onChange={(e) => setNewTagName(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") handleAddTag()
+              }}
+            />
+            <Button
+              size="sm"
+              disabled={tagSaving}
+              onClick={handleAddTag}
+            >
+              新建分组
+            </Button>
+          </div>
+          {tags.length === 0 ? (
+            <p className="text-sm text-muted-foreground">
+              暂无分组设置。可在监控源的“标签”字段中填写标签，随后回到此处为对应分组配置监控 / 通知 / 历史保留策略。
+            </p>
+          ) : (
+            <div className="divide-y rounded-md border">
+              {tags.map((tag) => (
+                <div
+                  key={tag.name}
+                  className="flex flex-wrap items-center gap-x-6 gap-y-2 px-3 py-3 text-sm"
+                >
+                  <span className="min-w-32 font-medium">{tag.name}</span>
+                  <label className="flex cursor-pointer items-center gap-2">
+                    <input
+                      type="checkbox"
+                      className="h-4 w-4 accent-primary"
+                      checked={tag.enabled}
+                      onChange={(e) =>
+                        updateTagLocal(tag.name, { enabled: e.target.checked })
+                      }
+                    />
+                    <span>监控</span>
+                  </label>
+                  <label className="flex cursor-pointer items-center gap-2">
+                    <input
+                      type="checkbox"
+                      className="h-4 w-4 accent-primary"
+                      checked={tag.notify_enabled}
+                      onChange={(e) =>
+                        updateTagLocal(tag.name, {
+                          notify_enabled: e.target.checked,
+                        })
+                      }
+                    />
+                    <span>通知</span>
+                  </label>
+                  <div className="flex items-center gap-2">
+                    <span className="text-muted-foreground">每个源保留历史</span>
+                    <input
+                      type="number"
+                      min={0}
+                      className="w-20 rounded-md border border-input bg-background px-2 py-1 text-sm"
+                      value={tag.history_limit}
+                      title="0 表示不限制，使用全局设置"
+                      onChange={(e) =>
+                        updateTagLocal(tag.name, {
+                          history_limit: Number(e.target.value),
+                        })
+                      }
+                    />
+                    <span className="text-xs text-muted-foreground">条（0=不限制）</span>
+                  </div>
+                  <div className="flex-1" />
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    disabled={tagSaving}
+                    onClick={() => handleSaveTag(tag)}
+                  >
+                    保存
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    className="text-destructive hover:text-destructive"
+                    disabled={tagSaving}
+                    onClick={() => handleDeleteTag(tag.name)}
+                  >
+                    <Trash2 className="h-3.5 w-3.5" /> 删除
+                  </Button>
+                </div>
+              ))}
+            </div>
+          )}
+          <p className="mt-3 text-xs text-muted-foreground">
+            提示：分组的“每个源保留历史条数”优先于全局设置，多个分组取最严格的数值。分组下监控源的“跟随分组”开关决定是否继承这些设置。
+          </p>
         </CardContent>
       </Card>
 

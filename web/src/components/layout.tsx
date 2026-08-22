@@ -2,7 +2,6 @@ import { NavLink, Outlet, useLocation } from "react-router-dom"
 import {
   Activity,
   Radio,
-  ScrollText,
   Boxes,
   Settings as SettingsIcon,
 } from "lucide-react"
@@ -11,7 +10,6 @@ import { Badge } from "@/components/ui/badge"
 
 const nav = [
   { to: "/sources", label: "监控源", icon: Radio },
-  { to: "/events", label: "变更事件", icon: ScrollText },
   { to: "/settings", label: "设置", icon: SettingsIcon },
 ]
 
