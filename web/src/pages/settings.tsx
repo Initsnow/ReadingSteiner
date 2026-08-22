@@ -17,7 +17,6 @@ import { Button } from "@/components/ui/button"
 import {
   Card,
   CardContent,
-  CardDescription,
   CardHeader,
   CardTitle,
 } from "@/components/ui/card"
@@ -281,7 +280,6 @@ export function SettingsPage() {
           <CardTitle className="flex items-center gap-2">
             <Clock className="h-5 w-5" /> 时间
           </CardTitle>
-          <CardDescription>服务器时间与浏览器本地时间对照</CardDescription>
         </CardHeader>
         <CardContent className="grid gap-4 md:grid-cols-3">
           <div className="rounded-md border bg-muted/40 p-3 text-sm">
@@ -322,13 +320,10 @@ export function SettingsPage() {
           <CardTitle className="flex items-center gap-2">
             <Save className="h-5 w-5" /> 全局设置
           </CardTitle>
-          <CardDescription>
-            抓取并发、超时、User-Agent、历史保留、失败阈值、时区与通知模板
-          </CardDescription>
         </CardHeader>
         <CardContent>
           <div className="grid grid-cols-2 gap-4">
-            <Field label="抓取工作线程数（并发）">
+            <Field label="抓取并发数">
               <input
                 type="number"
                 className={inputCls}
@@ -429,7 +424,7 @@ export function SettingsPage() {
               />
             </Field>
             <Field
-              label="Telegram 通知目标 (tgram://)"
+              label="Telegram 通知目标"
               hint="格式：tgram://bottoken/ChatID1/ChatID2，编码 bot token 与一个或多个接收 chat id"
               className="col-span-2"
             >
@@ -471,167 +466,148 @@ export function SettingsPage() {
         </CardContent>
       </Card>
 
-      {/* 分组（标签）管理 */}
+      {/* 分组管理 */}
       <Card>
         <CardHeader>
           <CardTitle className="flex items-center gap-2">
-            <Boxes className="h-5 w-5" /> 分组（标签）管理
+            <Boxes className="h-5 w-5" /> 分组管理
           </CardTitle>
-          <CardDescription>
-            为监控源的分组设置历史保留条数、默认内容提取与通知目标。分组下「跟随分组」的监控源会继承这里的设置；监控源可单独关闭“跟随分组”以自覆盖。监控/通知开关可在监控源列表多选批量控制。
-          </CardDescription>
         </CardHeader>
         <CardContent>
-          {tagNotice && <p className="text-sm text-green-600">{tagNotice}</p>}
-          <div className="mb-3 flex items-center gap-2">
+          {tagNotice && <p className="mb-3 text-sm text-green-600">{tagNotice}</p>}
+          <div className="mb-4 flex max-w-md items-center gap-2">
             <input
               type="text"
               className={inputCls}
-              placeholder="新建分组（标签）名称，如 news"
+              placeholder="分组名称，如 news"
               value={newTagName}
               onChange={(e) => setNewTagName(e.target.value)}
               onKeyDown={(e) => {
                 if (e.key === "Enter") handleAddTag()
               }}
             />
-            <Button
-              size="sm"
-              disabled={tagSaving}
-              onClick={handleAddTag}
-            >
+            <Button size="sm" disabled={tagSaving} onClick={handleAddTag}>
               新建分组
             </Button>
           </div>
           {tags.length === 0 ? (
             <p className="text-sm text-muted-foreground">
-              暂无分组设置。可在监控源的“标签”字段中填写标签，随后回到此处为对应分组配置历史保留 / 默认提取 / 通知目标。
+              暂无分组。可在监控源的“标签”字段中填写标签，然后回来为对应分组配置历史保留 / 默认提取 / 通知目标。
             </p>
           ) : (
-            <div className="divide-y rounded-md border">
+            <div className="grid gap-3 md:grid-cols-2">
               {tags.map((tag) => (
                 <div
                   key={tag.name}
-                  className="flex flex-wrap items-center gap-x-6 gap-y-2 px-3 py-3 text-sm"
+                  className="rounded-lg border p-4"
                 >
-                  <span className="min-w-32 font-medium">{tag.name}</span>
-                  <div className="flex items-center gap-2">
-                    <span className="text-muted-foreground">每个源保留历史</span>
-                    <input
-                      type="number"
-                      min={0}
-                      className="w-20 rounded-md border border-input bg-background px-2 py-1 text-sm"
-                      value={tag.history_limit}
-                      title="0 表示不限制，使用全局设置"
-                      onChange={(e) =>
-                        updateTagLocal(tag.name, {
-                          history_limit: Number(e.target.value),
-                        })
-                      }
-                    />
-                    <span className="text-xs text-muted-foreground">条（0=不限制）</span>
+                  <div className="mb-3 flex items-center justify-between">
+                    <span className="font-medium">{tag.name}</span>
+                    <div className="flex items-center gap-1">
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        disabled={tagSaving}
+                        onClick={() => handleSaveTag(tag)}
+                      >
+                        保存
+                      </Button>
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        className="text-destructive hover:text-destructive"
+                        disabled={tagSaving}
+                        onClick={() => handleDeleteTag(tag.name)}
+                      >
+                        <Trash2 className="h-3.5 w-3.5" /> 删除
+                      </Button>
+                    </div>
                   </div>
-                  <div className="flex items-center gap-2">
-                    <span className="text-muted-foreground">通知目标</span>
-                    <input
-                      type="text"
-                      className="w-56 rounded-md border border-input bg-background px-2 py-1 text-sm font-mono"
-                      value={tag.notify_url ?? ""}
-                      placeholder="tgram://bot/ChatID"
-                      title="留空沿用全局通知目标"
-                      onChange={(e) =>
-                        updateTagLocal(tag.name, { notify_url: e.target.value })
-                      }
-                    />
-                    <span className="text-xs text-muted-foreground">（留空沿用全局）</span>
-                  </div>
-                  <div className="flex w-full items-center gap-2">
-                    <span className="shrink-0 text-muted-foreground">默认提取</span>
-                    <select
-                      className="w-40 rounded-md border border-input bg-background px-2 py-1 text-sm"
-                      value={tag.extract?.type ?? "inherit"}
-                      onChange={(e) => {
-                        const v = e.target.value as "inherit" | "text" | "items"
-                        if (v === "inherit") {
-                          updateTagLocal(tag.name, { extract: null })
-                        } else if (v === "text") {
-                          updateTagLocal(tag.name, { extract: { type: "text" } })
-                        } else {
+                  <div className="space-y-3">
+                    <Field label="每个源保留历史条数" hint="0 表示不限制，使用全局设置">
+                      <input
+                        type="number"
+                        min={0}
+                        className="w-24 rounded-md border border-input bg-background px-2 py-1 text-sm"
+                        value={tag.history_limit}
+                        onChange={(e) =>
                           updateTagLocal(tag.name, {
-                            extract: {
-                              type: "items",
-                              selector: { kind: "css", selector: "" },
-                            },
+                            history_limit: Number(e.target.value),
                           })
                         }
-                      }}
-                    >
-                      <option value="inherit">不覆盖（沿用源自身）</option>
-                      <option value="text">整页文本</option>
-                      <option value="items">结构化提取</option>
-                    </select>
-                    {tag.extract?.type === "items" && (
+                      />
+                    </Field>
+                    <Field label="通知目标" hint="留空沿用全局通知目标">
                       <input
                         type="text"
-                        className="w-48 rounded-md border border-input bg-background px-2 py-1 text-sm font-mono"
-                        value={
-                          tag.extract?.selector &&
-                          "selector" in tag.extract.selector
-                            ? tag.extract.selector.selector
-                            : tag.extract?.selector && "path" in tag.extract.selector
-                              ? tag.extract.selector.path
-                              : ""
+                        className={`${inputCls} font-mono`}
+                        value={tag.notify_url ?? ""}
+                        placeholder="tgram://bot/ChatID"
+                        onChange={(e) =>
+                          updateTagLocal(tag.name, { notify_url: e.target.value })
                         }
-                        placeholder="选择器（CSS/JSONPath）"
-                        onChange={(e) => {
-                          const ex = tag.extract
-                          const isItems =
-                            !!ex && "selector" in ex
-                          updateTagLocal(tag.name, {
-                            extract: {
-                              type: "items",
-                              selector:
-                                isItems &&
-                                ex.selector &&
-                                "path" in ex.selector
-                                  ? {
-                                      kind: "json_path",
-                                      path: e.target.value,
-                                    }
-                                  : { kind: "css", selector: e.target.value },
-                            },
-                          })
-                        }}
                       />
-                    )}
-                    <span className="text-xs text-muted-foreground">
-                      分组下的监控源「跟随分组」时沿用此提取配置
-                    </span>
+                    </Field>
+                    <Field label="默认内容提取" hint="分组下的监控源开启「跟随分组」时沿用">
+                      <div className="space-y-2">
+                        <select
+                          className={inputCls}
+                          value={tag.extract?.type ?? "inherit"}
+                          onChange={(e) => {
+                            const v = e.target.value as "inherit" | "text" | "items"
+                            if (v === "inherit") {
+                              updateTagLocal(tag.name, { extract: null })
+                            } else if (v === "text") {
+                              updateTagLocal(tag.name, { extract: { type: "text" } })
+                            } else {
+                              updateTagLocal(tag.name, {
+                                extract: {
+                                  type: "items",
+                                  selector: { kind: "css", selector: "" },
+                                },
+                              })
+                            }
+                          }}
+                        >
+                          <option value="inherit">不覆盖，沿用源自身</option>
+                          <option value="text">整页文本</option>
+                          <option value="items">结构化提取</option>
+                        </select>
+                        {tag.extract?.type === "items" && (
+                          <input
+                            type="text"
+                            className={`${inputCls} font-mono`}
+                            value={
+                              tag.extract?.selector &&
+                              "selector" in tag.extract.selector
+                                ? tag.extract.selector.selector
+                                : tag.extract?.selector && "path" in tag.extract.selector
+                                  ? tag.extract.selector.path
+                                  : ""
+                            }
+                            placeholder="选择器，如 .product"
+                            onChange={(e) => {
+                              const ex = tag.extract
+                              const isItems = !!ex && "selector" in ex
+                              updateTagLocal(tag.name, {
+                                extract: {
+                                  type: "items",
+                                  selector:
+                                    isItems && ex.selector && "path" in ex.selector
+                                      ? { kind: "json_path", path: e.target.value }
+                                      : { kind: "css", selector: e.target.value },
+                                },
+                              })
+                            }}
+                          />
+                        )}
+                      </div>
+                    </Field>
                   </div>
-                  <div className="flex-1" />
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    disabled={tagSaving}
-                    onClick={() => handleSaveTag(tag)}
-                  >
-                    保存
-                  </Button>
-                  <Button
-                    size="sm"
-                    variant="ghost"
-                    className="text-destructive hover:text-destructive"
-                    disabled={tagSaving}
-                    onClick={() => handleDeleteTag(tag.name)}
-                  >
-                    <Trash2 className="h-3.5 w-3.5" /> 删除
-                  </Button>
                 </div>
               ))}
             </div>
           )}
-          <p className="mt-3 text-xs text-muted-foreground">
-            提示：分组的“每个源保留历史条数”优先于全局设置，多个分组取最严格的数值；默认提取 / 通知目标多个分组配置时按分组名升序取第一个。监控 / 通知开关请在监控源列表多选批量控制。
-          </p>
         </CardContent>
       </Card>
 
@@ -641,9 +617,6 @@ export function SettingsPage() {
           <CardTitle className="flex items-center gap-2">
             <Archive className="h-5 w-5" /> 备份与恢复
           </CardTitle>
-          <CardDescription>
-            备份包含数据库、media 与配置，打包为 zip 可下载；支持在线恢复（无需停止 daemon）。
-          </CardDescription>
         </CardHeader>
         <CardContent>
           <div className="flex flex-wrap items-center gap-2">
@@ -667,10 +640,6 @@ export function SettingsPage() {
               onChange={handleUploadZip}
             />
           </div>
-          <p className="mt-3 text-xs text-muted-foreground">
-            备份保存在 <code>state/backups/&lt;时间戳&gt;/</code>，并打包为同名的{" "}
-            <code>.zip</code> 供下载。恢复会在线覆盖当前数据库与 media。
-          </p>
 
           {backups.length > 0 && (
             <div className="mt-4 divide-y rounded-md border">

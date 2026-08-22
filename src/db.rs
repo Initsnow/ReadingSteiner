@@ -11,7 +11,7 @@ use crate::models::{
     SystemNotification, TagConfig,
 };
 
-const SCHEMA_VERSION: i64 = 9;
+const SCHEMA_VERSION: i64 = 10;
 
 pub struct Db {
     conn: Connection,
@@ -120,6 +120,7 @@ impl Db {
                     consecutive_changes INTEGER NOT NULL DEFAULT 0,
                     backoff_until TEXT,
                     last_success_at TEXT,
+                    last_error TEXT,
                     last_notified_fingerprint TEXT,
                     last_notified_at TEXT,
                     failure_notified INTEGER NOT NULL DEFAULT 0
@@ -212,6 +213,12 @@ impl Db {
             )?;
             self.conn.pragma_update(None, "user_version", 9)?;
             info!("database schema migrated to v9");
+        }
+        if v < 10 {
+            // v10：schedule_state 记录最近一次错误信息，供 Web 控制台展示错误原因。
+            self.conn.execute_batch("ALTER TABLE schedule_state ADD COLUMN last_error TEXT;")?;
+            self.conn.pragma_update(None, "user_version", 10)?;
+            info!("database schema migrated to v10");
         }
         Ok(())
     }
@@ -551,16 +558,22 @@ impl Db {
             }
         }
 
-        // 错误状态：schedule_state 中连续失败次数 > 0。
+        // 错误状态：schedule_state 中连续失败次数 > 0 时记录具体错误信息。
         let mut has_error: HashMap<String, bool> = HashMap::new();
+        let mut last_error: HashMap<String, String> = HashMap::new();
         {
             let mut stmt = self.conn.prepare(
-                "SELECT source_id FROM schedule_state WHERE consecutive_failures > 0",
+                "SELECT source_id, last_error FROM schedule_state WHERE consecutive_failures > 0",
             )?;
-            let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+            let rows = stmt.query_map([], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?))
+            })?;
             for row in rows {
-                let sid = row?;
-                has_error.insert(sid, true);
+                let (sid, err) = row?;
+                has_error.insert(sid.clone(), true);
+                if let Some(err) = err {
+                    last_error.insert(sid, err);
+                }
             }
         }
 
@@ -572,6 +585,7 @@ impl Db {
                 last_change_at: last_change_at.get(&s.id).copied(),
                 unread_count: unread_count.get(&s.id).copied().unwrap_or(0),
                 has_error: has_error.get(&s.id).copied().unwrap_or(false),
+                last_error: last_error.get(&s.id).cloned(),
             });
         }
         Ok(out)
@@ -589,7 +603,7 @@ impl Db {
     pub fn get_schedule_state(&self, source_id: &str) -> Result<Option<ScheduleState>> {
         self.conn
             .query_row(
-                "SELECT source_id, next_due_at, consecutive_failures, consecutive_changes, backoff_until, last_success_at, last_notified_fingerprint, last_notified_at, failure_notified FROM schedule_state WHERE source_id=?1",
+                "SELECT source_id, next_due_at, consecutive_failures, consecutive_changes, backoff_until, last_success_at, last_error, last_notified_fingerprint, last_notified_at, failure_notified FROM schedule_state WHERE source_id=?1",
                 [source_id],
                 |r| {
                     Ok(ScheduleState {
@@ -599,11 +613,12 @@ impl Db {
                         consecutive_changes: r.get::<_, i64>(3)? as u32,
                         backoff_until: r.get::<_, Option<String>>(4)?.map(|s| parse_ts(&s)),
                         last_success_at: r.get::<_, Option<String>>(5)?.map(|s| parse_ts(&s)),
-                        last_notified_fingerprint: r.get(6)?,
+                        last_error: r.get(6)?,
+                        last_notified_fingerprint: r.get(7)?,
                         last_notified_at: r
-                            .get::<_, Option<String>>(7)?
+                            .get::<_, Option<String>>(8)?
                             .map(|s| parse_ts(&s)),
-                        failure_notified: r.get::<_, i64>(8)? != 0,
+                        failure_notified: r.get::<_, i64>(9)? != 0,
                     })
                 },
             )
@@ -613,9 +628,9 @@ impl Db {
 
     pub fn upsert_schedule_state(&self, state: &ScheduleState) -> Result<()> {
         self.conn.execute(
-            "INSERT INTO schedule_state(source_id, next_due_at, consecutive_failures, consecutive_changes, backoff_until, last_success_at, last_notified_fingerprint, last_notified_at, failure_notified)
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)
-             ON CONFLICT(source_id) DO UPDATE SET next_due_at=excluded.next_due_at, consecutive_failures=excluded.consecutive_failures, consecutive_changes=excluded.consecutive_changes, backoff_until=excluded.backoff_until, last_success_at=excluded.last_success_at, last_notified_fingerprint=excluded.last_notified_fingerprint, last_notified_at=excluded.last_notified_at, failure_notified=excluded.failure_notified",
+            "INSERT INTO schedule_state(source_id, next_due_at, consecutive_failures, consecutive_changes, backoff_until, last_success_at, last_error, last_notified_fingerprint, last_notified_at, failure_notified)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)
+             ON CONFLICT(source_id) DO UPDATE SET next_due_at=excluded.next_due_at, consecutive_failures=excluded.consecutive_failures, consecutive_changes=excluded.consecutive_changes, backoff_until=excluded.backoff_until, last_success_at=excluded.last_success_at, last_error=excluded.last_error, last_notified_fingerprint=excluded.last_notified_fingerprint, last_notified_at=excluded.last_notified_at, failure_notified=excluded.failure_notified",
             params![
                 state.source_id,
                 state.next_due_at.to_rfc3339(),
@@ -623,6 +638,7 @@ impl Db {
                 state.consecutive_changes as i64,
                 state.backoff_until.map(|d| d.to_rfc3339()),
                 state.last_success_at.map(|d| d.to_rfc3339()),
+                state.last_error,
                 state.last_notified_fingerprint,
                 state.last_notified_at.map(|d| d.to_rfc3339()),
                 state.failure_notified as i64

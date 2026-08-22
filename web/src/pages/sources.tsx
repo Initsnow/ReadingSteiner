@@ -748,7 +748,11 @@ export function SourcesPage() {
                             </Badge>
                           )}
                           {s.has_error && (
-                            <Badge variant="destructive" className="px-1.5 py-0 text-[10px]">
+                            <Badge
+                              variant="destructive"
+                              className="px-1.5 py-0 text-[10px]"
+                              title={s.last_error ?? "连续失败，请检查监控源配置或网络"}
+                            >
                               <AlertCircle className="h-2.5 w-2.5" /> 错误
                             </Badge>
                           )}
@@ -788,6 +792,12 @@ export function SourcesPage() {
                             最近变更: <span title={formatDateTime(s.last_change_at)}>{formatRelativeTime(s.last_change_at)}</span>
                           </span>
                         </div>
+                        {s.has_error && s.last_error && (
+                          <div className="mt-1 flex items-start gap-1 rounded-md border border-destructive/30 bg-destructive/10 px-2 py-1 text-xs text-destructive">
+                            <AlertCircle className="mt-0.5 h-3 w-3 shrink-0" />
+                            <span className="break-all">{s.last_error}</span>
+                          </div>
+                        )}
                       </div>
                       <div className="flex shrink-0 items-center gap-1">
                         {unread > 0 && (
@@ -956,7 +966,7 @@ export function SourcesPage() {
                 <div className="text-sm">
                   <div className="font-medium">跟随分组设置</div>
                   <div className="mt-0.5 text-xs text-muted-foreground">
-                    开启后，该监控源继承所属分组的历史保留 / 通知目标 / 内容提取设置；关闭后使用自身的设置（自覆盖）。监控 / 通知开关始终由本监控源控制。
+                    开启后继承分组的历史保留 / 通知目标 / 内容提取设置
                   </div>
                 </div>
                 <label className="flex cursor-pointer items-center gap-2 text-sm">
@@ -1014,9 +1024,9 @@ export function SourcesPage() {
               )}
 
               <Field
-                label="cron 表达式（分 时 日 月 周）"
+                label="cron 表达式"
                 className="col-span-2"
-                hint={"例：*/15 * * * *（每 15 分钟）、0 9,18 * * 1-5（工作日 9:00/18:00）。"}
+                hint="例：*/15 * * * * 每 15 分钟、0 9,18 * * 1-5 工作日 9:00/18:00"
               >
                 <div className="flex items-center gap-3 rounded-md border bg-muted/30 px-3 py-2">
                   <label className="flex shrink-0 cursor-pointer items-center gap-2 text-sm">
@@ -1194,7 +1204,7 @@ export function SourcesPage() {
                   )}
                 </div>
               </Field>
-              <Field label="标签（逗号分隔）">
+              <Field label="标签">
                 <input
                   className={inputCls}
                   value={form.tags}
