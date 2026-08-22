@@ -28,11 +28,21 @@ pub fn engine_name(fetch: &FetchConfig) -> &str {
     }
 }
 
-pub fn create_fetcher(engine: &str, cfg: &crate::config::Config) -> Result<Box<dyn Fetcher>> {
+/// 创建抓取器。`settings` 提供可热更新的 UA / 超时覆盖（优先级高于 config.yaml），
+/// 为 None 时回退到 `cfg.daemon` 的启动值。
+pub fn create_fetcher(
+    engine: &str,
+    cfg: &crate::config::Config,
+    settings: Option<&crate::config::EditableSettings>,
+) -> Result<Box<dyn Fetcher>> {
     match engine {
         "http" => Ok(Box::new(http::HttpFetcher::new(
-            &cfg.daemon.effective_user_agent(),
-            cfg.daemon.default_timeout_secs,
+            &settings
+                .map(|s| s.default_user_agent.as_str())
+                .filter(|ua| !ua.trim().is_empty())
+                .map(str::to_string)
+                .unwrap_or_else(|| cfg.daemon.effective_user_agent()),
+            settings.map(|s| s.default_timeout_secs).unwrap_or(cfg.daemon.default_timeout_secs),
         )?)),
         "camofox" => {
             if !cfg.camofox.enabled {

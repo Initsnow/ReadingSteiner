@@ -121,7 +121,7 @@ async fn test_http_fetcher_and_pipeline() {
         .await;
 
     let cfg = Config::default();
-    let fetcher = reading_steiner::fetcher::create_fetcher("http", &cfg).unwrap();
+    let fetcher = reading_steiner::fetcher::create_fetcher("http", &cfg, None).unwrap();
     let doc = fetcher
         .fetch(&FetchSpec {
             fetch: FetchConfig {
@@ -233,7 +233,7 @@ async fn test_camofox_contract_with_mock() {
         camofox: camofox.clone(),
         ..Config::default()
     };
-    let fetcher = reading_steiner::fetcher::create_fetcher("camofox", &cfg).unwrap();
+    let fetcher = reading_steiner::fetcher::create_fetcher("camofox", &cfg, None).unwrap();
     let doc = fetcher
         .fetch(&FetchSpec {
             fetch: FetchConfig {
@@ -853,6 +853,60 @@ fn test_settings_db_roundtrip() {
     s2.concurrency = 16;
     db.set_settings(&s2).unwrap();
     assert_eq!(db.get_settings().unwrap().unwrap().concurrency, 16);
+}
+
+#[test]
+fn test_reload_settings_hot_update() {
+    // reload_settings 应把除并发 / 队列容量外的字段刷新到 runtime / settings，
+    // 并保持启动时分配的 concurrency / queue_capacity 不变（需重启）。
+    use reading_steiner::scheduler::AppState;
+
+    let dir = std::env::temp_dir().join(format!("rst-reload-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let mut cfg = Config::default();
+    cfg.state_dir = dir.clone();
+    let state = AppState::with_config_path(cfg, None).unwrap();
+
+    // 初始值（默认）。
+    assert_eq!(state.runtime.read().unwrap().concurrency, 16);
+    assert_eq!(state.runtime.read().unwrap().failure_notify_threshold, 0);
+
+    // 热更新：并发保持默认 16，但失败阈值 / 时区 / cron 应即时刷新。
+    let s = EditableSettings {
+        concurrency: 999, // 应保持启动值，需重启
+        queue_capacity: 999,
+        default_timeout_secs: 30,
+        default_cron: "*/10 * * * *".into(),
+        default_user_agent: "hot-agent".into(),
+        history_limit_per_source: 200,
+        failure_notify_threshold: 5,
+        timezone: "Asia/Shanghai".into(),
+        template: "{label}".into(),
+        telegram_url: "tgram://hot/C1".into(),
+        max_images_per_event: 7,
+    };
+    state.reload_settings(&s);
+
+    // 并发 / 队列容量保持启动值（需重启生效）。
+    assert_eq!(state.runtime.read().unwrap().concurrency, 16);
+    assert_eq!(state.runtime.read().unwrap().queue_capacity, 1024);
+    // 热更新字段已刷新。
+    assert_eq!(state.runtime.read().unwrap().failure_notify_threshold, 5);
+    assert_eq!(state.runtime.read().unwrap().history_limit_per_source, 200);
+    assert_eq!(state.runtime.read().unwrap().timezone, "Asia/Shanghai");
+    assert_eq!(state.runtime.read().unwrap().default_cron, "*/10 * * * *");
+    // settings 内存视图已更新（fetcher 的 UA / 超时来源）。
+    assert_eq!(state.settings.read().unwrap().default_user_agent, "hot-agent");
+    assert_eq!(
+        state.settings.read().unwrap().default_timeout_secs,
+        30
+    );
+    // notifier 重建后全局目标指向热更新的 url。
+    let n = state.notifier.read().unwrap().clone().unwrap();
+    assert!(n.global_target().is_some());
+
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]

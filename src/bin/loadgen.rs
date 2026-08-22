@@ -47,7 +47,7 @@ async fn main() -> anyhow::Result<()> {
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
     let cfg = Config::default();
-    let fetcher = Arc::new(reading_steiner::fetcher::create_fetcher("http", &cfg)?);
+    let fetcher = Arc::new(reading_steiner::fetcher::create_fetcher("http", &cfg, None)?);
     let sem = Arc::new(Semaphore::new(concurrency));
     let started = Instant::now();
     let mut latencies = Vec::with_capacity(requests);

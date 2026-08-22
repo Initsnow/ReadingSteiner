@@ -161,6 +161,18 @@ impl TelegramConfig {
             self.template.clone()
         }
     }
+
+    /// 基于基础配置生成一份用可编辑设置覆盖的通知配置（url / 模板 / 图片数），
+    /// 用于热更新 notifier 时保留 api_base 等启动项。
+    pub fn with_overrides(&self, settings: &EditableSettings) -> Option<Self> {
+        let mut c = self.clone();
+        if !settings.telegram_url.trim().is_empty() {
+            c.url = settings.telegram_url.clone();
+        }
+        c.template = settings.template.clone();
+        c.max_images_per_event = settings.max_images_per_event;
+        Some(c)
+    }
 }
 
 /// 默认变更通知模板。占位符含义见 TelegramConfig::template 注释。

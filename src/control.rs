@@ -1,5 +1,6 @@
 use std::net::{IpAddr, Ipv6Addr, ToSocketAddrs};
 use std::path::{Path, PathBuf};
+use std::str::FromStr;
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
@@ -15,6 +16,38 @@ use crate::scheduler::{self, AppState};
 
 /// 单次批量操作允许的最大监控源数量，避免持锁期间长时间执行 upsert 阻塞其他请求。
 const MAX_BATCH_SIZE: usize = 100;
+
+/// 校验全局可编辑设置的合法值，返回首个错误；合法时返回 `Ok(())`。
+fn validate_settings(s: &EditableSettings) -> Result<()> {
+    if s.concurrency == 0 {
+        return Err(Error::config("concurrency 必须大于 0"));
+    }
+    if s.queue_capacity == 0 {
+        return Err(Error::config("queue_capacity 必须大于 0"));
+    }
+    if s.default_timeout_secs == 0 {
+        return Err(Error::config("default_timeout_secs 必须大于 0"));
+    }
+    if !s.default_cron.trim().is_empty()
+        && s.default_cron.parse::<cron::Schedule>().is_err()
+    {
+        return Err(Error::config(format!(
+            "default_cron 不是合法的 cron 表达式: {}",
+            s.default_cron
+        )));
+    }
+    if !s.timezone.trim().is_empty()
+        && iana_time_zone::get_timezone().is_ok()
+        && s.timezone != crate::config::system_local_timezone()
+        && chrono_tz::Tz::from_str(&s.timezone).is_err()
+    {
+        return Err(Error::config(format!(
+            "timezone 不是合法的 IANA 时区: {}",
+            s.timezone
+        )));
+    }
+    Ok(())
+}
 
 #[cfg(not(unix))]
 use tokio::net::{TcpListener, TcpStream};
@@ -132,7 +165,7 @@ impl ControlResponse {
 
 #[cfg(unix)]
 pub async fn serve_control(state: Arc<AppState>) -> Result<()> {
-    let path = state.runtime.socket_path.clone();
+    let path = state.runtime.read().unwrap().socket_path.clone();
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -406,13 +439,16 @@ pub(crate) async fn handle_request(state: &Arc<AppState>, req: ControlRequest) -
                 Err(e) => ControlResponse::err(e.to_string()),
             }
         }
-        ControlRequest::NotifyTest { chat_id } => match &state.notifier {
-            Some(n) => match n.send_test(chat_id.as_deref()).await {
-                Ok(id) => ControlResponse::ok(json!({"message_id": id})),
-                Err(e) => ControlResponse::err(e.to_string()),
-            },
-            None => ControlResponse::err("telegram notifier disabled"),
-        },
+        ControlRequest::NotifyTest { chat_id } => {
+            let notifier = state.notifier.read().unwrap().clone();
+            match notifier {
+                Some(n) => match n.send_test(chat_id.as_deref()).await {
+                    Ok(id) => ControlResponse::ok(json!({"message_id": id})),
+                    Err(e) => ControlResponse::err(e.to_string()),
+                },
+                None => ControlResponse::err("telegram notifier disabled"),
+            }
+        }
         ControlRequest::GetSettings => {
             // 全局可编辑设置以 SQLite 为准；未配置时回退到 config.yaml / 默认值。
             let s = {
@@ -428,19 +464,28 @@ pub(crate) async fn handle_request(state: &Arc<AppState>, req: ControlRequest) -
             }
         }
         ControlRequest::UpdateSettings { settings } => {
+            // 保存前校验：非法值直接拒绝，避免坏值入库后反复影响运行。
+            if let Err(e) = validate_settings(&settings) {
+                return ControlResponse::err(e.to_string());
+            }
             // 持久化到 SQLite（`settings` 表），不再写入 config.yaml。
-            // 部分参数（并发数、超时、UA、时区、模板、图片数）在启动时固化到
-            // runtime / notifier，需重启 daemon 生效。
             {
                 let db = state.db.lock().await;
                 if let Err(e) = db.set_settings(&settings) {
                     return ControlResponse::err(format!("failed to save settings: {e}"));
                 }
             }
+            // 热更新：并发 / 队列容量之外的字段立即刷新到 runtime / notifier，
+            // 无需重启 daemon。
+            state.reload_settings(&settings);
             ControlResponse::ok(json!({
                 "saved": true,
-                "restart_required": true,
                 "config": "SQLite (settings 表)",
+                "applied": true,
+                // 前端据此展示生效档位：除并发 / 队列容量外均即时生效。
+                "restart_required": false,
+                "immediate": true,
+                "restart_only": ["concurrency", "queue_capacity"],
             }))
         }
         ControlRequest::Backup => {
@@ -475,6 +520,8 @@ pub(crate) async fn handle_request(state: &Arc<AppState>, req: ControlRequest) -
             .unwrap_or(());
             let has_zip = state
                 .runtime
+                .read()
+                .unwrap()
                 .state_dir
                 .join("backups")
                 .join(format!("{name}.zip"))
@@ -486,7 +533,7 @@ pub(crate) async fn handle_request(state: &Arc<AppState>, req: ControlRequest) -
             }))
         }
         ControlRequest::ListBackups => {
-            match crate::backup::list_backups(&state.runtime.state_dir) {
+            match crate::backup::list_backups(&state.runtime.read().unwrap().state_dir) {
                 Ok(names) => ControlResponse::ok(json!({"backups": names})),
                 Err(e) => ControlResponse::err(e.to_string()),
             }
@@ -497,7 +544,7 @@ pub(crate) async fn handle_request(state: &Arc<AppState>, req: ControlRequest) -
                 return ControlResponse::err("invalid backup name");
             }
             let mut db = state.db.lock().await;
-            let dir = state.runtime.state_dir.join("backups").join(&name);
+            let dir = state.runtime.read().unwrap().state_dir.join("backups").join(&name);
             if !dir.join("reading-steiner.db").exists() {
                 return ControlResponse::err(format!("backup {name} not found"));
             }
@@ -520,7 +567,7 @@ pub(crate) async fn handle_request(state: &Arc<AppState>, req: ControlRequest) -
             if !crate::backup::is_valid_backup_name(&name) {
                 return ControlResponse::err("invalid backup name");
             }
-            match crate::backup::delete_backup(&state.runtime.state_dir, &name) {
+            match crate::backup::delete_backup(&state.runtime.read().unwrap().state_dir, &name) {
                 Ok(deleted) if deleted => ControlResponse::ok(json!({
                     "deleted": true,
                     "name": name,
@@ -603,7 +650,11 @@ async fn preview_url(state: &Arc<AppState>, url: &str, engine: &str) -> Result<S
         url: url.to_string(),
         ..FetchConfig::default()
     };
-    let fetcher = create_fetcher(engine, &state.cfg)?;
+    let fetcher = create_fetcher(
+        engine,
+        &state.cfg,
+        Some(&state.settings.read().unwrap().clone()),
+    )?;
     let doc = fetcher
         .fetch(&FetchSpec {
             fetch,
