@@ -492,8 +492,8 @@ pub async fn check_source(state: &Arc<AppState>, source_id: &str) -> Result<()> 
         }
         // 仅当该源开启了通知（解析分组继承后的生效通知开关）且已配置 notifier
         // 与默认 chat 时才排队发送。
+        // 注意：此处直接复用外层已持有的 `db`，避免对 `tokio::sync::Mutex` 二次加锁导致死锁。
         let (_, effective_notify, _) = {
-            let db = state.db.lock().await;
             let tags = db.list_tags().unwrap_or_default();
             crate::config::resolve_effective_source(&source, &tags, 0)
         };
