@@ -862,7 +862,7 @@ fn test_settings_db_roundtrip() {
 #[test]
 fn test_reload_settings_hot_update() {
     // reload_settings 应把全部字段（含并发 / 队列容量）刷新到 runtime / settings，
-    // 全部即时生效，无需重启 daemon。
+    // 全部即时生效。
     use reading_steiner::scheduler::AppState;
 
     let dir = std::env::temp_dir().join(format!("rst-reload-{}", std::process::id()));

@@ -11,13 +11,13 @@ daemon 内置一个轻量 HTTP 服务（axum），监听地址与静态目录由
 
 ## 监控源
 
-监控源（source）**只存在 SQLite**（`state/reading-steiner.db` 的 `sources` 表），是运行时唯一数据源。添加、编辑、删除监控源统一通过 Web 控制台或 CLI 操作，即时生效，无需重启 daemon。
+监控源（source）**只存在 SQLite**（`state/reading-steiner.db` 的 `sources` 表），是运行时唯一数据源。添加、编辑、删除监控源统一通过 Web 控制台或 CLI 操作，即时生效。
 
 监控源的详细写法见 [监控源配置](./sources.md)。
 
 ## 全局设置
 
-见 [配置文档](./configuration.md#全局设置sqlite)。全局可编辑设置存于 SQLite，通过「设置」页修改即保存，全部字段保存后**即时生效**，无需重启 daemon（详见[热更新](./configuration.md#热更新)）。
+见 [配置文档](./configuration.md#全局设置sqlite)。全局可编辑设置存于 SQLite，通过「设置」页修改即保存，全部字段保存后**即时生效**（详见[热更新](./configuration.md#热更新)）。
 
 ## 分组（标签）管理
 
@@ -38,7 +38,7 @@ daemon 内置一个轻量 HTTP 服务（axum），监听地址与静态目录由
 
 ## 备份与恢复
 
-见 [备份与恢复](./backup.md)。「设置」页提供一键备份、备份列表、zip 下载、删除备份与在线恢复（无需停止 daemon）。
+见 [备份与恢复](./backup.md)。「设置」页提供一键备份、备份列表、zip 下载、删除备份与在线恢复。
 
 ## 技术栈与开发
 
