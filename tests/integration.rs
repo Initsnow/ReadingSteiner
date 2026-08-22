@@ -828,8 +828,11 @@ fn test_tag_db_roundtrip() {
 #[test]
 fn test_settings_db_roundtrip() {
     let db = Db::open_in_memory().unwrap();
-    // 初始未配置设置时返回 None。
-    assert!(db.get_settings().unwrap().is_none());
+    // 数据库迁移时会 seed 一条全局默认设置，未手动配置前返回默认值。
+    let seeded = db.get_settings().unwrap().unwrap();
+    assert_eq!(seeded.concurrency, 16);
+    assert_eq!(seeded.queue_capacity, 1024);
+    assert_eq!(seeded.default_timeout_secs, 30);
 
     let s = EditableSettings {
         concurrency: 8,
