@@ -18,7 +18,7 @@ cd web && npm install && npm run build && cd ..
 
 # 准备配置
 cp config.yaml config.local.yaml
-# 编辑 token / chat 后启动 daemon
+# 在 config.yaml 的 telegram.url 配置 tgram:// 通知目标后启动 daemon
 ./target/release/reading-steiner serve --config config.local.yaml
 
 # 在另一终端添加监控源（YAML 文件，需 daemon 已运行）
@@ -79,19 +79,35 @@ reading-steiner restore-from-zip --file x.zip  # 从上传/本地的 zip 备份�
 - `daemon.failure_notify_threshold`——连续失败达到多少次后发送 Telegram 失败告警（0 禁用）。
 - `daemon.timezone`——调度器/告警展示时区（IANA 名称，如 `Asia/Shanghai`；留空使用系统本地时区）。
 - `telegram.template`——变更通知模板，占位符：`{label}` `{watch}` `{time}` `{tz}` `{summary}` `{items}`。
-- `telegram.max_images_per_event`、`telegram.default_chat_id` 等。
+- `telegram.url`——全局通知目标，格式 `tgram://bottoken/ChatID1/ChatID2`，编码了 bot token 与一个或多个接收 chat id（留空则未配置通知目标）。
+- `telegram.max_images_per_event` 等。
+
+#### 通知目标（tgram://）
+
+通知配置统一使用 `tgram://` 形式，一个 URL 同时携带 bot token 与接收者 chat id：
+
+```
+tgram://bottoken/ChatID
+tgram://bottoken/ChatID1/ChatID2/ChatIDN
+```
+
+- 全局在 Web「设置」页的「Telegram 通知目标」中配置（保存到 `telegram.url`）。
+- **分组**可在「分组管理」里为某个分组单独配置 `notify_url`（同样是 `tgram://` 形式）；留空则沿用全局。分组下「跟随分组」的监控源优先使用所属分组的通知目标，否则用全局。
+- 多 chat id 会把同一条通知推送到所有列出的 chat。
 
 ### 分组（标签）管理
 
 监控源的「标签」字段可为每个源打上分组标记。在 Web「设置」页的「分组（标签）管理」中可为每个分组配置：
 
-- **监控**开关：控制分组内「跟随分组」的监控源是否被调度检查。
-- **通知**开关：控制分组内「跟随分组」的监控源的变更通知是否推送。
 - **每个源保留历史**条数：该分组下每个监控源最多保留的变更历史条数（0 不限制，跟随全局；多个分组取最严格的数值）。
+- **通知目标**：分组的 `tgram://` 通知 URL（留空沿用全局）。
+- **默认提取**：分组的默认内容提取配置（整页文本 / 结构化提取）。
+
+> 分组的监控 / 通知开关已移除——暂停监控 / 通知请直接在监控源列表「多选批量」操作（每个监控源自身仍有独立的监控 / 通知开关）。
 
 分组可通过两种方式创建：① 在监控源的「标签」字段填写新标签并保存，系统会自动登记该分组；② 直接在设置页的「分组管理」中输入分组名称新建。
 
-监控源默认「跟随分组」——若其带有已配置的分组，则监控 / 通知开关取「源自身开关」与「分组开关」的组合（源自身关闭则该源始终不会启用；分组整体关闭则暂停该分组下所有源），历史保留条数取分组与全局中的最严格值。可在编辑监控源时关闭「跟随分组」以使用自身的 `enabled` / `notify_enabled`（自覆盖）。监控源在展开变更历史时会自动将其未读变更标记为已读。
+监控源默认「跟随分组」——若其带有已配置的分组，则历史保留条数取分组与全局中的最严格值，通知目标优先用所属分组的 `notify_url`（否则全局），**内容提取**优先用分组配置的「默认提取」（分组未配置则沿用源自身）。监控 / 通知开关由监控源自身独立控制（可在列表多选批量暂停），分组不再参与监控 / 通知开关的叠加。可在编辑监控源时关闭「跟随分组」以使用自身的 `extract`（自覆盖）。监控源在展开变更历史时会自动将其未读变更标记为已读。
 
 ### 备份与恢复
 
@@ -221,7 +237,8 @@ extract:
             configFile = ./config.yaml;
             settings = {
               stateDir = "/var/lib/reading-steiner";
-              telegram.tokenFile = config.sops.secrets.telegram.path;
+              # 通知目标统一为 tgram:// 形式（含 bot token 与 chat id）
+              telegram.url = "tgram://bottoken/ChatID";
               camofox = {
                 enabled = false;
                 base_url = "http://127.0.0.1:9377";

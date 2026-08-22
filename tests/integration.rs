@@ -3,7 +3,8 @@ use std::collections::HashMap;
 use chrono::Utc;
 use reading_steiner::config::{
     CamofoxConfig, ChangeType, Config, ExtractConfig, FetchConfig, ItemField, ItemSelector,
-    SourceConfig, resolve_effective_source,
+    SourceConfig, parse_telegram_url, resolve_effective_extract, resolve_effective_source,
+    resolve_notify_target,
 };
 use reading_steiner::db::Db;
 use reading_steiner::differ;
@@ -344,6 +345,7 @@ fn test_pending_notifications_respects_retry_backoff() {
         id: 0,
         event_id: 1,
         chat_id: "c".into(),
+        target_json: "".into(),
         message_ids_json: "[]".into(),
         status: "pending".into(),
         attempts: 0,
@@ -355,6 +357,7 @@ fn test_pending_notifications_respects_retry_backoff() {
         id: 0,
         event_id: 2,
         chat_id: "c".into(),
+        target_json: "".into(),
         message_ids_json: "[]".into(),
         status: "pending".into(),
         attempts: 1,
@@ -366,6 +369,7 @@ fn test_pending_notifications_respects_retry_backoff() {
         id: 0,
         event_id: 3,
         chat_id: "c".into(),
+        target_json: "".into(),
         message_ids_json: "[]".into(),
         status: "pending".into(),
         attempts: 2,
@@ -601,50 +605,38 @@ fn test_resolve_effective_source_with_groups() {
         ..SourceConfig::default()
     };
 
-    // 未配置分组时，使用自身设置。
+    // 未配置分组时，使用自身设置与全局历史保留。
     let tags = vec![];
     assert_eq!(
         resolve_effective_source(&source, &tags, 100),
         (true, true, 100)
     );
 
-    // 分组开启监控/通知，继承分组设置。
+    // 分组配置历史保留条数，则历史取分组值；开关不受分组影响。
     let group_tags = vec![TagConfig {
         name: "news".into(),
-        enabled: true,
-        notify_enabled: true,
         history_limit: 50,
+        extract: None,
+        notify_url: String::new(),
     }];
     assert_eq!(
         resolve_effective_source(&source, &group_tags, 100),
         (true, true, 50)
     );
 
-    // 分组关闭监控，则源被暂停监控。
-    let group_tags_off = vec![TagConfig {
+    // 分组历史保留为 0（不限制）时使用全局。
+    let group_tags_zero = vec![TagConfig {
         name: "news".into(),
-        enabled: false,
-        notify_enabled: true,
         history_limit: 0,
+        extract: None,
+        notify_url: String::new(),
     }];
     assert_eq!(
-        resolve_effective_source(&source, &group_tags_off, 100),
-        (false, true, 100)
+        resolve_effective_source(&source, &group_tags_zero, 100),
+        (true, true, 100)
     );
 
-    // 分组关闭通知。
-    let group_tags_notify_off = vec![TagConfig {
-        name: "news".into(),
-        enabled: true,
-        notify_enabled: false,
-        history_limit: 0,
-    }];
-    assert_eq!(
-        resolve_effective_source(&source, &group_tags_notify_off, 100),
-        (true, false, 100)
-    );
-
-    // 关闭“跟随分组”后使用自身设置（自覆盖）。
+    // 关闭“跟随分组”后历史使用全局设置。
     source.follow_group = false;
     assert_eq!(
         resolve_effective_source(&source, &group_tags, 100),
@@ -652,26 +644,25 @@ fn test_resolve_effective_source_with_groups() {
     );
     source.follow_group = true;
 
-    // 多个分组取保守策略：任一分组关闭则关闭，历史取最小值。
+    // 多个分组取历史最小值（最严格的保留策略）。
     source.tags = vec!["news".into(), "alert".into()];
     let multi = vec![
         TagConfig {
             name: "news".into(),
-            enabled: true,
-            notify_enabled: true,
             history_limit: 50,
+            extract: None,
+            notify_url: String::new(),
         },
         TagConfig {
             name: "alert".into(),
-            enabled: false,
-            notify_enabled: false,
             history_limit: 20,
+            extract: None,
+            notify_url: String::new(),
         },
     ];
-    assert_eq!(resolve_effective_source(&source, &multi, 100), (false, false, 20));
+    assert_eq!(resolve_effective_source(&source, &multi, 100), (true, true, 20));
 
-    // 源自身关闭时即使分组开启也应保持关闭（源自身开关是总开关）。
-    source.tags = vec!["news".into()];
+    // 开关始终由监控源自身控制，不受分组影响。
     let mut src_off = source.clone();
     src_off.enabled = false;
     src_off.notify_enabled = false;
@@ -679,6 +670,117 @@ fn test_resolve_effective_source_with_groups() {
         resolve_effective_source(&src_off, &group_tags, 100),
         (false, false, 50)
     );
+}
+
+#[test]
+fn test_parse_telegram_url() {
+    // 单 chat id。
+    let t = parse_telegram_url("tgram://123:ABC/1000").unwrap();
+    assert_eq!(t.token, "123:ABC");
+    assert_eq!(t.chat_ids, vec!["1000".to_string()]);
+
+    // 多 chat id。
+    let t = parse_telegram_url("tgram://123:ABC/1000/2000/3000").unwrap();
+    assert_eq!(t.token, "123:ABC");
+    assert_eq!(t.chat_ids, vec!["1000".to_string(), "2000".to_string(), "3000".to_string()]);
+
+    // 非法：非 tgram:// 前缀。
+    assert!(parse_telegram_url("https://api.telegram.org").is_err());
+    // 非法：缺 token。
+    assert!(parse_telegram_url("tgram:///1000").is_err());
+    // 非法：缺 chat id。
+    assert!(parse_telegram_url("tgram://123:ABC").is_err());
+}
+
+#[test]
+fn test_resolve_notify_target() {
+    let source = SourceConfig {
+        tags: vec!["news".into()],
+        ..SourceConfig::default()
+    };
+
+    // 分组未配置通知 URL 时回退到全局。
+    let tags = vec![TagConfig {
+        name: "news".into(),
+        history_limit: 0,
+        extract: None,
+        notify_url: String::new(),
+    }];
+    let t = resolve_notify_target(&source, &tags, "tgram://G/C9").unwrap();
+    assert_eq!(t.token, "G");
+    assert_eq!(t.chat_ids, vec!["C9".to_string()]);
+
+    // 分组配置了通知 URL 时优先使用分组的。
+    let tags = vec![TagConfig {
+        name: "news".into(),
+        history_limit: 0,
+        extract: None,
+        notify_url: "tgram://P/1/2".into(),
+    }];
+    let t = resolve_notify_target(&source, &tags, "tgram://G/C9").unwrap();
+    assert_eq!(t.token, "P");
+    assert_eq!(t.chat_ids, vec!["1".to_string(), "2".to_string()]);
+
+    // 关闭跟随分组时用全局。
+    let mut src_no_follow = source.clone();
+    src_no_follow.follow_group = false;
+    let t = resolve_notify_target(&src_no_follow, &tags, "tgram://G/C9").unwrap();
+    assert_eq!(t.token, "G");
+
+    // 分组与全局均未配置时返回 None。
+    let no_url_tags = vec![TagConfig {
+        name: "news".into(),
+        history_limit: 0,
+        extract: None,
+        notify_url: String::new(),
+    }];
+    assert!(resolve_notify_target(&source, &no_url_tags, "").is_none());
+}
+
+#[test]
+fn test_resolve_effective_extract() {
+    let source = SourceConfig {
+        tags: vec!["news".into()],
+        extract: ExtractConfig::Text { images: None },
+        ..SourceConfig::default()
+    };
+
+    // 分组未配置提取时使用源自身。
+    let tags = vec![TagConfig {
+        name: "news".into(),
+        history_limit: 0,
+        extract: None,
+        notify_url: String::new(),
+    }];
+    assert!(matches!(
+        resolve_effective_extract(&source, &tags),
+        ExtractConfig::Text { .. }
+    ));
+
+    // 分组配置了提取时，源「跟随分组」则用分组的提取。
+    let tags = vec![TagConfig {
+        name: "news".into(),
+        history_limit: 0,
+        extract: Some(ExtractConfig::Items {
+            selector: ItemSelector::Css { selector: ".item".into() },
+            fields: vec![],
+            dedupe_key: None,
+            images: None,
+        }),
+        notify_url: String::new(),
+    }];
+    assert!(matches!(
+        resolve_effective_extract(&source, &tags),
+        ExtractConfig::Items { .. }
+    ));
+
+    // 关闭「跟随分组」时使用源自身，即使分组配置了提取。
+    let mut src_no_follow = source.clone();
+    src_no_follow.follow_group = false;
+    assert!(matches!(
+        resolve_effective_extract(&src_no_follow, &tags),
+        ExtractConfig::Text { .. }
+    ));
 }
 
 #[test]
@@ -691,27 +793,26 @@ fn test_tag_db_roundtrip() {
     // 新增。
     let tag = TagConfig {
         name: "news".into(),
-        enabled: true,
-        notify_enabled: false,
         history_limit: 30,
+        extract: None,
+        notify_url: String::new(),
     };
     db.upsert_tag(&tag).unwrap();
     assert_eq!(db.list_tags().unwrap().len(), 1);
     let loaded = db.get_tag("news").unwrap().unwrap();
-    assert_eq!(loaded.notify_enabled, false);
     assert_eq!(loaded.history_limit, 30);
 
     // 更新。
     db.upsert_tag(&TagConfig {
         name: "news".into(),
-        enabled: false,
-        notify_enabled: true,
         history_limit: 0,
+        extract: None,
+        notify_url: "tgram://tok/C1".into(),
     })
     .unwrap();
     let loaded = db.get_tag("news").unwrap().unwrap();
-    assert_eq!(loaded.enabled, false);
     assert_eq!(loaded.history_limit, 0);
+    assert_eq!(loaded.notify_url, "tgram://tok/C1");
 
     // 删除。
     assert_eq!(db.delete_tag("news").unwrap(), 1);
@@ -726,21 +827,18 @@ fn test_ensure_tags_registers_new_tags() {
     assert_eq!(db.list_tags().unwrap().len(), 2);
 
     let news = db.get_tag("news").unwrap().unwrap();
-    assert!(news.enabled);
-    assert!(news.notify_enabled);
     assert_eq!(news.history_limit, 0);
 
     // 更新 news 的分组配置后再次登记，不应覆盖。
     db.upsert_tag(&TagConfig {
         name: "news".into(),
-        enabled: false,
-        notify_enabled: false,
         history_limit: 10,
+        extract: None,
+        notify_url: String::new(),
     })
     .unwrap();
     db.ensure_tags(&["news".into()]).unwrap();
     let news = db.get_tag("news").unwrap().unwrap();
-    assert!(!news.enabled);
     assert_eq!(news.history_limit, 10);
 
     // 空标签 / 空白标签被忽略。
