@@ -460,10 +460,16 @@ pub(crate) async fn handle_request(state: &Arc<AppState>, req: ControlRequest) -
             }
         }
         ControlRequest::GetSettings => {
-            // 全局可编辑设置以 SQLite 为唯一来源；未配置时为默认值。
+            // 全局可编辑设置以 SQLite 为唯一来源，数据库迁移时已 seed 默认值，恒有值。
             let s = {
                 let db = state.db.lock().await;
-                db.get_settings().ok().flatten().unwrap_or_default()
+                match db.get_settings() {
+                    Ok(Some(s)) => s,
+                    Ok(None) => {
+                        return ControlResponse::err("settings not seeded");
+                    }
+                    Err(e) => return ControlResponse::err(e.to_string()),
+                }
             };
             match serde_json::to_value(s) {
                 Ok(v) => ControlResponse::ok(v),

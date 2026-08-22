@@ -235,6 +235,21 @@ impl Db {
             self.conn.pragma_update(None, "user_version", 11)?;
             info!("database schema migrated to v11");
         }
+        // 确保 settings 表存在一条全局默认记录。无论是新建库（v<1 直建表后跳到
+        // SCHEMA_VERSION）还是老库升级，settings 都可能为空；这里用 INSERT OR IGNORE
+        // 统一 seed 一条带合理默认值的 global 记录，`get_settings()` 恒有值，
+        // 运行时不再做「缺失→默认」兜底。
+        self.seed_default_settings()?;
+        Ok(())
+    }
+
+    /// 若 settings 表没有 global 行，写入一条默认设置（`EditableSettings::default()`）。
+    fn seed_default_settings(&self) -> Result<()> {
+        let value = serde_json::to_string(&EditableSettings::default())?;
+        self.conn.execute(
+            "INSERT OR IGNORE INTO settings(key, value) VALUES('global', ?1)",
+            [value],
+        )?;
         Ok(())
     }
 
@@ -492,17 +507,33 @@ impl Db {
     }
 
     /// 读取全局可编辑设置（存于 SQLite `settings` 表）。
-    /// 未配置时返回 `None`（此时使用 config.yaml / 默认值）。
+    /// 未配置时返回 `None`。若 global 存值损坏（无法解析），则用默认值自愈
+    /// 该记录后返回默认值，避免 daemon 因数据损坏而无法启动。
     pub fn get_settings(&self) -> Result<Option<EditableSettings>> {
-        self.conn
+        let row: Option<String> = self
+            .conn
             .query_row(
                 "SELECT value FROM settings WHERE key='global'",
                 [],
                 |r| r.get::<_, String>(0),
             )
-            .optional()
-            .map(|s| s.and_then(|v| serde_json::from_str(&v).ok()))
-            .map_err(Into::into)
+            .optional()?;
+        match row {
+            None => Ok(None),
+            Some(v) => match serde_json::from_str(&v) {
+                Ok(s) => Ok(Some(s)),
+                Err(_) => {
+                    info!("settings 记录损坏，重置为默认值");
+                    let value = serde_json::to_string(&EditableSettings::default())?;
+                    self.conn.execute(
+                        "INSERT INTO settings(key, value) VALUES('global', ?1)\n\
+                         ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                        [value],
+                    )?;
+                    Ok(Some(EditableSettings::default()))
+                }
+            },
+        }
     }
 
     /// 写入全局可编辑设置（存于 SQLite `settings` 表），作为 Web/CLI 改配置的唯一落点。
