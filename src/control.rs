@@ -46,6 +46,16 @@ fn validate_settings(s: &EditableSettings) -> Result<()> {
             s.timezone
         )));
     }
+    // 非空 telegram_url 必须可解析为合法通知目标，避免非法 URL 入库后
+    // 在热更新重建 notifier 时静默失败、把通知功能整体关掉。
+    if !s.telegram_url.trim().is_empty()
+        && crate::config::parse_telegram_url(&s.telegram_url).is_err()
+    {
+        return Err(Error::config(format!(
+            "telegram_url 不是合法的 tgram:// 通知目标: {}",
+            s.telegram_url
+        )));
+    }
     Ok(())
 }
 
