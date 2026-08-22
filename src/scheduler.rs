@@ -141,7 +141,7 @@ pub async fn run_daemon(state: Arc<AppState>) -> Result<()> {
             let mut due: Vec<SourceConfig> = Vec::new();
             let sources = state.sources.lock().await;
             for source in sources.iter() {
-                // 解析分组继承后的生效监控开关（分组关闭或自身关闭则跳过调度）。
+                // 监控开关由监控源自身控制（分组不参与叠加）；关闭则跳过调度。
                 let (enabled, _, _) =
                     crate::config::resolve_effective_source(source, &tags, 0);
                 if !enabled {
@@ -511,8 +511,8 @@ pub async fn check_source(state: &Arc<AppState>, source_id: &str) -> Result<()> 
                 }
             }
         }
-        // 仅当该源开启了通知（解析分组继承后的生效通知开关）且已配置 notifier
-        // 与可用通知目标时才排队发送。
+        // 仅当该源开启了通知（通知开关由监控源自身控制，分组不参与叠加）且已配置
+        // notifier 与可用通知目标时才排队发送。
         // 注意：此处直接复用外层已持有的 `db`，避免对 `tokio::sync::Mutex` 二次加锁导致死锁。
         let (_, effective_notify, _) = {
             let tags = db.list_tags().unwrap_or_default();
