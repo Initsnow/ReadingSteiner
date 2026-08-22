@@ -460,13 +460,10 @@ pub(crate) async fn handle_request(state: &Arc<AppState>, req: ControlRequest) -
             }
         }
         ControlRequest::GetSettings => {
-            // 全局可编辑设置以 SQLite 为准；未配置时回退到 config.yaml / 默认值。
+            // 全局可编辑设置以 SQLite 为唯一来源；未配置时为默认值。
             let s = {
                 let db = state.db.lock().await;
-                match db.get_settings() {
-                    Ok(Some(settings)) => settings,
-                    _ => EditableSettings::from_config(&state.cfg),
-                }
+                db.get_settings().ok().flatten().unwrap_or_default()
             };
             match serde_json::to_value(s) {
                 Ok(v) => ControlResponse::ok(v),
@@ -663,7 +660,7 @@ async fn preview_url(state: &Arc<AppState>, url: &str, engine: &str) -> Result<S
     let fetcher = create_fetcher(
         engine,
         &state.cfg,
-        Some(&state.settings.read().unwrap().clone()),
+        &state.settings.read().unwrap().clone(),
     )?;
     let doc = fetcher
         .fetch(&FetchSpec {

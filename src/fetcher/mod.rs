@@ -28,22 +28,24 @@ pub fn engine_name(fetch: &FetchConfig) -> &str {
     }
 }
 
-/// 创建抓取器。`settings` 提供可热更新的 UA / 超时覆盖（优先级高于 config.yaml），
-/// 为 None 时回退到 `cfg.daemon` 的启动值。
+/// 创建抓取器。UA / 超时取自 SQLite 设置（`settings`），配置不再从 config.yaml 读取。
 pub fn create_fetcher(
     engine: &str,
     cfg: &crate::config::Config,
-    settings: Option<&crate::config::EditableSettings>,
+    settings: &crate::config::EditableSettings,
 ) -> Result<Box<dyn Fetcher>> {
     match engine {
-        "http" => Ok(Box::new(http::HttpFetcher::new(
-            &settings
-                .map(|s| s.default_user_agent.as_str())
-                .filter(|ua| !ua.trim().is_empty())
-                .map(str::to_string)
-                .unwrap_or_else(|| cfg.daemon.effective_user_agent()),
-            settings.map(|s| s.default_timeout_secs).unwrap_or(cfg.daemon.default_timeout_secs),
-        )?)),
+        "http" => {
+            let user_agent = if settings.default_user_agent.trim().is_empty() {
+                format!("ReadingSteiner/{}", env!("CARGO_PKG_VERSION"))
+            } else {
+                settings.default_user_agent.clone()
+            };
+            Ok(Box::new(http::HttpFetcher::new(
+                &user_agent,
+                settings.default_timeout_secs,
+            )?))
+        }
         "camofox" => {
             if !cfg.camofox.enabled {
                 return Err(crate::error::Error::config(

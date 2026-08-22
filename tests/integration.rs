@@ -121,7 +121,9 @@ async fn test_http_fetcher_and_pipeline() {
         .await;
 
     let cfg = Config::default();
-    let fetcher = reading_steiner::fetcher::create_fetcher("http", &cfg, None).unwrap();
+    let fetcher =
+        reading_steiner::fetcher::create_fetcher("http", &cfg, &EditableSettings::default())
+            .unwrap();
     let doc = fetcher
         .fetch(&FetchSpec {
             fetch: FetchConfig {
@@ -233,7 +235,9 @@ async fn test_camofox_contract_with_mock() {
         camofox: camofox.clone(),
         ..Config::default()
     };
-    let fetcher = reading_steiner::fetcher::create_fetcher("camofox", &cfg, None).unwrap();
+    let fetcher =
+        reading_steiner::fetcher::create_fetcher("camofox", &cfg, &EditableSettings::default())
+            .unwrap();
     let doc = fetcher
         .fetch(&FetchSpec {
             fetch: FetchConfig {

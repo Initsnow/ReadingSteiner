@@ -75,73 +75,24 @@ impl WebConfig {
     }
 }
 
+/// `config.yaml` 的 `daemon` 段：只保留启动所需的引导项。
+/// 可编辑的运行参数（并发、队列、超时、cron、UA、历史保留、失败阈值、时区）
+/// 已迁移到 SQLite `settings` 表，见 [`EditableSettings`]。
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(default)]
 pub struct DaemonConfig {
     pub socket_path: PathBuf,
-    pub concurrency: usize,
-    pub queue_capacity: usize,
     pub log_level: String,
-    /// 全局默认请求超时秒数（单个监控源可覆盖，见 FetchConfig::timeout_secs）。
-    pub default_timeout_secs: u64,
-    /// 全局默认 cron 表达式（单个监控源可覆盖，见 ScheduleConfig::cron）。
-    /// 留空时回退到每小时（`0 * * * *`）。
-    pub default_cron: String,
-    /// 全局默认 User-Agent（HTTP 抓取与图片下载使用）。
-    pub default_user_agent: String,
-    /// 每个监控源最多保留的历史变更事件条数（超出部分自动清理，0 表示不限制）。
-    pub history_limit_per_source: usize,
-    /// 连续失败达到多少次后发送一条 Telegram 失败通知（0 表示禁用）。
-    pub failure_notify_threshold: u32,
-    /// 监控检查调度器使用的时区（IANA 名称，如 Asia/Shanghai、UTC）。
-    /// 影响基于本地时间的显示与告警时间戳；调度仍以 UTC 内部计算，仅做展示/告警换算。
-    pub timezone: String,
 }
 
-impl DaemonConfig {
-    pub fn effective_timeout(&self, per_source: u64) -> u64 {
-        if per_source > 0 {
-            per_source
-        } else if self.default_timeout_secs > 0 {
-            self.default_timeout_secs
-        } else {
-            30
-        }
-    }
-
-    /// 全局默认 cron 表达式。单个监控源未配置 cron 时使用该值；
-    /// 留空时回退到每小时（`0 * * * *`）。
-    pub fn effective_cron(&self) -> String {
-        if self.default_cron.trim().is_empty() {
-            "0 * * * *".to_string()
-        } else {
-            self.default_cron.trim().to_string()
-        }
-    }
-
-    pub fn effective_user_agent(&self) -> String {
-        if self.default_user_agent.trim().is_empty() {
-            format!("ReadingSteiner/{}", env!("CARGO_PKG_VERSION"))
-        } else {
-            self.default_user_agent.clone()
-        }
-    }
-
-    /// 全局默认随机抖动（秒），0 时回退到 60s。
-    pub fn effective_timezone(&self) -> String {
-        if self.timezone.trim().is_empty() {
-            system_local_timezone()
-        } else {
-            self.timezone.trim().to_string()
-        }
-    }
-}
-
+/// Telegram 通知器运行配置。`config.yaml` 的 `telegram` 段只提供启动引导项
+/// （`api_base` 等）；可编辑项 `url` / `max_images_per_event` / `template`
+/// 已迁移到 SQLite `settings` 表，通过 [`EditableSettings`] 覆盖注入。
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(default)]
 pub struct TelegramConfig {
     /// 全局通知目标，格式：`tgram://bottoken/ChatID1/ChatID2`。
-    /// 编码了 bot token 与一个或多个 chat id。
+    /// 编码了 bot token 与一个或多个 chat id。通常由 SQLite 设置注入。
     pub url: String,
     pub api_base: String,
     pub max_images_per_event: usize,
@@ -162,16 +113,14 @@ impl TelegramConfig {
         }
     }
 
-    /// 基于基础配置生成一份用可编辑设置覆盖的通知配置（url / 模板 / 图片数），
-    /// 用于热更新 notifier 时保留 api_base 等启动项。
-    pub fn with_overrides(&self, settings: &EditableSettings) -> Option<Self> {
+    /// 以 SQLite 设置覆盖 `url` / `template` / `max_images_per_event`，
+    /// 保留 `api_base` 等启动项。这是设置进入 notifier 的唯一入口。
+    pub fn with_overrides(&self, settings: &EditableSettings) -> Self {
         let mut c = self.clone();
-        if !settings.telegram_url.trim().is_empty() {
-            c.url = settings.telegram_url.clone();
-        }
+        c.url = settings.telegram_url.clone();
         c.template = settings.template.clone();
         c.max_images_per_event = settings.max_images_per_event;
-        Some(c)
+        c
     }
 }
 
@@ -182,7 +131,8 @@ pub const DEFAULT_EVENT_TEMPLATE: &str = r#"<b>ReadingSteiner</b> — {label}
 {summary}
 {items}"#;
 
-/// 通过 Web/CLI 可编辑的全局设置视图。对应 config.yaml 的 daemon / telegram 段。
+/// 全局可编辑设置，存于 SQLite `settings` 表，是这些运行参数的唯一来源。
+/// 通过 Web 控制台「设置」页或 CLI 读写；不再与 config.yaml 双向绑定。
 /// 通知目标以 tgram:// url 形式管理，不在此暴露 token 明文。
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(default)]
@@ -209,39 +159,6 @@ pub struct EditableSettings {
     pub telegram_url: String,
     /// 单事件最多附带图片数。
     pub max_images_per_event: usize,
-}
-
-impl EditableSettings {
-    pub fn from_config(cfg: &Config) -> Self {
-        Self {
-            concurrency: cfg.daemon.concurrency,
-            queue_capacity: cfg.daemon.queue_capacity,
-            default_timeout_secs: cfg.daemon.default_timeout_secs,
-            default_cron: cfg.daemon.default_cron.clone(),
-            default_user_agent: cfg.daemon.default_user_agent.clone(),
-            history_limit_per_source: cfg.daemon.history_limit_per_source,
-            failure_notify_threshold: cfg.daemon.failure_notify_threshold,
-            timezone: cfg.daemon.timezone.clone(),
-            template: cfg.telegram.template.clone(),
-            telegram_url: cfg.telegram.url.clone(),
-            max_images_per_event: cfg.telegram.max_images_per_event,
-        }
-    }
-
-    /// 把可编辑设置写回 config（会合并 token 等未编辑字段）。
-    pub fn apply_to(&self, cfg: &mut Config) {
-        cfg.daemon.concurrency = self.concurrency;
-        cfg.daemon.queue_capacity = self.queue_capacity;
-        cfg.daemon.default_timeout_secs = self.default_timeout_secs;
-        cfg.daemon.default_cron = self.default_cron.clone();
-        cfg.daemon.default_user_agent = self.default_user_agent.clone();
-        cfg.daemon.history_limit_per_source = self.history_limit_per_source;
-        cfg.daemon.failure_notify_threshold = self.failure_notify_threshold;
-        cfg.daemon.timezone = self.timezone.clone();
-        cfg.telegram.template = self.template.clone();
-        cfg.telegram.url = self.telegram_url.clone();
-        cfg.telegram.max_images_per_event = self.max_images_per_event;
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -630,28 +547,46 @@ pub struct RuntimeConfig {
 }
 
 impl RuntimeConfig {
-    pub fn from_config(cfg: &Config) -> Self {
+    /// 由启动配置（boot）+ SQLite 设置（settings）合成运行时配置。
+    /// settings 是这些运行参数的唯一来源，缺失时使用默认值（0 → 内置默认）。
+    pub fn from_parts(cfg: &Config, settings: &EditableSettings) -> Self {
         Self {
             state_dir: cfg.state_dir.clone(),
             media_dir: cfg.media_dir.clone(),
             socket_path: cfg.socket_path(),
-            concurrency: if cfg.daemon.concurrency == 0 {
+            concurrency: if settings.concurrency == 0 {
                 16
             } else {
-                cfg.daemon.concurrency
+                settings.concurrency
             },
-            queue_capacity: if cfg.daemon.queue_capacity == 0 {
+            queue_capacity: if settings.queue_capacity == 0 {
                 1024
             } else {
-                cfg.daemon.queue_capacity
+                settings.queue_capacity
             },
-            default_timeout_secs: cfg.daemon.default_timeout_secs,
-            default_cron: cfg.daemon.effective_cron(),
-            default_user_agent: cfg.daemon.effective_user_agent(),
-            history_limit_per_source: cfg.daemon.history_limit_per_source,
-            failure_notify_threshold: cfg.daemon.failure_notify_threshold,
-            timezone: cfg.daemon.effective_timezone(),
-            template: cfg.telegram.event_template(),
+            default_timeout_secs: settings.default_timeout_secs,
+            default_cron: if settings.default_cron.trim().is_empty() {
+                "0 * * * *".to_string()
+            } else {
+                settings.default_cron.trim().to_string()
+            },
+            default_user_agent: if settings.default_user_agent.trim().is_empty() {
+                format!("ReadingSteiner/{}", env!("CARGO_PKG_VERSION"))
+            } else {
+                settings.default_user_agent.clone()
+            },
+            history_limit_per_source: settings.history_limit_per_source,
+            failure_notify_threshold: settings.failure_notify_threshold,
+            timezone: if settings.timezone.trim().is_empty() {
+                system_local_timezone()
+            } else {
+                settings.timezone.trim().to_string()
+            },
+            template: if settings.template.trim().is_empty() {
+                DEFAULT_EVENT_TEMPLATE.to_string()
+            } else {
+                settings.template.clone()
+            },
         }
     }
 }

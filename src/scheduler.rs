@@ -53,20 +53,16 @@ impl AppState {
     }
 
     pub fn with_config_path(cfg: Config, config_path: Option<PathBuf>) -> Result<Self> {
-        // 全局可编辑设置存于 SQLite，是配置的唯一来源；config.yaml 只保留启动所需的基础项。
-        // 先算基础 runtime（用于定位 DB），再打开 DB 读取设置并覆盖到 cfg，最后重建 runtime。
-        let base_runtime = RuntimeConfig::from_config(&cfg);
-        std::fs::create_dir_all(&base_runtime.state_dir)?;
-        let db_path = base_runtime.state_dir.join("reading-steiner.db");
+        // SQLite 是运行参数的唯一来源：config.yaml 只提供启动引导项（目录、socket、camofox、
+        // telegram api_base 等），可编辑设置从 SQLite `settings` 表读取，缺失时用默认值。
+        std::fs::create_dir_all(&cfg.state_dir)?;
+        let db_path = cfg.state_dir.join("reading-steiner.db");
         let db = Db::open(db_path)?;
-        // 将 SQLite 中的全局设置覆盖到 cfg（daemon / telegram 段），实现 SQLite 优先。
-        let mut cfg = cfg;
-        if let Ok(Some(settings)) = db.get_settings() {
-            settings.apply_to(&mut cfg);
-        }
-        let runtime = RuntimeConfig::from_config(&cfg);
-        let settings = EditableSettings::from_config(&cfg);
-        let notifier = match TelegramNotifier::new(&cfg.telegram, &runtime.timezone) {
+        let settings = db.get_settings()?.unwrap_or_default();
+        let runtime = RuntimeConfig::from_parts(&cfg, &settings);
+        // notifier 的 url / 模板 / 图片数以 SQLite 设置为准，api_base 等取自启动项。
+        let telegram = cfg.telegram.clone().with_overrides(&settings);
+        let notifier = match TelegramNotifier::new(&telegram, &runtime.timezone) {
             Ok(n) => Some(Arc::new(n)),
             Err(e) => {
                 warn!(error = %e, "telegram notifier disabled");
@@ -136,29 +132,18 @@ impl AppState {
         }
         // 重建 notifier：url / 模板 / 图片数 / 时区变更即时生效。
         // 重建失败时保留旧 notifier，避免通知功能被非法配置整体关闭。
-        let new_notifier = self
-            .cfg
-            .telegram
-            .clone()
-            .with_overrides(settings)
-            .map(|telegram| {
-                TelegramNotifier::new(&telegram, &self.runtime.read().unwrap().timezone)
-            })
-            .transpose();
+        let new_notifier = TelegramNotifier::new(
+            &self.cfg.telegram.clone().with_overrides(settings),
+            &self.runtime.read().unwrap().timezone,
+        );
         match new_notifier {
-            Ok(Some(n)) => {
+            Ok(n) => {
                 let mut guard = self.notifier.write().unwrap();
                 *guard = Some(Arc::new(n));
                 info!("global settings hot-reloaded (notifier rebuilt)");
             }
-            Ok(None) => {
-                // 未配置任何通知目标（url 为空），置空 notifier。
-                let mut guard = self.notifier.write().unwrap();
-                *guard = None;
-                info!("global settings hot-reloaded (notifier disabled)");
-            }
             Err(e) => {
-                // 重建失败：保留旧 notifier，避免通知被静默关闭。
+                // 重建失败（如通知目标 url 为空或非法）：保留旧 notifier，避免通知被静默关闭。
                 warn!(error = %e, "notifier hot-reload failed, keeping previous notifier");
             }
         }
@@ -376,7 +361,7 @@ pub async fn check_source(state: &Arc<AppState>, source_id: &str) -> Result<()> 
     let fetcher = fetcher::create_fetcher(
         &source.fetch.engine,
         &state.cfg,
-        Some(&state.settings.read().unwrap().clone()),
+        &state.settings.read().unwrap().clone(),
     )?;
     let spec = FetchSpec {
         fetch: source.fetch.clone(),
@@ -864,7 +849,7 @@ fn next_schedule(
 
     // —— cron 表达式驱动：按表达式精确调度。 ——
     // 监控源未配置 cron 时使用全局默认 cron（default_cron）；
-    // default_cron 也为空时回退到每小时（与 effective_cron() 保持一致）。
+    // default_cron 也为空时回退到每小时（与 RuntimeConfig 的默认一致）。
     let expr = source
         .schedule
         .cron
@@ -933,7 +918,7 @@ pub async fn test_source(state: &Arc<AppState>, source: &SourceConfig) -> Result
     let fetcher = fetcher::create_fetcher(
         &source.fetch.engine,
         &state.cfg,
-        Some(&state.settings.read().unwrap().clone()),
+        &state.settings.read().unwrap().clone(),
     )?;
     let spec = FetchSpec {
         fetch: source.fetch.clone(),
