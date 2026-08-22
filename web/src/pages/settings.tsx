@@ -10,6 +10,8 @@ import {
   Clock,
   Server,
   Boxes,
+  Plus,
+  Hash,
 } from "lucide-react"
 import { api, type EditableSettings, type TagConfig } from "@/lib/api"
 import { validateCron } from "@/lib/utils"
@@ -20,6 +22,9 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card"
+import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs"
+import { Badge } from "@/components/ui/badge"
+import { Separator } from "@/components/ui/separator"
 
 const inputCls =
   "w-full rounded-md border border-input bg-background px-3 py-1.5 text-sm shadow-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
@@ -487,22 +492,66 @@ export function SettingsPage() {
               }}
             />
             <Button size="sm" disabled={tagSaving} onClick={handleAddTag}>
-              新建分组
+              <Plus className="h-3.5 w-3.5" /> 新建
             </Button>
           </div>
+
           {tags.length === 0 ? (
             <p className="text-sm text-muted-foreground">
               暂无分组。可在监控源的“标签”字段中填写标签，然后回来为对应分组配置历史保留 / 默认提取 / 通知目标。
             </p>
           ) : (
-            <div className="grid gap-3 md:grid-cols-2">
+            <Tabs defaultValue={tags[0].name}>
+              <div className="overflow-x-auto pb-1">
+                <TabsList className="h-auto flex-wrap gap-1">
+                  {tags.map((tag) => {
+                    const hasCustom =
+                      tag.history_limit > 0 ||
+                      !!tag.notify_url ||
+                      !!tag.extract
+                    return (
+                      <TabsTrigger
+                        key={tag.name}
+                        value={tag.name}
+                        className="flex items-center gap-1.5 data-[state=active]:bg-primary data-[state=active]:text-primary-foreground"
+                      >
+                        <Hash className="h-3.5 w-3.5 opacity-70" />
+                        {tag.name}
+                        {hasCustom && (
+                          <span className="ml-0.5 h-1.5 w-1.5 rounded-full bg-emerald-500" />
+                        )}
+                      </TabsTrigger>
+                    )
+                  })}
+                </TabsList>
+              </div>
+
+              <Separator className="my-3" />
+
               {tags.map((tag) => (
-                <div
+                <TabsContent
                   key={tag.name}
-                  className="rounded-lg border p-4"
+                  value={tag.name}
+                  className="mt-0"
                 >
                   <div className="mb-3 flex items-center justify-between">
-                    <span className="font-medium">{tag.name}</span>
+                    <div className="flex items-center gap-2">
+                      <span className="font-medium">{tag.name}</span>
+                      {tag.history_limit > 0 && (
+                        <Badge variant="secondary">历史保留</Badge>
+                      )}
+                      {!!tag.notify_url && (
+                        <Badge variant="secondary">独立通知</Badge>
+                      )}
+                      {!!tag.extract && (
+                        <Badge variant="secondary">内容提取</Badge>
+                      )}
+                      {!(tag.history_limit > 0) && !tag.notify_url && !tag.extract && (
+                        <span className="text-xs text-muted-foreground">
+                          全部沿用全局设置
+                        </span>
+                      )}
+                    </div>
                     <div className="flex items-center gap-1">
                       <Button
                         size="sm"
@@ -523,7 +572,8 @@ export function SettingsPage() {
                       </Button>
                     </div>
                   </div>
-                  <div className="space-y-3">
+
+                  <div className="grid max-w-3xl gap-4 md:grid-cols-2">
                     <Field label="每个源保留历史条数" hint="0 表示不限制，使用全局设置">
                       <input
                         type="number"
@@ -548,7 +598,11 @@ export function SettingsPage() {
                         }
                       />
                     </Field>
-                    <Field label="默认内容提取" hint="分组下的监控源开启「跟随分组」时沿用">
+                    <Field
+                      label="默认内容提取"
+                      hint="分组下的监控源开启「跟随分组」时沿用"
+                      className="md:col-span-2"
+                    >
                       <div className="space-y-2">
                         <select
                           className={inputCls}
@@ -604,9 +658,9 @@ export function SettingsPage() {
                       </div>
                     </Field>
                   </div>
-                </div>
+                </TabsContent>
               ))}
-            </div>
+            </Tabs>
           )}
         </CardContent>
       </Card>
