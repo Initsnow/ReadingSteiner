@@ -428,6 +428,23 @@ impl Db {
             .execute("DELETE FROM tags WHERE name=?1", [name])?)
     }
 
+    /// 确保给定标签名以默认值存在于 tags 表中（缺失则插入，已存在保持不变）。
+    /// 用于在监控源保存标签时自动登记分组，使新标签能出现在「分组管理」列表供配置。
+    pub fn ensure_tags(&self, names: &[String]) -> Result<()> {
+        for name in names {
+            let trimmed = name.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            self.conn.execute(
+                "INSERT OR IGNORE INTO tags(name, enabled, notify_enabled, history_limit) \
+                 VALUES (?1, 1, 1, 0)",
+                [trimmed],
+            )?;
+        }
+        Ok(())
+    }
+
     /// 统计指定监控源未读变更事件数。
     pub fn unread_count(&self, source_id: &str) -> Result<u32> {
         let n: i64 = self.conn.query_row(
