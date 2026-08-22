@@ -26,7 +26,7 @@ use crate::pipeline;
 
 pub struct AppState {
     pub cfg: Config,
-    /// 可热更新的运行时设置（并发/队列容量之外的字段在保存后即时刷新，详见
+    /// 可热更新的运行时设置（全部字段在保存后即时刷新，详见
     /// `reload_settings`）。线程安全地供 daemon 循环每轮重新读取。
     pub runtime: Arc<RwLock<RuntimeConfig>>,
     /// 全局可编辑设置的内存视图，作为热更新 / 校验的单一来源；启动时从 SQLite 装载，
@@ -109,18 +109,18 @@ impl AppState {
         }
     }
 
-    /// 设置保存后调用：把新设置写入内存视图，并按「生效档位」刷新 runtime / notifier。
+    /// 设置保存后调用：把新设置写入内存视图，并全部热更新到 runtime / notifier。
     ///
-    /// - 即时生效：`telegram_url`、`template`、`max_images_per_event`、
-    ///   `failure_notify_threshold`、`history_limit_per_source`
-    /// - 下次任务生效：`timezone`、`default_cron`、`default_user_agent`、`default_timeout_secs`
-    /// - 需重启：`concurrency`、`queue_capacity`（线程池 / 队列容量启动时一次性分配）
+    /// 并发数由 daemon 调度循环在每轮按 runtime.concurrency 动态调整信号量；
+    /// 队列容量在每轮入队时读取，因此同样即时生效。
     pub fn reload_settings(&self, settings: &EditableSettings) {
         // 更新内存设置视图（fetcher 的 UA / 超时从这里读）。
         *self.settings.write().unwrap() = settings.clone();
-        // 刷新 runtime 中可热更新的字段（保持并发 / 队列容量不变，需重启）。
+        // 刷新 runtime 中全部可热更新字段（含并发数 / 队列容量）。
         {
             let mut rt = self.runtime.write().unwrap();
+            rt.concurrency = settings.concurrency.max(1);
+            rt.queue_capacity = settings.queue_capacity.max(1);
             rt.failure_notify_threshold = settings.failure_notify_threshold;
             rt.history_limit_per_source = settings.history_limit_per_source;
             rt.timezone = if settings.timezone.trim().is_empty() {
@@ -181,12 +181,35 @@ pub async fn run_daemon(state: Arc<AppState>) -> Result<()> {
 
     let concurrency = state.runtime.read().unwrap().concurrency.max(1);
     let semaphore = Arc::new(Semaphore::new(concurrency));
+    // 记录当前信号量的并发许可数，用于在每轮动态增减（实现并发数热更新）。
+    let mut last_concurrency = concurrency;
 
     loop {
         if !state.running.load(Ordering::Relaxed) {
             break;
         }
         *state.last_tick_at.lock().await = Some(Utc::now());
+
+        // 并发数热更新：按 runtime 最新值动态调整信号量许可数。
+        let target_concurrency = state.runtime.read().unwrap().concurrency.max(1);
+        if target_concurrency != last_concurrency {
+            let old_concurrency = last_concurrency;
+            if target_concurrency > last_concurrency {
+                semaphore.add_permits(target_concurrency - last_concurrency);
+                last_concurrency = target_concurrency;
+            } else {
+                // forget_permits 可能因当前持有许可的任务而未完全减少，
+                // 用返回值修正 last_concurrency，以便后续循环继续收敛。
+                let reduced = semaphore.forget_permits(last_concurrency - target_concurrency);
+                last_concurrency -= reduced;
+            }
+            info!(
+                old = old_concurrency,
+                new = last_concurrency,
+                target = target_concurrency,
+                "concurrency hot-reloaded"
+            );
+        }
 
         let due = {
             let db = state.db.lock().await;

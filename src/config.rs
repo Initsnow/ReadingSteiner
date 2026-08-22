@@ -131,6 +131,10 @@ pub const DEFAULT_EVENT_TEMPLATE: &str = r#"<b>ReadingSteiner</b> — {label}
 {summary}
 {items}"#;
 
+/// 默认 User-Agent：模拟 Chrome/Edge 浏览器，避免被站点按 UA 拦截。
+pub const DEFAULT_USER_AGENT: &str =
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36 Edg/151.0.0.0";
+
 /// 全局可编辑设置，存于 SQLite `settings` 表，是这些运行参数的唯一来源。
 /// 通过 Web 控制台「设置」页或 CLI 读写；不再与 config.yaml 双向绑定。
 /// 通知目标以 tgram:// url 形式管理，不在此暴露 token 明文。
@@ -571,7 +575,7 @@ impl RuntimeConfig {
                 settings.default_cron.trim().to_string()
             },
             default_user_agent: if settings.default_user_agent.trim().is_empty() {
-                format!("ReadingSteiner/{}", env!("CARGO_PKG_VERSION"))
+                DEFAULT_USER_AGENT.to_string()
             } else {
                 settings.default_user_agent.clone()
             },
