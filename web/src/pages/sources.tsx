@@ -36,6 +36,7 @@ interface FormState {
   name: string
   enabled: boolean
   notify_enabled: boolean
+  follow_group: boolean
   url: string
   engine: string
   method: string
@@ -61,6 +62,7 @@ function emptyForm(): FormState {
     name: "",
     enabled: true,
     notify_enabled: true,
+    follow_group: true,
     url: "",
     engine: "http",
     method: "GET",
@@ -118,6 +120,7 @@ function sourceToForm(s: SourceConfig): FormState {
     name: s.name,
     enabled: s.enabled,
     notify_enabled: s.notify_enabled ?? true,
+    follow_group: s.follow_group ?? true,
     url: s.fetch.url,
     engine: s.fetch.engine,
     method: s.fetch.method,
@@ -168,6 +171,7 @@ function formToSource(f: FormState, existing?: SourceConfig): SourceConfig {
     name: f.name.trim(),
     enabled: f.enabled,
     notify_enabled: f.notify_enabled,
+    follow_group: f.follow_group,
     tags: f.tags
       .split(",")
       .map((t) => t.trim())
@@ -489,6 +493,16 @@ export function SourcesPage() {
       else next.add(id)
       return next
     })
+    // 展开变更历史时自动把该监控源的未读变更标记为已读。
+    const wasExpanded = expanded.has(id)
+    if (!wasExpanded) {
+      try {
+        await api.markSourceRead(id)
+      } catch {
+        // 标记已读失败不阻塞历史展开
+      }
+      await load()
+    }
     if (!historyMap[id]) {
       setHistoryLoading((prev) => new Set(prev).add(id))
       try {
@@ -935,6 +949,26 @@ export function SourcesPage() {
                     }
                   />
                   <span>启用通知</span>
+                </label>
+              </div>
+
+              <div className="col-span-2 flex items-center justify-between rounded-md border bg-muted/30 p-3">
+                <div className="text-sm">
+                  <div className="font-medium">跟随分组设置</div>
+                  <div className="mt-0.5 text-xs text-muted-foreground">
+                    开启后，该监控源继承所属分组的监控 / 通知 / 历史保留设置；关闭后使用上面自身的开关（自覆盖）。
+                  </div>
+                </div>
+                <label className="flex cursor-pointer items-center gap-2 text-sm">
+                  <input
+                    type="checkbox"
+                    className="h-4 w-4 accent-primary"
+                    checked={form.follow_group}
+                    onChange={(e) =>
+                      setForm({ ...form, follow_group: e.target.checked })
+                    }
+                  />
+                  <span>跟随分组</span>
                 </label>
               </div>
 

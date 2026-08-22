@@ -15,6 +15,8 @@ export interface SourceConfig {
   enabled: boolean
   /** 是否发送变更通知。false 时仍正常监控检测，但变更不推送 Telegram 通知。 */
   notify_enabled: boolean
+  /** 是否跟随所属分组（标签）的设置；false 时使用自身开关（自覆盖）。 */
+  follow_group?: boolean
   tags: string[]
   fetch: {
     engine: string
@@ -119,6 +121,17 @@ export interface DaemonStatus {
   server_time_local: string
 }
 
+export interface TagConfig {
+  /** 分组（标签）名称。 */
+  name: string
+  /** 是否启用分组内监控（调度检查）。 */
+  enabled: boolean
+  /** 是否发送分组内监控源的变更通知。 */
+  notify_enabled: boolean
+  /** 该分组下每个监控源最多保留的变更历史条数（0 表示不限制，跟随全局）。 */
+  history_limit: number
+}
+
 export interface EditableSettings {
   concurrency: number
   queue_capacity: number
@@ -184,17 +197,25 @@ export const api = {
       body: JSON.stringify({ url, engine }),
     }),
 
-  listEvents: (limit = 50) =>
-    request<ChangeEvent[]>(`/api/events?limit=${limit}`),
-
-  getEvent: (id: number) => request<ChangeEvent>(`/api/events/${id}`),
-
   markEventRead: (id: number) =>
     request<{ updated: number }>(`/api/events/${id}/read`, { method: "POST" }),
 
   markSourceRead: (sourceId: string) =>
     request<{ updated: number }>(`/api/sources/${encodeURIComponent(sourceId)}/read`, {
       method: "POST",
+    }),
+
+  listTags: () => request<TagConfig[]>("/api/tags"),
+
+  updateTag: (name: string, tag: TagConfig) =>
+    request<{ name: string; updated: boolean }>(`/api/tags/${encodeURIComponent(name)}`, {
+      method: "PUT",
+      body: JSON.stringify(tag),
+    }),
+
+  deleteTag: (name: string) =>
+    request<{ name: string; deleted: boolean }>(`/api/tags/${encodeURIComponent(name)}`, {
+      method: "DELETE",
     }),
 
   eventScreenshotUrl: (id: number) => `/api/events/${id}/screenshot`,

@@ -8,10 +8,10 @@ use crate::config::SourceConfig;
 use crate::error::Result;
 use crate::models::{
     ChangeEvent, MediaCacheEntry, NotificationRecord, ScheduleState, SnapshotRecord,
-    SystemNotification,
+    SystemNotification, TagConfig,
 };
 
-const SCHEMA_VERSION: i64 = 6;
+const SCHEMA_VERSION: i64 = 7;
 
 pub struct Db {
     conn: Connection,
@@ -132,6 +132,12 @@ impl Db {
                     next_retry_at TEXT,
                     created_at TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS tags (
+                    name TEXT PRIMARY KEY,
+                    enabled INTEGER NOT NULL DEFAULT 1,
+                    notify_enabled INTEGER NOT NULL DEFAULT 1,
+                    history_limit INTEGER NOT NULL DEFAULT 0
+                );
                 "#,
             )?;
             self.conn
@@ -174,6 +180,18 @@ impl Db {
             )?;
             self.conn.pragma_update(None, "user_version", 6)?;
             info!("database schema migrated to v6");
+        }
+        if v < 7 {
+            self.conn.execute_batch(
+                "CREATE TABLE IF NOT EXISTS tags (\n\
+                     name TEXT PRIMARY KEY,\n\
+                     enabled INTEGER NOT NULL DEFAULT 1,\n\
+                     notify_enabled INTEGER NOT NULL DEFAULT 1,\n\
+                     history_limit INTEGER NOT NULL DEFAULT 0\n\
+                 );",
+            )?;
+            self.conn.pragma_update(None, "user_version", 7)?;
+            info!("database schema migrated to v7");
         }
         Ok(())
     }
@@ -346,6 +364,85 @@ impl Db {
         Ok(self
             .conn
             .execute("UPDATE change_events SET read=1 WHERE id=?1", [event_id])?)
+    }
+
+    /// 列出全部分组（标签）设置。
+    pub fn list_tags(&self) -> Result<Vec<TagConfig>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT name, enabled, notify_enabled, history_limit FROM tags ORDER BY name")?;
+        let rows = stmt.query_map([], |r| {
+            Ok(TagConfig {
+                name: r.get(0)?,
+                enabled: r.get::<_, i64>(1)? != 0,
+                notify_enabled: r.get::<_, i64>(2)? != 0,
+                history_limit: r.get::<_, i64>(3)? as usize,
+            })
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
+    /// 获取单个分组（标签）设置。
+    pub fn get_tag(&self, name: &str) -> Result<Option<TagConfig>> {
+        self.conn
+            .query_row(
+                "SELECT name, enabled, notify_enabled, history_limit FROM tags WHERE name=?1",
+                [name],
+                |r| {
+                    Ok(TagConfig {
+                        name: r.get(0)?,
+                        enabled: r.get::<_, i64>(1)? != 0,
+                        notify_enabled: r.get::<_, i64>(2)? != 0,
+                        history_limit: r.get::<_, i64>(3)? as usize,
+                    })
+                },
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
+    /// 新增 / 更新一个分组（标签）设置。
+    pub fn upsert_tag(&self, tag: &TagConfig) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO tags(name, enabled, notify_enabled, history_limit) VALUES (?1,?2,?3,?4)\n\
+             ON CONFLICT(name) DO UPDATE SET enabled=excluded.enabled,\
+                 notify_enabled=excluded.notify_enabled, history_limit=excluded.history_limit",
+            params![
+                tag.name,
+                if tag.enabled { 1 } else { 0 },
+                if tag.notify_enabled { 1 } else { 0 },
+                tag.history_limit as i64
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// 删除一个分组（标签）设置。
+    pub fn delete_tag(&self, name: &str) -> Result<usize> {
+        Ok(self
+            .conn
+            .execute("DELETE FROM tags WHERE name=?1", [name])?)
+    }
+
+    /// 确保给定标签名以默认值存在于 tags 表中（缺失则插入，已存在保持不变）。
+    /// 用于在监控源保存标签时自动登记分组，使新标签能出现在「分组管理」列表供配置。
+    pub fn ensure_tags(&self, names: &[String]) -> Result<()> {
+        for name in names {
+            let trimmed = name.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            self.conn.execute(
+                "INSERT OR IGNORE INTO tags(name, enabled, notify_enabled, history_limit) \
+                 VALUES (?1, 1, 1, 0)",
+                [trimmed],
+            )?;
+        }
+        Ok(())
     }
 
     /// 统计指定监控源未读变更事件数。
@@ -535,6 +632,34 @@ impl Db {
                 ) WHERE rn <= ?1
             )",
             [limit],
+        )?;
+        Ok(())
+    }
+
+    /// 清理单个监控源多余的旧快照与变更事件，使其数量不超过 `limit` 条。
+    /// `0` 表示不限制。
+    pub fn prune_history_for_source(&self, watchpoint_id: &str, limit: usize) -> Result<()> {
+        if limit == 0 {
+            return Ok(());
+        }
+        let limit = limit as i64;
+        self.conn.execute(
+            "DELETE FROM change_events WHERE watchpoint_id=?1 AND id NOT IN (
+                SELECT id FROM (
+                    SELECT id, ROW_NUMBER() OVER (PARTITION BY watchpoint_id ORDER BY id DESC) AS rn
+                    FROM change_events WHERE watchpoint_id=?1
+                ) WHERE rn <= ?2
+            )",
+            params![watchpoint_id, limit],
+        )?;
+        self.conn.execute(
+            "DELETE FROM snapshots WHERE watchpoint_id=?1 AND id NOT IN (
+                SELECT id FROM (
+                    SELECT id, ROW_NUMBER() OVER (PARTITION BY watchpoint_id ORDER BY id DESC) AS rn
+                    FROM snapshots WHERE watchpoint_id=?1
+                ) WHERE rn <= ?2
+            )",
+            params![watchpoint_id, limit],
         )?;
         Ok(())
     }
