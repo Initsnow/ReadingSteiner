@@ -1,39 +1,33 @@
+# ReadingSteiner 启动配置
+#
+# 这里只保留「启动所需的引导项」：state_dir、media_dir、daemon.socket_path、
+# daemon.log_level、web 监听、camofox 浏览器引擎、telegram.api_base 等。
+#
+# 可编辑的全局运行参数（并发数、默认超时、cron、UA、历史保留、失败通知阈值、
+# 时区、通知模板、通知目标 tgram://、单事件图片数等）**已改存 SQLite**
+# （`state/reading-steiner.db` 的 `settings` 表），通过 Web 控制台「设置」页直接读写，
+# 不再写回本文件。重启 daemon 后以 SQLite 中的值为准。
+
 state_dir: state
 media_dir: state/media
 
 daemon:
   socket_path: state/daemon.sock
-  concurrency: 16
-  queue_capacity: 1024
   log_level: info
-  # 全局默认请求超时秒数（单个监控源可覆盖）
-  default_timeout_secs: 30
-  # 全局默认 cron 表达式（单个监控源可覆盖；留空回退到每小时 `0 * * * *`）
-  default_cron: ""
-  # 默认 User-Agent（HTTP 抓取与图片下载）
-  default_user_agent: ""
-  # 每个监控源最多保留的历史变更事件条数（0 不限制）
-  history_limit_per_source: 0
-  # 连续失败达到多少次后发送 Telegram 失败通知（0 禁用）
-  failure_notify_threshold: 0
-  # 监控检查调度器/告警展示使用的时区（IANA 名称，如 Asia/Shanghai；留空使用系统本地时区）
-  timezone: ""
+  # 以下可编辑运行参数已迁移到 SQLite，启动时若 SQLite 中已配置则覆盖此处：
+  # concurrency / queue_capacity / default_timeout_secs / default_cron /
+  # default_user_agent / history_limit_per_source / failure_notify_threshold / timezone
 
 web:
   listen: 127.0.0.1:8901
   static_dir: web/dist
 
 telegram:
-  # 全局通知目标：tgram://bottoken/ChatID1/ChatID2
-  # 编码了 bot token 与一个或多个接收 chat id。留空则未配置通知目标。
-  # url: "tgram://123456:ABC/1000/2000"
+  # 以下可编辑项已迁移到 SQLite，启动时覆盖此处：
+  # url（tgram://bottoken/ChatID...）/ max_images_per_event / template
   api_base: https://api.telegram.org
-  max_images_per_event: 10
   image_bytes_budget: 10485760
   digest_window_secs: 30
-  # 变更通知模板（占位符：{label} {watch} {time} {tz} {summary} {items}；留空用默认）
-  # template: ""
-  template: ""
 
 camofox:
   enabled: false

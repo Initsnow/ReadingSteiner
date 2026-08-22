@@ -2,9 +2,9 @@ use std::collections::HashMap;
 
 use chrono::Utc;
 use reading_steiner::config::{
-    CamofoxConfig, ChangeType, Config, ExtractConfig, FetchConfig, ItemField, ItemSelector,
-    SourceConfig, parse_telegram_url, resolve_effective_extract, resolve_effective_source,
-    resolve_notify_target,
+    CamofoxConfig, ChangeType, Config, EditableSettings, ExtractConfig, FetchConfig, ItemField,
+    ItemSelector, SourceConfig, parse_telegram_url, resolve_effective_extract,
+    resolve_effective_source, resolve_notify_target,
 };
 use reading_steiner::db::Db;
 use reading_steiner::differ;
@@ -819,6 +819,40 @@ fn test_tag_db_roundtrip() {
     // 删除。
     assert_eq!(db.delete_tag("news").unwrap(), 1);
     assert!(db.get_tag("news").unwrap().is_none());
+}
+
+#[test]
+fn test_settings_db_roundtrip() {
+    let db = Db::open_in_memory().unwrap();
+    // 初始未配置设置时返回 None。
+    assert!(db.get_settings().unwrap().is_none());
+
+    let s = EditableSettings {
+        concurrency: 8,
+        queue_capacity: 512,
+        default_timeout_secs: 15,
+        default_cron: "*/5 * * * *".into(),
+        default_user_agent: "test-agent".into(),
+        history_limit_per_source: 100,
+        failure_notify_threshold: 3,
+        timezone: "Asia/Shanghai".into(),
+        template: "{label}".into(),
+        telegram_url: "tgram://token/C1".into(),
+        max_images_per_event: 5,
+    };
+    db.set_settings(&s).unwrap();
+    let loaded = db.get_settings().unwrap().unwrap();
+    assert_eq!(loaded.concurrency, 8);
+    assert_eq!(loaded.queue_capacity, 512);
+    assert_eq!(loaded.default_cron, "*/5 * * * *");
+    assert_eq!(loaded.timezone, "Asia/Shanghai");
+    assert_eq!(loaded.telegram_url, "tgram://token/C1");
+
+    // 覆盖更新。
+    let mut s2 = s;
+    s2.concurrency = 16;
+    db.set_settings(&s2).unwrap();
+    assert_eq!(db.get_settings().unwrap().unwrap().concurrency, 16);
 }
 
 #[test]

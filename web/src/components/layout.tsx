@@ -1,6 +1,5 @@
 import { NavLink, Outlet, useLocation } from "react-router-dom"
 import {
-  Activity,
   Radio,
   Boxes,
   Settings as SettingsIcon,
@@ -21,7 +20,11 @@ export function Layout() {
     <div className="flex min-h-screen">
       <aside className="w-60 border-r bg-muted/40 p-4">
         <div className="mb-6 flex items-center gap-2 px-2">
-          <Activity className="h-6 w-6 text-primary" />
+          <img
+            src="/favicon-32x32.png"
+            alt="ReadingSteiner"
+            className="h-7 w-7 rounded-lg"
+          />
           <div>
             <div className="text-sm font-semibold leading-none">
               ReadingSteiner
