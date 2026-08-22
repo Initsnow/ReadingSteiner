@@ -235,6 +235,21 @@ impl Db {
             self.conn.pragma_update(None, "user_version", 11)?;
             info!("database schema migrated to v11");
         }
+        // 确保 settings 表存在一条全局默认记录。无论是新建库（v<1 直建表后跳到
+        // SCHEMA_VERSION）还是老库升级，settings 都可能为空；这里用 INSERT OR IGNORE
+        // 统一 seed 一条带合理默认值的 global 记录，`get_settings()` 恒有值，
+        // 运行时不再做「缺失→默认」兜底。
+        self.seed_default_settings()?;
+        Ok(())
+    }
+
+    /// 若 settings 表没有 global 行，写入一条默认设置（`EditableSettings::default()`）。
+    fn seed_default_settings(&self) -> Result<()> {
+        let value = serde_json::to_string(&EditableSettings::default())?;
+        self.conn.execute(
+            "INSERT OR IGNORE INTO settings(key, value) VALUES('global', ?1)",
+            [value],
+        )?;
         Ok(())
     }
 

@@ -138,7 +138,10 @@ pub const DEFAULT_USER_AGENT: &str =
 /// 全局可编辑设置，存于 SQLite `settings` 表，是这些运行参数的唯一来源。
 /// 通过 Web 控制台「设置」页或 CLI 读写；不再与 config.yaml 双向绑定。
 /// 通知目标以 tgram:// url 形式管理，不在此暴露 token 明文。
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+///
+/// 默认值见 [`Default`]：新建数据库/升级时由 v11 迁移 seed 一条 `global` 记录，
+/// 因此 `get_settings()` 恒有值，运行时不再做「缺失→默认」兜底。
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct EditableSettings {
     /// 抓取工作线程数（并发数）。
@@ -163,6 +166,24 @@ pub struct EditableSettings {
     pub telegram_url: String,
     /// 单事件最多附带图片数。
     pub max_images_per_event: usize,
+}
+
+impl Default for EditableSettings {
+    fn default() -> Self {
+        Self {
+            concurrency: 16,
+            queue_capacity: 1024,
+            default_timeout_secs: 30,
+            default_cron: "0 * * * *".to_string(),
+            default_user_agent: DEFAULT_USER_AGENT.to_string(),
+            history_limit_per_source: 0,
+            failure_notify_threshold: 0,
+            timezone: system_local_timezone(),
+            template: DEFAULT_EVENT_TEMPLATE.to_string(),
+            telegram_url: String::new(),
+            max_images_per_event: 10,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -552,45 +573,21 @@ pub struct RuntimeConfig {
 
 impl RuntimeConfig {
     /// 由启动配置（boot）+ SQLite 设置（settings）合成运行时配置。
-    /// settings 是这些运行参数的唯一来源，缺失时使用默认值（0 → 内置默认）。
+    /// settings 是这些运行参数的唯一来源，其值已在数据库 seed/保存时保证非空，直接透传。
     pub fn from_parts(cfg: &Config, settings: &EditableSettings) -> Self {
         Self {
             state_dir: cfg.state_dir.clone(),
             media_dir: cfg.media_dir.clone(),
             socket_path: cfg.socket_path(),
-            concurrency: if settings.concurrency == 0 {
-                16
-            } else {
-                settings.concurrency
-            },
-            queue_capacity: if settings.queue_capacity == 0 {
-                1024
-            } else {
-                settings.queue_capacity
-            },
+            concurrency: settings.concurrency,
+            queue_capacity: settings.queue_capacity,
             default_timeout_secs: settings.default_timeout_secs,
-            default_cron: if settings.default_cron.trim().is_empty() {
-                "0 * * * *".to_string()
-            } else {
-                settings.default_cron.trim().to_string()
-            },
-            default_user_agent: if settings.default_user_agent.trim().is_empty() {
-                DEFAULT_USER_AGENT.to_string()
-            } else {
-                settings.default_user_agent.clone()
-            },
+            default_cron: settings.default_cron.clone(),
+            default_user_agent: settings.default_user_agent.clone(),
             history_limit_per_source: settings.history_limit_per_source,
             failure_notify_threshold: settings.failure_notify_threshold,
-            timezone: if settings.timezone.trim().is_empty() {
-                system_local_timezone()
-            } else {
-                settings.timezone.trim().to_string()
-            },
-            template: if settings.template.trim().is_empty() {
-                DEFAULT_EVENT_TEMPLATE.to_string()
-            } else {
-                settings.template.clone()
-            },
+            timezone: settings.timezone.clone(),
+            template: settings.template.clone(),
         }
     }
 }

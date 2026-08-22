@@ -40,17 +40,19 @@ camofox:
 
 | 设置 | 说明 |
 |---|---|
-| `concurrency` | 抓取工作线程数 |
-| `queue_capacity` | 队列容量 |
-| `default_timeout_secs` | 全局默认请求超时（秒） |
-| `default_cron` | 全局默认 cron（新建源未配置时使用） |
-| `default_user_agent` | 默认 User-Agent |
+| `concurrency` | 抓取工作线程数（默认 16） |
+| `queue_capacity` | 队列容量（默认 1024） |
+| `default_timeout_secs` | 全局默认请求超时（秒，默认 30） |
+| `default_cron` | 全局默认 cron（新建源未配置时使用，默认每小时） |
+| `default_user_agent` | 默认 User-Agent（默认 Edge） |
 | `history_limit_per_source` | 每源保留历史条数（0 不限制） |
 | `failure_notify_threshold` | 连续失败告警阈值（0 禁用） |
-| `timezone` | 时区（IANA 名称，留空用系统本地时区） |
-| `template` | 变更通知模板 |
+| `timezone` | 时区（IANA 名称，默认系统本地时区） |
+| `template` | 变更通知模板（默认内置模板） |
 | `telegram_url` | 全局通知目标（`tgram://`） |
-| `max_images_per_event` | 单事件最多附带图片数 |
+| `max_images_per_event` | 单事件最多附带图片数（默认 10） |
+
+首次启动（或老库升级）时，数据库会 seed 一条带上述默认值的 `global` 记录；此后所有设置均以该记录为准，不再做「缺失→默认」的运行时兜底。
 
 ### 热更新
 

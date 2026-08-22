@@ -36,13 +36,8 @@ pub fn create_fetcher(
 ) -> Result<Box<dyn Fetcher>> {
     match engine {
         "http" => {
-            let user_agent = if settings.default_user_agent.trim().is_empty() {
-                crate::config::DEFAULT_USER_AGENT.to_string()
-            } else {
-                settings.default_user_agent.clone()
-            };
             Ok(Box::new(http::HttpFetcher::new(
-                &user_agent,
+                &settings.default_user_agent,
                 settings.default_timeout_secs,
             )?))
         }
