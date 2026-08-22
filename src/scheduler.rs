@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::str::FromStr;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 
@@ -12,7 +12,8 @@ use tokio::sync::{Mutex, Semaphore};
 use tracing::{debug, error, info, warn};
 
 use crate::config::{
-    ChangeType, Config, ExtractConfig, ImageSelector, ItemSelector, RuntimeConfig, SourceConfig,
+    ChangeType, Config, EditableSettings, ExtractConfig, ImageSelector, ItemSelector, RuntimeConfig,
+    SourceConfig,
 };
 use crate::db::Db;
 use crate::differ;
@@ -25,14 +26,20 @@ use crate::pipeline;
 
 pub struct AppState {
     pub cfg: Config,
-    pub runtime: RuntimeConfig,
+    /// 可热更新的运行时设置（并发/队列容量之外的字段在保存后即时刷新，详见
+    /// `reload_settings`）。线程安全地供 daemon 循环每轮重新读取。
+    pub runtime: Arc<RwLock<RuntimeConfig>>,
+    /// 全局可编辑设置的内存视图，作为热更新 / 校验的单一来源；启动时从 SQLite 装载，
+    /// 保存时由 `reload_settings` 刷新。
+    pub settings: Arc<RwLock<EditableSettings>>,
     /// 当前生效的 config 文件路径（供设置持久化），缺省时无法回写。
     pub config_path: Option<PathBuf>,
     pub db: Arc<Mutex<Db>>,
     /// Live monitoring sources. Solely backed by the SQLite `sources` table,
     /// kept in sync as sources are added / edited / deleted via the Web/CLI.
     pub sources: Mutex<Vec<SourceConfig>>,
-    pub notifier: Option<Arc<TelegramNotifier>>,
+    /// 通知器（可热更新：url / 模板 / 图片数 / 时区变更后重建）。
+    pub notifier: Arc<RwLock<Option<Arc<TelegramNotifier>>>>,
     pub images: ImageDownloader,
     pub running: AtomicBool,
     pub queue_depth: AtomicUsize,
@@ -58,6 +65,7 @@ impl AppState {
             settings.apply_to(&mut cfg);
         }
         let runtime = RuntimeConfig::from_config(&cfg);
+        let settings = EditableSettings::from_config(&cfg);
         let notifier = match TelegramNotifier::new(&cfg.telegram, &runtime.timezone) {
             Ok(n) => Some(Arc::new(n)),
             Err(e) => {
@@ -70,11 +78,12 @@ impl AppState {
         let sources = db.list_sources().unwrap_or_default();
         Ok(Self {
             cfg,
-            runtime,
+            runtime: Arc::new(RwLock::new(runtime)),
+            settings: Arc::new(RwLock::new(settings)),
             config_path,
             db: Arc::new(Mutex::new(db)),
             sources: Mutex::new(sources),
-            notifier,
+            notifier: Arc::new(RwLock::new(notifier)),
             images,
             running: AtomicBool::new(false),
             queue_depth: AtomicUsize::new(0),
@@ -89,7 +98,7 @@ impl AppState {
         let last_tick = *self.last_tick_at.lock().await;
         let engine_health = self.engine_health.lock().await.clone();
         let now = Utc::now();
-        let tz = self.runtime.timezone.clone();
+        let tz = self.runtime.read().unwrap().timezone.clone();
         DaemonStatus {
             running: self.running.load(Ordering::Relaxed),
             version: env!("CARGO_PKG_VERSION").to_string(),
@@ -102,6 +111,40 @@ impl AppState {
             server_time_utc: now,
             server_time_local: format_local_time(now, &tz),
         }
+    }
+
+    /// 设置保存后调用：把新设置写入内存视图，并按「生效档位」刷新 runtime / notifier。
+    ///
+    /// - 即时生效：`telegram_url`、`template`、`max_images_per_event`、
+    ///   `failure_notify_threshold`、`history_limit_per_source`
+    /// - 下次任务生效：`timezone`、`default_cron`、`default_user_agent`、`default_timeout_secs`
+    /// - 需重启：`concurrency`、`queue_capacity`（线程池 / 队列容量启动时一次性分配）
+    pub fn reload_settings(&self, settings: &EditableSettings) {
+        // 更新内存设置视图（fetcher 的 UA / 超时从这里读）。
+        *self.settings.write().unwrap() = settings.clone();
+        // 刷新 runtime 中可热更新的字段（保持并发 / 队列容量不变，需重启）。
+        {
+            let mut rt = self.runtime.write().unwrap();
+            rt.failure_notify_threshold = settings.failure_notify_threshold;
+            rt.history_limit_per_source = settings.history_limit_per_source;
+            rt.timezone = if settings.timezone.trim().is_empty() {
+                crate::config::system_local_timezone()
+            } else {
+                settings.timezone.clone()
+            };
+            rt.default_cron = settings.default_cron.clone();
+        }
+        // 重建 notifier：url / 模板 / 图片数 / 时区变更即时生效。
+        let new_notifier = self
+            .cfg
+            .telegram
+            .clone()
+            .with_overrides(settings)
+            .map(|telegram| TelegramNotifier::new(&telegram, &self.runtime.read().unwrap().timezone))
+            .and_then(|r| r.ok());
+        let mut guard = self.notifier.write().unwrap();
+        *guard = new_notifier.map(Arc::new);
+        info!("global settings hot-reloaded");
     }
 }
 
@@ -134,7 +177,7 @@ pub async fn run_daemon(state: Arc<AppState>) -> Result<()> {
         }
     }
 
-    let concurrency = state.runtime.concurrency.max(1);
+    let concurrency = state.runtime.read().unwrap().concurrency.max(1);
     let semaphore = Arc::new(Semaphore::new(concurrency));
 
     loop {
@@ -178,7 +221,7 @@ pub async fn run_daemon(state: Arc<AppState>) -> Result<()> {
                 }
             }
             // 有界队列：每 tick 最多入队 queue_capacity 个任务，超出部分下个 tick 再处理。
-            due.truncate(state.runtime.queue_capacity.max(1));
+            due.truncate(state.runtime.read().unwrap().queue_capacity.max(1));
             due
         };
 
@@ -200,7 +243,7 @@ pub async fn run_daemon(state: Arc<AppState>) -> Result<()> {
                             Some(Utc::now() + chrono::Duration::seconds(backoff as i64));
                         sched.next_due_at = Utc::now() + chrono::Duration::seconds(1);
                         // 连续失败达到阈值时，发送一条失败通知（同一段失败连击只发一次）。
-                        let threshold = state.runtime.failure_notify_threshold;
+                        let threshold = state.runtime.read().unwrap().failure_notify_threshold;
                         if threshold > 0
                             && sched.consecutive_failures >= threshold
                             && !sched.failure_notified
@@ -208,6 +251,8 @@ pub async fn run_daemon(state: Arc<AppState>) -> Result<()> {
                             // 失败告警使用全局通知目标（tgram:// 形式）。
                             let target = state
                                 .notifier
+                                .read()
+                                .unwrap()
                                 .as_ref()
                                 .and_then(|n| n.global_target());
                             if let Some(target) = target {
@@ -222,7 +267,7 @@ pub async fn run_daemon(state: Arc<AppState>) -> Result<()> {
                                     .first()
                                     .cloned()
                                     .unwrap_or_default();
-                                let tz = state.runtime.timezone.clone();
+                                let tz = state.runtime.read().unwrap().timezone.clone();
                                 let text = notifier::render_failure_message(
                                     &source.id,
                                     sched.consecutive_failures,
@@ -245,7 +290,7 @@ pub async fn run_daemon(state: Arc<AppState>) -> Result<()> {
         }
 
         // Drain notification outbox periodically（含事件通知与系统告警）。
-        if let Some(notifier) = state.notifier.clone() {
+        if let Some(notifier) = state.notifier.read().unwrap().clone() {
             let db = state.db.clone();
             let images = state.images.clone();
             if let Err(e) = notifier::process_outbox(&db, &images, &notifier, None).await {
@@ -256,7 +301,7 @@ pub async fn run_daemon(state: Arc<AppState>) -> Result<()> {
             // 则优先按分组的限制清理，否则使用全局限制。
             let db = db.lock().await;
             let tags = db.list_tags().unwrap_or_default();
-            let global_limit = state.runtime.history_limit_per_source;
+            let global_limit = state.runtime.read().unwrap().history_limit_per_source;
             // 快速路径：没有任何分组配置历史限制（全部跟随全局）时，用一次全表清理，
             // 避免对每个源逐条执行 DELETE 带来额外开销（与旧实现的单条 SQL 相当）。
             let any_group_limit = tags.iter().any(|t| t.history_limit > 0);
@@ -291,6 +336,11 @@ pub async fn check_source(state: &Arc<AppState>, source_id: &str) -> Result<()> 
     // 生效的提取配置：若监控源跟随分组且所属分组配置了提取，则沿用分组的设置。
     let tags = { state.db.lock().await.list_tags().unwrap_or_default() };
     let extract_cfg = crate::config::resolve_effective_extract(&source, &tags);
+    // 本次检查的快照：时区 / 默认 cron 支持热更新，单次检查内用一致的取值。
+    let (tz, default_cron) = {
+        let rt = state.runtime.read().unwrap();
+        (rt.timezone.clone(), rt.default_cron.clone())
+    };
 
     let (prev_etag, prev_lm, prev_fp, prev_items_json) = {
         let db = state.db.lock().await;
@@ -306,7 +356,11 @@ pub async fn check_source(state: &Arc<AppState>, source_id: &str) -> Result<()> 
         }
     };
 
-    let fetcher = fetcher::create_fetcher(&source.fetch.engine, &state.cfg)?;
+    let fetcher = fetcher::create_fetcher(
+        &source.fetch.engine,
+        &state.cfg,
+        Some(&state.settings.read().unwrap().clone()),
+    )?;
     let spec = FetchSpec {
         fetch: source.fetch.clone(),
         etag: prev_etag,
@@ -325,8 +379,8 @@ pub async fn check_source(state: &Arc<AppState>, source_id: &str) -> Result<()> 
             None,
             false,
             prev.as_ref(),
-            &state.runtime.timezone,
-            &state.runtime.default_cron,
+            &tz,
+            &default_cron,
         ))?;
         return Ok(());
     }
@@ -378,8 +432,8 @@ pub async fn check_source(state: &Arc<AppState>, source_id: &str) -> Result<()> 
             Some(Utc::now()),
             false,
             prev.as_ref(),
-            &state.runtime.timezone,
-            &state.runtime.default_cron,
+            &tz,
+            &default_cron,
         ))?;
         debug!(source = %source.id, "no change");
         return Ok(());
@@ -403,8 +457,8 @@ pub async fn check_source(state: &Arc<AppState>, source_id: &str) -> Result<()> 
                 Some(Utc::now()),
                 true,
                 Some(&sched),
-                &state.runtime.timezone,
-                &state.runtime.default_cron,
+                &tz,
+                &default_cron,
             ))?;
             debug!(source = %source.id, "duplicate change, suppressed");
             return Ok(());
@@ -488,7 +542,7 @@ pub async fn check_source(state: &Arc<AppState>, source_id: &str) -> Result<()> 
         // 插入成功后再写截图：以 event_id 命名，写失败时事件不带截图，
         // 不存在残留临时文件，也不存在 DB 与文件名不一致的问题。
         if let Some(data) = &screenshot_data {
-            let dir = state.runtime.media_dir.join("screenshots");
+            let dir = state.runtime.read().unwrap().media_dir.join("screenshots");
             match std::fs::create_dir_all(&dir) {
                 Ok(()) => {
                     let fname = format!("event-{event_id}.png");
@@ -530,17 +584,20 @@ pub async fn check_source(state: &Arc<AppState>, source_id: &str) -> Result<()> 
             let tags = db.list_tags().unwrap_or_default();
             crate::config::resolve_effective_source(&source, &tags, 0)
         };
-        if effective_notify && state.notifier.is_some() {
+        if effective_notify && state.notifier.read().unwrap().is_some() {
             let tags = db.list_tags().unwrap_or_default();
-            // 解析通知目标：分组优先，回退全局（tgram:// URL）。
+            // 解析通知目标：分组优先，回退全局（tgram:// URL，可热更新）。
+            let hot_url = state.settings.read().unwrap().telegram_url.clone();
             let target = crate::config::resolve_notify_target(
                 &source,
                 &tags,
-                &state.cfg.telegram.url,
+                &hot_url,
             )
             .or_else(|| {
                 state
                     .notifier
+                    .read()
+                    .unwrap()
                     .as_ref()
                     .and_then(|n| n.global_target())
             });
@@ -574,8 +631,8 @@ pub async fn check_source(state: &Arc<AppState>, source_id: &str) -> Result<()> 
             Some(Utc::now()),
             true,
             prev.as_ref(),
-            &state.runtime.timezone,
-            &state.runtime.default_cron,
+            &tz,
+            &default_cron,
         );
         sched.last_notified_fingerprint = Some(event.dedupe_key.clone());
         sched.last_notified_at = Some(Utc::now());
@@ -856,7 +913,11 @@ pub async fn test_source(state: &Arc<AppState>, source: &SourceConfig) -> Result
     // 生效的提取配置：跟随分组时优先用分组配置的提取。
     let tags = { state.db.lock().await.list_tags().unwrap_or_default() };
     let extract_cfg = crate::config::resolve_effective_extract(source, &tags);
-    let fetcher = fetcher::create_fetcher(&source.fetch.engine, &state.cfg)?;
+    let fetcher = fetcher::create_fetcher(
+        &source.fetch.engine,
+        &state.cfg,
+        Some(&state.settings.read().unwrap().clone()),
+    )?;
     let spec = FetchSpec {
         fetch: source.fetch.clone(),
         etag: None,

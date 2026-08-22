@@ -17,7 +17,7 @@ daemon 内置一个轻量 HTTP 服务（axum），监听地址与静态目录由
 
 ## 全局设置
 
-见 [配置文档](./configuration.md#全局设置sqlite)。全局可编辑设置存于 SQLite，通过「设置」页修改后需重启 daemon 生效。
+见 [配置文档](./configuration.md#全局设置sqlite)。全局可编辑设置存于 SQLite，通过「设置」页修改即保存。除并发数 / 队列容量外，其余字段保存后即时或下次任务生效，无需重启 daemon；各字段的生效档位以页面徽标标注（详见[生效档位](./configuration.md#生效档位热更新)）。
 
 ## 分组（标签）管理
 
