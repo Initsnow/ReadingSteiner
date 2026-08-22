@@ -861,8 +861,8 @@ fn test_settings_db_roundtrip() {
 
 #[test]
 fn test_reload_settings_hot_update() {
-    // reload_settings 应把除并发 / 队列容量外的字段刷新到 runtime / settings，
-    // 并保持启动时分配的 concurrency / queue_capacity 不变（需重启）。
+    // reload_settings 应把全部字段（含并发 / 队列容量）刷新到 runtime / settings，
+    // 全部即时生效，无需重启 daemon。
     use reading_steiner::scheduler::AppState;
 
     let dir = std::env::temp_dir().join(format!("rst-reload-{}", std::process::id()));
@@ -876,9 +876,9 @@ fn test_reload_settings_hot_update() {
     assert_eq!(state.runtime.read().unwrap().concurrency, 16);
     assert_eq!(state.runtime.read().unwrap().failure_notify_threshold, 0);
 
-    // 热更新：并发保持默认 16，但失败阈值 / 时区 / cron 应即时刷新。
+    // 热更新：全部字段（含并发 / 队列容量）都应即时刷新。
     let s = EditableSettings {
-        concurrency: 999, // 应保持启动值，需重启
+        concurrency: 999,
         queue_capacity: 999,
         default_timeout_secs: 30,
         default_cron: "*/10 * * * *".into(),
@@ -892,10 +892,10 @@ fn test_reload_settings_hot_update() {
     };
     state.reload_settings(&s);
 
-    // 并发 / 队列容量保持启动值（需重启生效）。
-    assert_eq!(state.runtime.read().unwrap().concurrency, 16);
-    assert_eq!(state.runtime.read().unwrap().queue_capacity, 1024);
-    // 热更新字段已刷新。
+    // 并发 / 队列容量也即时生效。
+    assert_eq!(state.runtime.read().unwrap().concurrency, 999);
+    assert_eq!(state.runtime.read().unwrap().queue_capacity, 999);
+    // 其余热更新字段已刷新。
     assert_eq!(state.runtime.read().unwrap().failure_notify_threshold, 5);
     assert_eq!(state.runtime.read().unwrap().history_limit_per_source, 200);
     assert_eq!(state.runtime.read().unwrap().timezone, "Asia/Shanghai");
