@@ -4,9 +4,10 @@
 # daemon.log_level、web 监听、camofox 浏览器引擎、telegram.api_base 等。
 #
 # 可编辑的全局运行参数（并发数、默认超时、cron、UA、历史保留、失败通知阈值、
-# 时区、通知模板、通知目标 tgram://、单事件图片数等）**已改存 SQLite**
-# （`state/reading-steiner.db` 的 `settings` 表），通过 Web 控制台「设置」页直接读写，
-# 不再写回本文件。重启 daemon 后以 SQLite 中的值为准。
+# 时区、通知模板、通知目标 tgram://、单事件图片数等）统一存于 SQLite
+# （`state/reading-steiner.db` 的 `settings` 表），通过 Web 控制台「设置」页或
+# `reading-steiner settings` 命令读写，**不在本文件配置**。重启 daemon 后以
+# SQLite 中的值为准。
 
 state_dir: state
 media_dir: state/media
@@ -14,17 +15,12 @@ media_dir: state/media
 daemon:
   socket_path: state/daemon.sock
   log_level: info
-  # 以下可编辑运行参数已迁移到 SQLite，启动时若 SQLite 中已配置则覆盖此处：
-  # concurrency / queue_capacity / default_timeout_secs / default_cron /
-  # default_user_agent / history_limit_per_source / failure_notify_threshold / timezone
 
 web:
   listen: 127.0.0.1:8901
   static_dir: web/dist
 
 telegram:
-  # 以下可编辑项已迁移到 SQLite，启动时覆盖此处：
-  # url（tgram://bottoken/ChatID...）/ max_images_per_event / template
   api_base: https://api.telegram.org
   image_bytes_budget: 10485760
   digest_window_secs: 30
