@@ -669,6 +669,16 @@ fn test_resolve_effective_source_with_groups() {
         },
     ];
     assert_eq!(resolve_effective_source(&source, &multi, 100), (false, false, 20));
+
+    // 源自身关闭时即使分组开启也应保持关闭（源自身开关是总开关）。
+    source.tags = vec!["news".into()];
+    let mut src_off = source.clone();
+    src_off.enabled = false;
+    src_off.notify_enabled = false;
+    assert_eq!(
+        resolve_effective_source(&src_off, &group_tags, 100),
+        (false, false, 50)
+    );
 }
 
 #[test]
@@ -706,4 +716,34 @@ fn test_tag_db_roundtrip() {
     // 删除。
     assert_eq!(db.delete_tag("news").unwrap(), 1);
     assert!(db.get_tag("news").unwrap().is_none());
+}
+
+#[test]
+fn test_ensure_tags_registers_new_tags() {
+    let db = Db::open_in_memory().unwrap();
+    // 自动登记：新标签以默认值插入，已存在标签不覆盖其配置。
+    db.ensure_tags(&["news".into(), "alert".into()]).unwrap();
+    assert_eq!(db.list_tags().unwrap().len(), 2);
+
+    let news = db.get_tag("news").unwrap().unwrap();
+    assert!(news.enabled);
+    assert!(news.notify_enabled);
+    assert_eq!(news.history_limit, 0);
+
+    // 更新 news 的分组配置后再次登记，不应覆盖。
+    db.upsert_tag(&TagConfig {
+        name: "news".into(),
+        enabled: false,
+        notify_enabled: false,
+        history_limit: 10,
+    })
+    .unwrap();
+    db.ensure_tags(&["news".into()]).unwrap();
+    let news = db.get_tag("news").unwrap().unwrap();
+    assert!(!news.enabled);
+    assert_eq!(news.history_limit, 10);
+
+    // 空标签 / 空白标签被忽略。
+    db.ensure_tags(&["".into(), "   ".into()]).unwrap();
+    assert_eq!(db.list_tags().unwrap().len(), 2);
 }

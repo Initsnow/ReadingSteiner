@@ -240,6 +240,8 @@ pub(crate) async fn handle_request(state: &Arc<AppState>, req: ControlRequest) -
             if sources.iter().any(|s| s.id == id) {
                 return ControlResponse::err(format!("source {} already exists", id));
             }
+            // 自动登记源的新标签到分组表，使分组能出现在「分组管理」中供配置。
+            let _ = db.ensure_tags(&source.tags);
             if let Err(e) = db.upsert_source(source.as_ref()) {
                 return ControlResponse::err(e.to_string());
             }
@@ -254,6 +256,8 @@ pub(crate) async fn handle_request(state: &Arc<AppState>, req: ControlRequest) -
             if !sources.iter().any(|s| s.id == source.id) {
                 return ControlResponse::err(format!("source {} not found", source.id));
             }
+            // 自动登记源的新标签到分组表，使分组能出现在「分组管理」中供配置。
+            let _ = db.ensure_tags(&source.tags);
             if let Err(e) = db.upsert_source(source.as_ref()) {
                 return ControlResponse::err(e.to_string());
             }

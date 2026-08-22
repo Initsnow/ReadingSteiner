@@ -226,14 +226,25 @@ pub async fn run_daemon(state: Arc<AppState>) -> Result<()> {
             let db = db.lock().await;
             let tags = db.list_tags().unwrap_or_default();
             let global_limit = state.runtime.history_limit_per_source;
+            // 快速路径：没有任何分组配置历史限制（全部跟随全局）时，用一次全表清理，
+            // 避免对每个源逐条执行 DELETE 带来额外开销（与旧实现的单条 SQL 相当）。
+            let any_group_limit = tags.iter().any(|t| t.history_limit > 0);
             let sources = state.sources.lock().await;
-            for source in sources.iter() {
-                let (_, _, history) =
-                    crate::config::resolve_effective_source(source, &tags, global_limit);
-                if history > 0
-                    && let Err(e) = db.prune_history_for_source(&source.id, history)
+            if !any_group_limit {
+                if global_limit > 0
+                    && let Err(e) = db.prune_history(global_limit)
                 {
-                    warn!(source = %source.id, error = %e, "history pruning failed");
+                    warn!(error = %e, "history pruning failed");
+                }
+            } else {
+                for source in sources.iter() {
+                    let (_, _, history) =
+                        crate::config::resolve_effective_source(source, &tags, global_limit);
+                    if history > 0
+                        && let Err(e) = db.prune_history_for_source(&source.id, history)
+                    {
+                        warn!(source = %source.id, error = %e, "history pruning failed");
+                    }
                 }
             }
             drop(db);

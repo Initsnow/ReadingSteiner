@@ -63,6 +63,7 @@ export function SettingsPage() {
   const [tags, setTags] = useState<TagConfig[]>([])
   const [tagSaving, setTagSaving] = useState(false)
   const [tagNotice, setTagNotice] = useState<string | null>(null)
+  const [newTagName, setNewTagName] = useState("")
 
   async function load() {
     try {
@@ -144,6 +145,39 @@ export function SettingsPage() {
     try {
       await api.updateTag(tag.name, tag)
       setTagNotice(`已保存分组「${tag.name}」的设置。`)
+    } catch (e) {
+      setError((e as Error).message)
+    } finally {
+      setTagSaving(false)
+    }
+  }
+
+  async function handleAddTag() {
+    const name = newTagName.trim()
+    if (!name) {
+      setError("分组名称不能为空")
+      return
+    }
+    if (tags.some((t) => t.name === name)) {
+      setError(`分组「${name}」已存在`)
+      return
+    }
+    setTagSaving(true)
+    setTagNotice(null)
+    setError(null)
+    try {
+      await api.updateTag(name, {
+        name,
+        enabled: true,
+        notify_enabled: true,
+        history_limit: 0,
+      })
+      setTags((prev) => [
+        ...prev,
+        { name, enabled: true, notify_enabled: true, history_limit: 0 },
+      ])
+      setNewTagName("")
+      setTagNotice(`已创建分组「${name}」。`)
     } catch (e) {
       setError((e as Error).message)
     } finally {
@@ -444,6 +478,25 @@ export function SettingsPage() {
         </CardHeader>
         <CardContent>
           {tagNotice && <p className="text-sm text-green-600">{tagNotice}</p>}
+          <div className="mb-3 flex items-center gap-2">
+            <input
+              type="text"
+              className={inputCls}
+              placeholder="新建分组（标签）名称，如 news"
+              value={newTagName}
+              onChange={(e) => setNewTagName(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") handleAddTag()
+              }}
+            />
+            <Button
+              size="sm"
+              disabled={tagSaving}
+              onClick={handleAddTag}
+            >
+              新建分组
+            </Button>
+          </div>
           {tags.length === 0 ? (
             <p className="text-sm text-muted-foreground">
               暂无分组设置。可在监控源的“标签”字段中填写标签，随后回到此处为对应分组配置监控 / 通知 / 历史保留策略。

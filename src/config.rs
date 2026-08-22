@@ -318,8 +318,11 @@ pub fn resolve_effective_source(
         // 有标签但没有对应分组配置：仍使用自身设置（分组未配置时不改变行为）。
         return (source.enabled, source.notify_enabled, global_history_limit);
     }
-    let enabled = group_tags.iter().all(|t| t.enabled);
-    let notify = group_tags.iter().all(|t| t.notify_enabled);
+    // 组合语义：监控源的自身开关作为「总开关」，分组开关进一步收窄。
+    // 这样既能让分组整体启停（分组关 → 源关），也尊重用户对单个源显式关闭的意图
+    // （源自身关 → 即使分组开启该源也不会被激活）。
+    let enabled = source.enabled && group_tags.iter().all(|t| t.enabled);
+    let notify = source.notify_enabled && group_tags.iter().all(|t| t.notify_enabled);
     let history = group_tags
         .iter()
         .map(|t| t.history_limit)
