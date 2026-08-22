@@ -479,6 +479,7 @@ fn test_failure_notified_field_roundtrip() {
         consecutive_changes: 0,
         backoff_until: None,
         last_success_at: None,
+        last_error: Some("connection refused".into()),
         last_notified_fingerprint: None,
         last_notified_at: None,
         failure_notified: true,
@@ -487,6 +488,7 @@ fn test_failure_notified_field_roundtrip() {
     let got = db.get_schedule_state("s").unwrap().unwrap();
     assert!(got.failure_notified);
     assert_eq!(got.consecutive_failures, 3);
+    assert_eq!(got.last_error.as_deref(), Some("connection refused"));
 }
 
 #[test]

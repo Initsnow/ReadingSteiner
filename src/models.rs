@@ -124,6 +124,9 @@ pub struct SourceMeta {
     pub unread_count: u32,
     /// 是否处于错误状态（连续失败次数 > 0）。
     pub has_error: bool,
+    /// 最近一次错误信息（失败时记录，成功后清空）。
+    #[serde(default)]
+    pub last_error: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -134,6 +137,7 @@ pub struct ScheduleState {
     pub consecutive_changes: u32,
     pub backoff_until: Option<DateTime<Utc>>,
     pub last_success_at: Option<DateTime<Utc>>,
+    pub last_error: Option<String>,
     pub last_notified_fingerprint: Option<String>,
     pub last_notified_at: Option<DateTime<Utc>>,
     /// 当前失败连击是否已发送过失败通知（达到 failure_notify_threshold 后置真，
