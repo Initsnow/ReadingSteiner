@@ -480,7 +480,7 @@ export function SettingsPage() {
             <Boxes className="h-5 w-5" /> 分组（标签）管理
           </CardTitle>
           <CardDescription>
-            为监控源的分组设置监控、通知、历史自动清理条数、默认内容提取与通知目标。分组下「跟随分组」的监控源会继承这里的设置；监控源可单独关闭“跟随分组”以自覆盖。
+            为监控源的分组设置历史保留条数、默认内容提取与通知目标。分组下「跟随分组」的监控源会继承这里的设置；监控源可单独关闭“跟随分组”以自覆盖。监控/通知开关可在监控源列表多选批量控制。
           </CardDescription>
         </CardHeader>
         <CardContent>
@@ -506,7 +506,7 @@ export function SettingsPage() {
           </div>
           {tags.length === 0 ? (
             <p className="text-sm text-muted-foreground">
-              暂无分组设置。可在监控源的“标签”字段中填写标签，随后回到此处为对应分组配置监控 / 通知 / 历史保留策略。
+              暂无分组设置。可在监控源的“标签”字段中填写标签，随后回到此处为对应分组配置历史保留 / 默认提取 / 通知目标。
             </p>
           ) : (
             <div className="divide-y rounded-md border">
@@ -516,30 +516,6 @@ export function SettingsPage() {
                   className="flex flex-wrap items-center gap-x-6 gap-y-2 px-3 py-3 text-sm"
                 >
                   <span className="min-w-32 font-medium">{tag.name}</span>
-                  <label className="flex cursor-pointer items-center gap-2">
-                    <input
-                      type="checkbox"
-                      className="h-4 w-4 accent-primary"
-                      checked={tag.enabled}
-                      onChange={(e) =>
-                        updateTagLocal(tag.name, { enabled: e.target.checked })
-                      }
-                    />
-                    <span>监控</span>
-                  </label>
-                  <label className="flex cursor-pointer items-center gap-2">
-                    <input
-                      type="checkbox"
-                      className="h-4 w-4 accent-primary"
-                      checked={tag.notify_enabled}
-                      onChange={(e) =>
-                        updateTagLocal(tag.name, {
-                          notify_enabled: e.target.checked,
-                        })
-                      }
-                    />
-                    <span>通知</span>
-                  </label>
                   <div className="flex items-center gap-2">
                     <span className="text-muted-foreground">每个源保留历史</span>
                     <input
@@ -608,14 +584,25 @@ export function SettingsPage() {
                               : ""
                         }
                         placeholder="选择器（CSS/JSONPath）"
-                        onChange={(e) =>
+                        onChange={(e) => {
+                          const ex = tag.extract
+                          const isItems =
+                            !!ex && "selector" in ex
                           updateTagLocal(tag.name, {
                             extract: {
                               type: "items",
-                              selector: { kind: "css", selector: e.target.value },
+                              selector:
+                                isItems &&
+                                ex.selector &&
+                                "path" in ex.selector
+                                  ? {
+                                      kind: "json_path",
+                                      path: e.target.value,
+                                    }
+                                  : { kind: "css", selector: e.target.value },
                             },
                           })
-                        }
+                        }}
                       />
                     )}
                     <span className="text-xs text-muted-foreground">
@@ -645,7 +632,7 @@ export function SettingsPage() {
             </div>
           )}
           <p className="mt-3 text-xs text-muted-foreground">
-            提示：分组的“每个源保留历史条数”优先于全局设置，多个分组取最严格的数值。分组下监控源的“跟随分组”开关决定是否继承这些设置。
+            提示：分组的“每个源保留历史条数”优先于全局设置，多个分组取最严格的数值；默认提取 / 通知目标多个分组配置时按分组名升序取第一个。监控 / 通知开关请在监控源列表多选批量控制。
           </p>
         </CardContent>
       </Card>
