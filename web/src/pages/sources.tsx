@@ -345,12 +345,18 @@ export function SourcesPage() {
     () => tags.filter((t) => formTagNames.includes(t.name)),
     [tags, formTagNames],
   )
-  // 跟随分组且所属分组配置了结构化提取时，源自身的“内容提取”设置会被分组覆盖。
+  // 跟随分组时，源自身的“内容提取”是否会被分组的提取配置覆盖。
+  // 需与后端 resolve_effective_extract 保持一致：取源跟随的、配置了提取的
+  // 分组中按名称升序的第一个分组作为生效提取；仅当该分组是结构化提取(items)时
+  // 源自身的提取设置才会被禁用。若生效分组是 text 或未配置提取，源仍可用自己的设置。
   const groupForcesItemsExtract = useMemo(() => {
     if (!form.follow_group) return null
-    const itemsGroups = formGroups.filter((t) => t.extract?.type === "items")
-    if (itemsGroups.length === 0) return null
-    return itemsGroups.map((g) => g.name).join("、")
+    const withExtract = [...formGroups]
+      .filter((t) => t.extract)
+      .sort((a, b) => a.name.localeCompare(b.name))
+    const effective = withExtract[0]
+    if (!effective || effective.extract?.type !== "items") return null
+    return effective.name
   }, [form.follow_group, formGroups])
 
   async function load() {
