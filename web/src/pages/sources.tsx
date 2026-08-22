@@ -24,6 +24,7 @@ import {
   type ExtractConfig,
   type ItemField,
   type ImageSelector,
+  type TagConfig,
 } from "@/lib/api"
 import { validateCron } from "@/lib/utils"
 import { Badge } from "@/components/ui/badge"
@@ -251,6 +252,8 @@ function parseChangeEvent(e: ChangeEvent) {
 
 export function SourcesPage() {
   const [sources, setSources] = useState<SourceMeta[]>([])
+  // 分组（标签）配置，用于判断源“跟随分组”时继承的分组内容提取等设置。
+  const [tags, setTags] = useState<TagConfig[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [busyId, setBusyId] = useState<string | null>(null)
@@ -327,9 +330,38 @@ export function SourcesPage() {
   const [testingId, setTestingId] = useState<string | null>(null)
   const [testError, setTestError] = useState<string | null>(null)
 
+  // 当前表单所属分组（编辑时按标签解析），用于判断“跟随分组”时继承的提取设置。
+  const formTagNames = useMemo(
+    () =>
+      form.tags
+        .split(",")
+        .map((t) => t.trim())
+        .filter(Boolean),
+    [form.tags],
+  )
+  const formGroups = useMemo(
+    () => tags.filter((t) => formTagNames.includes(t.name)),
+    [tags, formTagNames],
+  )
+  // 跟随分组时，源自身的“内容提取”是否会被分组的提取配置覆盖。
+  // 需与后端 resolve_effective_extract 保持一致：取源跟随的、配置了提取的
+  // 分组中按名称升序的第一个分组作为生效提取；仅当该分组是结构化提取(items)时
+  // 源自身的提取设置才会被禁用。若生效分组是 text 或未配置提取，源仍可用自己的设置。
+  const groupForcesItemsExtract = useMemo(() => {
+    if (!form.follow_group) return null
+    const withExtract = [...formGroups]
+      .filter((t) => t.extract)
+      .sort((a, b) => a.name.localeCompare(b.name))
+    const effective = withExtract[0]
+    if (!effective || effective.extract?.type !== "items") return null
+    return effective.name
+  }, [form.follow_group, formGroups])
+
   async function load() {
     try {
-      setSources(await api.listSources())
+      const [srcs, tagList] = await Promise.all([api.listSources(), api.listTags()])
+      setSources(srcs)
+      setTags(tagList)
       setError(null)
     } catch (e) {
       setError((e as Error).message)
@@ -385,11 +417,12 @@ export function SourcesPage() {
       setFormError(cronErr)
       return
     }
-    if (form.extractType === "items" && !form.selector.trim()) {
+    // 分组强制结构化提取时，源自身的提取配置由分组接管，跳过源级校验。
+    if (!groupForcesItemsExtract && form.extractType === "items" && !form.selector.trim()) {
       setFormError("结构化提取需要填写选择器")
       return
     }
-    if (form.extractType === "items" && form.fieldsJson.trim()) {
+    if (!groupForcesItemsExtract && form.extractType === "items" && form.fieldsJson.trim()) {
       try {
         JSON.parse(form.fieldsJson)
       } catch {
@@ -748,7 +781,11 @@ export function SourcesPage() {
                             </Badge>
                           )}
                           {s.has_error && (
-                            <Badge variant="destructive" className="px-1.5 py-0 text-[10px]">
+                            <Badge
+                              variant="destructive"
+                              className="px-1.5 py-0 text-[10px]"
+                              title={s.last_error ?? "连续失败，请检查监控源配置或网络"}
+                            >
                               <AlertCircle className="h-2.5 w-2.5" /> 错误
                             </Badge>
                           )}
@@ -788,6 +825,12 @@ export function SourcesPage() {
                             最近变更: <span title={formatDateTime(s.last_change_at)}>{formatRelativeTime(s.last_change_at)}</span>
                           </span>
                         </div>
+                        {s.has_error && s.last_error && (
+                          <div className="mt-1 flex items-start gap-1 rounded-md border border-destructive/30 bg-destructive/10 px-2 py-1 text-xs text-destructive">
+                            <AlertCircle className="mt-0.5 h-3 w-3 shrink-0" />
+                            <span className="break-all">{s.last_error}</span>
+                          </div>
+                        )}
                       </div>
                       <div className="flex shrink-0 items-center gap-1">
                         {unread > 0 && (
@@ -952,25 +995,28 @@ export function SourcesPage() {
                 </label>
               </div>
 
-              <div className="col-span-2 flex items-center justify-between rounded-md border bg-muted/30 p-3">
-                <div className="text-sm">
-                  <div className="font-medium">跟随分组设置</div>
-                  <div className="mt-0.5 text-xs text-muted-foreground">
-                    开启后，该监控源继承所属分组的历史保留 / 通知目标 / 内容提取设置；关闭后使用自身的设置（自覆盖）。监控 / 通知开关始终由本监控源控制。
+              {/* 跟随分组：仅编辑已有源且源有分组归属时有意义；新建源无分组，隐藏以免误设。 */}
+              {editing && formTagNames.length > 0 && (
+                <div className="col-span-2 flex items-center justify-between rounded-md border bg-muted/30 p-3">
+                  <div className="text-sm">
+                    <div className="font-medium">跟随分组设置</div>
+                    <div className="mt-0.5 text-xs text-muted-foreground">
+                      开启后继承分组的历史保留 / 通知目标 / 内容提取设置
+                    </div>
                   </div>
+                  <label className="flex cursor-pointer items-center gap-2 text-sm">
+                    <input
+                      type="checkbox"
+                      className="h-4 w-4 accent-primary"
+                      checked={form.follow_group}
+                      onChange={(e) =>
+                        setForm({ ...form, follow_group: e.target.checked })
+                      }
+                    />
+                    <span>跟随分组</span>
+                  </label>
                 </div>
-                <label className="flex cursor-pointer items-center gap-2 text-sm">
-                  <input
-                    type="checkbox"
-                    className="h-4 w-4 accent-primary"
-                    checked={form.follow_group}
-                    onChange={(e) =>
-                      setForm({ ...form, follow_group: e.target.checked })
-                    }
-                  />
-                  <span>跟随分组</span>
-                </label>
-              </div>
+              )}
 
               <Field label="引擎 (engine)">
                 <select
@@ -1014,9 +1060,9 @@ export function SourcesPage() {
               )}
 
               <Field
-                label="cron 表达式（分 时 日 月 周）"
+                label="cron 表达式"
                 className="col-span-2"
-                hint={"例：*/15 * * * *（每 15 分钟）、0 9,18 * * 1-5（工作日 9:00/18:00）。"}
+                hint="例：*/15 * * * * 每 15 分钟、0 9,18 * * 1-5 工作日 9:00/18:00"
               >
                 <div className="flex items-center gap-3 rounded-md border bg-muted/30 px-3 py-2">
                   <label className="flex shrink-0 cursor-pointer items-center gap-2 text-sm">
@@ -1044,10 +1090,19 @@ export function SourcesPage() {
                 </div>
               </Field>
 
-              <Field label="内容提取" className="col-span-2">
+              <Field
+                label="内容提取"
+                className="col-span-2"
+                hint={
+                  groupForcesItemsExtract
+                    ? `由分组「${groupForcesItemsExtract}」提供结构化提取，此处设置被覆盖。关闭“跟随分组”后可用。`
+                    : undefined
+                }
+              >
                 <select
                   className={inputCls}
-                  value={form.extractType}
+                  value={groupForcesItemsExtract ? "items" : form.extractType}
+                  disabled={!!groupForcesItemsExtract}
                   onChange={(e) =>
                     setForm({
                       ...form,
@@ -1060,7 +1115,7 @@ export function SourcesPage() {
                 </select>
               </Field>
 
-              {form.extractType === "items" && (
+              {form.extractType === "items" && !groupForcesItemsExtract && (
                 <div className="col-span-2 space-y-4 rounded-md border bg-muted/30 p-3">
                   <div className="grid grid-cols-2 gap-4">
                     <Field label="选择器类型">
@@ -1194,7 +1249,7 @@ export function SourcesPage() {
                   )}
                 </div>
               </Field>
-              <Field label="标签（逗号分隔）">
+              <Field label="标签">
                 <input
                   className={inputCls}
                   value={form.tags}

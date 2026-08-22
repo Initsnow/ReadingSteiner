@@ -48,6 +48,8 @@ export interface SourceMeta extends SourceConfig {
   unread_count: number
   /** 是否处于错误状态（连续失败次数 > 0）。 */
   has_error: boolean
+  /** 最近一次错误信息（失败时记录，成功后清空）。 */
+  last_error?: string | null
 }
 
 // 图片选择器：如何挑选要随变更通知附带的图片。
