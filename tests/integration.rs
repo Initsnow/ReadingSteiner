@@ -605,18 +605,16 @@ fn test_resolve_effective_source_with_groups() {
         ..SourceConfig::default()
     };
 
-    // 未配置分组时，使用自身设置。
+    // 未配置分组时，使用自身设置与全局历史保留。
     let tags = vec![];
     assert_eq!(
         resolve_effective_source(&source, &tags, 100),
         (true, true, 100)
     );
 
-    // 分组开启监控/通知，继承分组设置。
+    // 分组配置历史保留条数，则历史取分组值；开关不受分组影响。
     let group_tags = vec![TagConfig {
         name: "news".into(),
-        enabled: true,
-        notify_enabled: true,
         history_limit: 50,
         extract: None,
         notify_url: String::new(),
@@ -626,35 +624,19 @@ fn test_resolve_effective_source_with_groups() {
         (true, true, 50)
     );
 
-    // 分组关闭监控，则源被暂停监控。
-    let group_tags_off = vec![TagConfig {
+    // 分组历史保留为 0（不限制）时使用全局。
+    let group_tags_zero = vec![TagConfig {
         name: "news".into(),
-        enabled: false,
-        notify_enabled: true,
         history_limit: 0,
         extract: None,
         notify_url: String::new(),
     }];
     assert_eq!(
-        resolve_effective_source(&source, &group_tags_off, 100),
-        (false, true, 100)
+        resolve_effective_source(&source, &group_tags_zero, 100),
+        (true, true, 100)
     );
 
-    // 分组关闭通知。
-    let group_tags_notify_off = vec![TagConfig {
-        name: "news".into(),
-        enabled: true,
-        notify_enabled: false,
-        history_limit: 0,
-        extract: None,
-        notify_url: String::new(),
-    }];
-    assert_eq!(
-        resolve_effective_source(&source, &group_tags_notify_off, 100),
-        (true, false, 100)
-    );
-
-    // 关闭“跟随分组”后使用自身设置（自覆盖）。
+    // 关闭“跟随分组”后历史使用全局设置。
     source.follow_group = false;
     assert_eq!(
         resolve_effective_source(&source, &group_tags, 100),
@@ -662,30 +644,25 @@ fn test_resolve_effective_source_with_groups() {
     );
     source.follow_group = true;
 
-    // 多个分组取保守策略：任一分组关闭则关闭，历史取最小值。
+    // 多个分组取历史最小值（最严格的保留策略）。
     source.tags = vec!["news".into(), "alert".into()];
     let multi = vec![
         TagConfig {
             name: "news".into(),
-            enabled: true,
-            notify_enabled: true,
             history_limit: 50,
             extract: None,
             notify_url: String::new(),
         },
         TagConfig {
             name: "alert".into(),
-            enabled: false,
-            notify_enabled: false,
             history_limit: 20,
             extract: None,
             notify_url: String::new(),
         },
     ];
-    assert_eq!(resolve_effective_source(&source, &multi, 100), (false, false, 20));
+    assert_eq!(resolve_effective_source(&source, &multi, 100), (true, true, 20));
 
-    // 源自身关闭时即使分组开启也应保持关闭（源自身开关是总开关）。
-    source.tags = vec!["news".into()];
+    // 开关始终由监控源自身控制，不受分组影响。
     let mut src_off = source.clone();
     src_off.enabled = false;
     src_off.notify_enabled = false;
@@ -725,8 +702,6 @@ fn test_resolve_notify_target() {
     // 分组未配置通知 URL 时回退到全局。
     let tags = vec![TagConfig {
         name: "news".into(),
-        enabled: true,
-        notify_enabled: true,
         history_limit: 0,
         extract: None,
         notify_url: String::new(),
@@ -738,8 +713,6 @@ fn test_resolve_notify_target() {
     // 分组配置了通知 URL 时优先使用分组的。
     let tags = vec![TagConfig {
         name: "news".into(),
-        enabled: true,
-        notify_enabled: true,
         history_limit: 0,
         extract: None,
         notify_url: "tgram://P/1/2".into(),
@@ -757,8 +730,6 @@ fn test_resolve_notify_target() {
     // 分组与全局均未配置时返回 None。
     let no_url_tags = vec![TagConfig {
         name: "news".into(),
-        enabled: true,
-        notify_enabled: true,
         history_limit: 0,
         extract: None,
         notify_url: String::new(),
@@ -777,8 +748,6 @@ fn test_resolve_effective_extract() {
     // 分组未配置提取时使用源自身。
     let tags = vec![TagConfig {
         name: "news".into(),
-        enabled: true,
-        notify_enabled: true,
         history_limit: 0,
         extract: None,
         notify_url: String::new(),
@@ -791,8 +760,6 @@ fn test_resolve_effective_extract() {
     // 分组配置了提取时，源「跟随分组」则用分组的提取。
     let tags = vec![TagConfig {
         name: "news".into(),
-        enabled: true,
-        notify_enabled: true,
         history_limit: 0,
         extract: Some(ExtractConfig::Items {
             selector: ItemSelector::Css { selector: ".item".into() },
@@ -826,8 +793,6 @@ fn test_tag_db_roundtrip() {
     // 新增。
     let tag = TagConfig {
         name: "news".into(),
-        enabled: true,
-        notify_enabled: false,
         history_limit: 30,
         extract: None,
         notify_url: String::new(),
@@ -835,21 +800,17 @@ fn test_tag_db_roundtrip() {
     db.upsert_tag(&tag).unwrap();
     assert_eq!(db.list_tags().unwrap().len(), 1);
     let loaded = db.get_tag("news").unwrap().unwrap();
-    assert_eq!(loaded.notify_enabled, false);
     assert_eq!(loaded.history_limit, 30);
 
     // 更新。
     db.upsert_tag(&TagConfig {
         name: "news".into(),
-        enabled: false,
-        notify_enabled: true,
         history_limit: 0,
         extract: None,
         notify_url: "tgram://tok/C1".into(),
     })
     .unwrap();
     let loaded = db.get_tag("news").unwrap().unwrap();
-    assert_eq!(loaded.enabled, false);
     assert_eq!(loaded.history_limit, 0);
     assert_eq!(loaded.notify_url, "tgram://tok/C1");
 
@@ -866,15 +827,11 @@ fn test_ensure_tags_registers_new_tags() {
     assert_eq!(db.list_tags().unwrap().len(), 2);
 
     let news = db.get_tag("news").unwrap().unwrap();
-    assert!(news.enabled);
-    assert!(news.notify_enabled);
     assert_eq!(news.history_limit, 0);
 
     // 更新 news 的分组配置后再次登记，不应覆盖。
     db.upsert_tag(&TagConfig {
         name: "news".into(),
-        enabled: false,
-        notify_enabled: false,
         history_limit: 10,
         extract: None,
         notify_url: String::new(),
@@ -882,7 +839,6 @@ fn test_ensure_tags_registers_new_tags() {
     .unwrap();
     db.ensure_tags(&["news".into()]).unwrap();
     let news = db.get_tag("news").unwrap().unwrap();
-    assert!(!news.enabled);
     assert_eq!(news.history_limit, 10);
 
     // 空标签 / 空白标签被忽略。

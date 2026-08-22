@@ -168,17 +168,12 @@ pub struct NotificationRecord {
 }
 
 /// 分组（标签）级设置。分组下未单独覆盖的监控源会继承这里的配置。
-/// `enabled` 控制分组内监控源是否被调度检查，`notify_enabled` 控制是否推送
-/// 通知，`history_limit` 控制该分组内每个监控源最多保留的变更历史条数
-/// （0 表示不限制，跟随全局）。
+/// `history_limit` 控制该分组内每个监控源最多保留的变更历史条数
+/// （0 表示不限制，跟随全局）。监控 / 通知开关由监控源自身控制，分组不参与。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct TagConfig {
     pub name: String,
-    /// 是否启用分组内监控（调度检查）。true 时分组内监控源正常检查。
-    pub enabled: bool,
-    /// 是否发送分组内监控源的变更通知。
-    pub notify_enabled: bool,
     /// 该分组下每个监控源最多保留的变更历史条数（0 表示不限制，使用全局设置）。
     pub history_limit: usize,
     /// 分组默认的内容提取配置。监控源开启「跟随分组」且分组此处有配置时，
@@ -195,8 +190,6 @@ impl Default for TagConfig {
     fn default() -> Self {
         Self {
             name: String::new(),
-            enabled: true,
-            notify_enabled: true,
             history_limit: 0,
             extract: None,
             notify_url: String::new(),

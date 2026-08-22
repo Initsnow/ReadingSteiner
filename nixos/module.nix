@@ -32,14 +32,10 @@ in
             description = "Control socket path.";
           };
           telegram = {
-            tokenFile = lib.mkOption {
-              type = lib.types.nullOr lib.types.str;
-              default = null;
-              description = "Path to Telegram bot token file (loaded as credential or read-only).";
-            };
-            defaultChatId = lib.mkOption {
+            url = lib.mkOption {
               type = lib.types.str;
               default = "";
+              description = "Global Telegram notification target as tgram://bottoken/ChatID1/ChatID2.";
             };
           };
           camofox = {
@@ -91,8 +87,7 @@ in
         RestrictRealtime = true;
         RestrictSUIDSGID = true;
         # Secrets are passed as read-only files; not embedded in /nix/store.
-        LoadCredential = lib.optional (cfg.settings.telegram.tokenFile != null) "telegram_token:${cfg.settings.telegram.tokenFile}"
-          ++ lib.optional (cfg.settings.camofox.accessKeyFile != null) "camofox_access_key:${cfg.settings.camofox.accessKeyFile}"
+        LoadCredential = lib.optional (cfg.settings.camofox.accessKeyFile != null) "camofox_access_key:${cfg.settings.camofox.accessKeyFile}"
           ++ lib.optional (cfg.settings.camofox.apiKeyFile != null) "camofox_api_key:${cfg.settings.camofox.apiKeyFile}";
       };
 

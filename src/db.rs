@@ -11,7 +11,7 @@ use crate::models::{
     SystemNotification, TagConfig,
 };
 
-const SCHEMA_VERSION: i64 = 8;
+const SCHEMA_VERSION: i64 = 9;
 
 pub struct Db {
     conn: Connection,
@@ -136,8 +136,6 @@ impl Db {
                 );
                 CREATE TABLE IF NOT EXISTS tags (
                     name TEXT PRIMARY KEY,
-                    enabled INTEGER NOT NULL DEFAULT 1,
-                    notify_enabled INTEGER NOT NULL DEFAULT 1,
                     history_limit INTEGER NOT NULL DEFAULT 0,
                     notify_url TEXT NOT NULL DEFAULT '',
                     extract TEXT
@@ -189,8 +187,6 @@ impl Db {
             self.conn.execute_batch(
                 "CREATE TABLE IF NOT EXISTS tags (\n\
                      name TEXT PRIMARY KEY,\n\
-                     enabled INTEGER NOT NULL DEFAULT 1,\n\
-                     notify_enabled INTEGER NOT NULL DEFAULT 1,\n\
                      history_limit INTEGER NOT NULL DEFAULT 0\n\
                  );",
             )?;
@@ -207,6 +203,15 @@ impl Db {
             )?;
             self.conn.pragma_update(None, "user_version", 8)?;
             info!("database schema migrated to v8");
+        }
+        if v < 9 {
+            // v9：移除分组遗留的监控/通知开关（由监控源自身控制），从 schema 中彻底删除。
+            self.conn.execute_batch(
+                "ALTER TABLE tags DROP COLUMN enabled;\n\
+                 ALTER TABLE tags DROP COLUMN notify_enabled;",
+            )?;
+            self.conn.pragma_update(None, "user_version", 9)?;
+            info!("database schema migrated to v9");
         }
         Ok(())
     }
@@ -384,17 +389,15 @@ impl Db {
     /// 列出全部分组（标签）设置。
     pub fn list_tags(&self) -> Result<Vec<TagConfig>> {
         let mut stmt = self.conn.prepare(
-            "SELECT name, enabled, notify_enabled, history_limit, notify_url, extract FROM tags ORDER BY name",
+            "SELECT name, history_limit, notify_url, extract FROM tags ORDER BY name",
         )?;
         let rows = stmt.query_map([], |r| {
             Ok(TagConfig {
                 name: r.get(0)?,
-                enabled: r.get::<_, i64>(1)? != 0,
-                notify_enabled: r.get::<_, i64>(2)? != 0,
-                history_limit: r.get::<_, i64>(3)? as usize,
-                notify_url: r.get::<_, Option<String>>(4)?.unwrap_or_default(),
+                history_limit: r.get::<_, i64>(1)? as usize,
+                notify_url: r.get::<_, Option<String>>(2)?.unwrap_or_default(),
                 extract: r
-                    .get::<_, Option<String>>(5)?
+                    .get::<_, Option<String>>(3)?
                     .and_then(|s| serde_json::from_str(&s).ok()),
             })
         })?;
@@ -409,17 +412,15 @@ impl Db {
     pub fn get_tag(&self, name: &str) -> Result<Option<TagConfig>> {
         self.conn
             .query_row(
-                "SELECT name, enabled, notify_enabled, history_limit, notify_url, extract FROM tags WHERE name=?1",
+                "SELECT name, history_limit, notify_url, extract FROM tags WHERE name=?1",
                 [name],
                 |r| {
                     Ok(TagConfig {
                         name: r.get(0)?,
-                        enabled: r.get::<_, i64>(1)? != 0,
-                        notify_enabled: r.get::<_, i64>(2)? != 0,
-                        history_limit: r.get::<_, i64>(3)? as usize,
-                        notify_url: r.get::<_, Option<String>>(4)?.unwrap_or_default(),
+                        history_limit: r.get::<_, i64>(1)? as usize,
+                        notify_url: r.get::<_, Option<String>>(2)?.unwrap_or_default(),
                         extract: r
-                            .get::<_, Option<String>>(5)?
+                            .get::<_, Option<String>>(3)?
                             .and_then(|s| serde_json::from_str(&s).ok()),
                     })
                 },
@@ -436,18 +437,10 @@ impl Db {
             .map(|e| serde_json::to_string(e))
             .transpose()?;
         self.conn.execute(
-            "INSERT INTO tags(name, enabled, notify_enabled, history_limit, notify_url, extract) VALUES (?1,?2,?3,?4,?5,?6)\n\
-             ON CONFLICT(name) DO UPDATE SET enabled=excluded.enabled,\
-                 notify_enabled=excluded.notify_enabled, history_limit=excluded.history_limit,\
+            "INSERT INTO tags(name, history_limit, notify_url, extract) VALUES (?1,?2,?3,?4)\n\
+             ON CONFLICT(name) DO UPDATE SET history_limit=excluded.history_limit,\
                  notify_url=excluded.notify_url, extract=excluded.extract",
-            params![
-                tag.name,
-                if tag.enabled { 1 } else { 0 },
-                if tag.notify_enabled { 1 } else { 0 },
-                tag.history_limit as i64,
-                tag.notify_url,
-                extract_json
-            ],
+            params![tag.name, tag.history_limit as i64, tag.notify_url, extract_json],
         )?;
         Ok(())
     }
@@ -468,8 +461,8 @@ impl Db {
                 continue;
             }
             self.conn.execute(
-                "INSERT OR IGNORE INTO tags(name, enabled, notify_enabled, history_limit, notify_url, extract) \
-                 VALUES (?1, 1, 1, 0, '', NULL)",
+                "INSERT OR IGNORE INTO tags(name, history_limit, notify_url, extract) \
+                 VALUES (?1, 0, '', NULL)",
                 [trimmed],
             )?;
         }

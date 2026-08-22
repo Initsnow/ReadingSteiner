@@ -124,10 +124,6 @@ export interface DaemonStatus {
 export interface TagConfig {
   /** 分组（标签）名称。 */
   name: string
-  /** 是否启用分组内监控（调度检查）。 */
-  enabled: boolean
-  /** 是否发送分组内监控源的变更通知。 */
-  notify_enabled: boolean
   /** 该分组下每个监控源最多保留的变更历史条数（0 表示不限制，跟随全局）。 */
   history_limit: number
   /** 分组默认的内容提取配置；未配置则不覆盖，监控源沿用自身/全局设置。 */

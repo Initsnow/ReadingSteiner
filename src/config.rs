@@ -141,11 +141,8 @@ impl DaemonConfig {
 #[serde(default)]
 pub struct TelegramConfig {
     /// 全局通知目标，格式：`tgram://bottoken/ChatID1/ChatID2`。
-    /// 编码了 bot token 与一个或多个 chat id；为空时回退到旧字段 token / default_chat_id。
+    /// 编码了 bot token 与一个或多个 chat id。
     pub url: String,
-    pub token: String,
-    pub token_file: PathBuf,
-    pub default_chat_id: String,
     pub api_base: String,
     pub max_images_per_event: usize,
     pub image_bytes_budget: u64,
@@ -174,7 +171,7 @@ pub const DEFAULT_EVENT_TEMPLATE: &str = r#"<b>ReadingSteiner</b> — {label}
 {items}"#;
 
 /// 通过 Web/CLI 可编辑的全局设置视图。对应 config.yaml 的 daemon / telegram 段。
-/// 不包含 token 等敏感密钥（token 仍通过 token_file 管理）。
+/// 通知目标以 tgram:// url 形式管理，不在此暴露 token 明文。
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(default)]
 pub struct EditableSettings {
@@ -297,43 +294,36 @@ impl Default for SourceConfig {
     }
 }
 
-/// 解析监控源的「生效」开关配置。
+/// 解析监控源的「生效」开关与历史保留条数。
 ///
-/// 若监控源开启 `follow_group` 且带有已配置的分组，则监控 / 通知开关与历史保留条数
-/// 继承分组的设置；否则使用监控源自身的 `enabled` / `notify_enabled`。
-///
-/// 一个监控源可挂多个分组，这里采用「保守策略」：监控开关取各分组 `enabled` 的逻辑与
-/// （任一分组关闭监控则该源暂停监控），通知开关取各分组 `notify_enabled` 的逻辑与，
-/// 历史保留条数取各分组中的最小值（最严格的保留策略）。
+/// 监控 / 通知开关由监控源自身 `enabled` / `notify_enabled` 独立控制，分组不参与叠加。
+/// 历史保留条数若监控源开启 `follow_group` 且带有已配置的分组，则取各分组中的
+/// 最小值（最严格的保留策略）；否则使用全局设置。
 pub fn resolve_effective_source(
     source: &SourceConfig,
     tags: &[crate::models::TagConfig],
     global_history_limit: usize,
 ) -> (bool, bool, usize) {
-    // 若源未跟随分组，或没有标签，则完全使用自身设置。
-    if !source.follow_group || source.tags.is_empty() {
-        return (source.enabled, source.notify_enabled, global_history_limit);
-    }
-    let group_tags: Vec<&crate::models::TagConfig> = tags
-        .iter()
-        .filter(|t| source.tags.iter().any(|tag| tag == &t.name))
-        .collect();
-    if group_tags.is_empty() {
-        // 有标签但没有对应分组配置：仍使用自身设置（分组未配置时不改变行为）。
-        return (source.enabled, source.notify_enabled, global_history_limit);
-    }
-    // 组合语义：监控源的自身开关作为「总开关」，分组开关进一步收窄。
-    // 这样既能让分组整体启停（分组关 → 源关），也尊重用户对单个源显式关闭的意图
-    // （源自身关 → 即使分组开启该源也不会被激活）。
-    let enabled = source.enabled && group_tags.iter().all(|t| t.enabled);
-    let notify = source.notify_enabled && group_tags.iter().all(|t| t.notify_enabled);
-    let history = group_tags
-        .iter()
-        .map(|t| t.history_limit)
-        .filter(|&h| h > 0)
-        .min()
-        .unwrap_or(global_history_limit);
-    (enabled, notify, history)
+    let history = if !source.follow_group || source.tags.is_empty() {
+        global_history_limit
+    } else {
+        let group_tags: Vec<&crate::models::TagConfig> = tags
+            .iter()
+            .filter(|t| source.tags.iter().any(|tag| tag == &t.name))
+            .collect();
+        if group_tags.is_empty() {
+            // 有标签但没有对应分组配置：不改变行为，使用全局设置。
+            global_history_limit
+        } else {
+            group_tags
+                .iter()
+                .map(|t| t.history_limit)
+                .filter(|&h| h > 0)
+                .min()
+                .unwrap_or(global_history_limit)
+        }
+    };
+    (source.enabled, source.notify_enabled, history)
 }
 
 /// 解析 `tgram://bottoken/ChatID1/ChatID2` 形式的 Telegram 通知目标。
