@@ -7,6 +7,7 @@ use reqwest::Client;
 use tokio::sync::Mutex;
 use tracing::{debug, warn};
 
+use crate::config::DEFAULT_USER_AGENT;
 use crate::db::Db;
 use crate::error::{Error, Result};
 use crate::models::{ImageRef, MediaCacheEntry};
@@ -25,7 +26,7 @@ impl ImageDownloader {
         let client = Client::builder()
             .connect_timeout(Duration::from_secs(10))
             .timeout(Duration::from_secs(30))
-            .user_agent(crate::config::DEFAULT_USER_AGENT)
+            .user_agent(DEFAULT_USER_AGENT)
             .build()?;
         Ok(Self {
             client,

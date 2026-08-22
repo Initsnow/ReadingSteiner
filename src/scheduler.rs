@@ -17,7 +17,7 @@ use crate::config::{
 };
 use crate::db::Db;
 use crate::differ;
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::fetcher::{self, FetchSpec};
 use crate::images::ImageDownloader;
 use crate::models::{ChangeEvent, DaemonStatus, Item, ScheduleState, SnapshotRecord};
@@ -54,11 +54,13 @@ impl AppState {
 
     pub fn with_config_path(cfg: Config, config_path: Option<PathBuf>) -> Result<Self> {
         // SQLite 是运行参数的唯一来源：config.yaml 只提供启动引导项（目录、socket、camofox、
-        // telegram api_base 等），可编辑设置从 SQLite `settings` 表读取，缺失时用默认值。
+        // telegram api_base 等），可编辑设置从 SQLite `settings` 表读取（迁移时已 seed 默认值）。
         std::fs::create_dir_all(&cfg.state_dir)?;
         let db_path = cfg.state_dir.join("reading-steiner.db");
         let db = Db::open(db_path)?;
-        let settings = db.get_settings()?.unwrap_or_default();
+        let settings = db
+            .get_settings()?
+            .ok_or_else(|| Error::other("settings not seeded"))?;
         let runtime = RuntimeConfig::from_parts(&cfg, &settings);
         // notifier 的 url / 模板 / 图片数以 SQLite 设置为准，api_base 等取自启动项。
         let telegram = cfg.telegram.clone().with_overrides(&settings);
