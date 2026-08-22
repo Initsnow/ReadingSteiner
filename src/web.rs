@@ -336,7 +336,7 @@ async fn api_event_screenshot(
             Json(json!({ "ok": false, "error": "invalid screenshot path" })),
         ));
     }
-    let media_dir = state.runtime.media_dir.clone();
+    let media_dir = state.runtime.read().unwrap().media_dir.clone();
     let file = media_dir.join(&rel);
     // canonicalize 失败（文件不存在等）时直接拒绝，不再 fallback 到未规范化的 file。
     let canonical = match file.canonicalize() {
@@ -489,7 +489,7 @@ async fn api_download_backup(
         ));
     }
 
-    let state_dir = state.runtime.state_dir.clone();
+    let state_dir = state.runtime.read().unwrap().state_dir.clone();
     let dir = state_dir.join("backups").join(&name);
     if !dir.join("reading-steiner.db").exists() {
         return Err((
@@ -633,6 +633,8 @@ async fn api_restore_upload(
         .unwrap_or_default();
     let tmp = state
         .runtime
+        .read()
+        .unwrap()
         .state_dir
         .join("backups")
         .join(format!("upload-restore-{uniq}.zip"));

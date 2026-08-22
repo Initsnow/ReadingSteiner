@@ -247,7 +247,14 @@ export const api = {
   getSettings: () => request<EditableSettings>("/api/settings"),
 
   updateSettings: (settings: EditableSettings) =>
-    request<{ saved: boolean; restart_required: boolean; config: string }>(
+    request<{
+      saved: boolean
+      applied: boolean
+      immediate: boolean
+      restart_required: boolean
+      restart_only: string[]
+      config: string
+    }>(
       "/api/settings",
       {
         method: "PUT",
