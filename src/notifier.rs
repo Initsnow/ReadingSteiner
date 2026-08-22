@@ -40,10 +40,10 @@ pub struct TelegramNotifier {
 
 impl TelegramNotifier {
     pub fn new(cfg: &TelegramConfig, timezone: &str) -> Result<Self> {
-        // 配置合法性校验：全局通知目标（tgram:// url）或旧式 token/token_file 至少其一可用。
-        let token = resolve_global_token(cfg)?;
-        // 静默：仅校验，token 用于后续按 target 发送时若目标缺 token 的回退。
-        let _ = token;
+        // 配置合法性校验：全局通知目标（tgram:// url）必须可解析。
+        resolve_global_target(cfg).ok_or_else(|| {
+            Error::config("telegram url is required to configure notification target")
+        })?;
         let client = Client::builder()
             .connect_timeout(Duration::from_secs(10))
             .timeout(Duration::from_secs(60))
@@ -63,7 +63,7 @@ impl TelegramNotifier {
         }
     }
 
-    /// 取全局通知目标（从 `telegram.url` 解析；旧式回退到 token + default_chat_id）。
+    /// 取全局通知目标（从 `telegram.url` 的 tgram:// 形式解析）。
     pub fn global_target(&self) -> Option<TelegramTarget> {
         resolve_global_target(&self.cfg)
     }
@@ -514,49 +514,11 @@ pub async fn process_outbox(
     Ok(sent)
 }
 
-/// 解析全局 bot token：优先用 `telegram.url`（tgram://）中的 token，
-/// 否则回退到旧的 `token` / `token_file` 字段。
-fn resolve_global_token(cfg: &TelegramConfig) -> Result<String> {
-    if !cfg.url.trim().is_empty() {
-        if let Ok(target) = crate::config::parse_telegram_url(&cfg.url) {
-            if !target.token.is_empty() {
-                return Ok(target.token);
-            }
-        }
-    }
-    if !cfg.token.is_empty() {
-        return Ok(cfg.token.clone());
-    }
-    if !cfg.token_file.as_os_str().is_empty() && Path::new(&cfg.token_file).exists() {
-        return Ok(std::fs::read_to_string(&cfg.token_file)?.trim().to_string());
-    }
-    Err(Error::config("telegram url/token or token_file is required"))
-}
-
-/// 解析全局通知目标（`telegram.url` 优先，回退到旧式 token + default_chat_id）。
+/// 解析全局通知目标（仅支持 `telegram.url` 的 tgram:// 形式）。
 fn resolve_global_target(cfg: &TelegramConfig) -> Option<TelegramTarget> {
-    if !cfg.url.trim().is_empty() {
-        if let Ok(t) = crate::config::parse_telegram_url(&cfg.url) {
-            if t.is_valid() {
-                return Some(t);
-            }
-        }
-    }
-    let token = if !cfg.token.is_empty() {
-        cfg.token.clone()
-    } else if !cfg.token_file.as_os_str().is_empty() && Path::new(&cfg.token_file).exists() {
-        std::fs::read_to_string(&cfg.token_file).ok()?.trim().to_string()
-    } else {
-        String::new()
-    };
-    if token.is_empty() || cfg.default_chat_id.is_empty() {
-        None
-    } else {
-        Some(TelegramTarget {
-            token,
-            chat_ids: vec![cfg.default_chat_id.clone()],
-        })
-    }
+    crate::config::parse_telegram_url(&cfg.url)
+        .ok()
+        .filter(|t| t.is_valid())
 }
 
 /// 从 target 取 token，若缺失则用全局 token 兜底。
@@ -564,7 +526,10 @@ fn resolve_target_token(cfg: &TelegramConfig, target: &TelegramTarget) -> Result
     if !target.token.is_empty() {
         Ok(target.token.clone())
     } else {
-        resolve_global_token(cfg)
+        resolve_global_target(cfg)
+            .filter(|t| !t.token.is_empty())
+            .map(|t| t.token)
+            .ok_or_else(|| Error::config("telegram url is required to configure notification target"))
     }
 }
 

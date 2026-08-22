@@ -168,15 +168,13 @@ export function SettingsPage() {
     try {
       await api.updateTag(name, {
         name,
-        enabled: true,
-        notify_enabled: true,
         history_limit: 0,
         notify_url: "",
         extract: null,
       })
       setTags((prev) => [
         ...prev,
-        { name, enabled: true, notify_enabled: true, history_limit: 0, notify_url: "", extract: null },
+        { name, history_limit: 0, notify_url: "", extract: null },
       ])
       setNewTagName("")
       setTagNotice(`已创建分组「${name}」。`)

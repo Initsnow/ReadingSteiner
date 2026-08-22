@@ -18,7 +18,7 @@ cd web && npm install && npm run build && cd ..
 
 # 准备配置
 cp config.yaml config.local.yaml
-# 编辑 token / chat 后启动 daemon
+# 在 config.yaml 的 telegram.url 配置 tgram:// 通知目标后启动 daemon
 ./target/release/reading-steiner serve --config config.local.yaml
 
 # 在另一终端添加监控源（YAML 文件，需 daemon 已运行）
@@ -79,7 +79,7 @@ reading-steiner restore-from-zip --file x.zip  # 从上传/本地的 zip 备份�
 - `daemon.failure_notify_threshold`——连续失败达到多少次后发送 Telegram 失败告警（0 禁用）。
 - `daemon.timezone`——调度器/告警展示时区（IANA 名称，如 `Asia/Shanghai`；留空使用系统本地时区）。
 - `telegram.template`——变更通知模板，占位符：`{label}` `{watch}` `{time}` `{tz}` `{summary}` `{items}`。
-- `telegram.url`——全局通知目标，格式 `tgram://bottoken/ChatID1/ChatID2`，编码了 bot token 与一个或多个接收 chat id（留空回退到旧的 `token` / `token_file` + `default_chat_id`）。
+- `telegram.url`——全局通知目标，格式 `tgram://bottoken/ChatID1/ChatID2`，编码了 bot token 与一个或多个接收 chat id（留空则未配置通知目标）。
 - `telegram.max_images_per_event` 等。
 
 #### 通知目标（tgram://）
@@ -237,7 +237,8 @@ extract:
             configFile = ./config.yaml;
             settings = {
               stateDir = "/var/lib/reading-steiner";
-              telegram.tokenFile = config.sops.secrets.telegram.path;
+              # 通知目标统一为 tgram:// 形式（含 bot token 与 chat id）
+              telegram.url = "tgram://bottoken/ChatID";
               camofox = {
                 enabled = false;
                 base_url = "http://127.0.0.1:9377";

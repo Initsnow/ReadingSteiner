@@ -25,11 +25,8 @@ web:
 
 telegram:
   # 全局通知目标：tgram://bottoken/ChatID1/ChatID2
-  # 编码了 bot token 与一个或多个接收 chat id。留空则回退到旧的 token/token_file + default_chat_id。
+  # 编码了 bot token 与一个或多个接收 chat id。留空则未配置通知目标。
   # url: "tgram://123456:ABC/1000/2000"
-  # token: "123456:ABC"       # prefer token_file for production
-  token_file: state/telegram_token
-  default_chat_id: ""
   api_base: https://api.telegram.org
   max_images_per_event: 10
   image_bytes_budget: 10485760

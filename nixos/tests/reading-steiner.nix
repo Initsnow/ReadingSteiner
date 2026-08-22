@@ -8,17 +8,10 @@ let
       concurrency: 2
       queue_capacity: 16
     telegram:
-      token: "test:token"
-      default_chat_id: "12345"
+      url: "tgram://test:token/12345"
       api_base: http://127.0.0.1:8443
     camofox:
       enabled: false
-    pipelines:
-      default:
-        extract:
-          - type: auto_text
-        normalize: []
-        filter: {}
   '';
 in
 pkgs.testers.runNixOSTest {

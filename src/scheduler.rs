@@ -193,7 +193,7 @@ pub async fn run_daemon(state: Arc<AppState>) -> Result<()> {
                             && sched.consecutive_failures >= threshold
                             && !sched.failure_notified
                         {
-                            // 失败告警使用全局通知目标（tgram:// 或旧式 token/chat）。
+                            // 失败告警使用全局通知目标（tgram:// 形式）。
                             let target = state
                                 .notifier
                                 .as_ref()
@@ -520,7 +520,7 @@ pub async fn check_source(state: &Arc<AppState>, source_id: &str) -> Result<()> 
         };
         if effective_notify && state.notifier.is_some() {
             let tags = db.list_tags().unwrap_or_default();
-            // 解析通知目标：分组优先，回退全局（tgram:// URL 或旧式 token/chat）。
+            // 解析通知目标：分组优先，回退全局（tgram:// URL）。
             let target = crate::config::resolve_notify_target(
                 &source,
                 &tags,
