@@ -32,7 +32,7 @@ camofox:
   ...
 ```
 
-`daemon` / `telegram` 段的**可编辑运行参数**（并发、队列、超时、cron、UA、历史保留、失败阈值、时区、通知目标、模板、图片数）**只存在于 SQLite**，config.yaml 中配置无效。
+`daemon` / `telegram` 段的**可编辑运行参数**（并发、队列、超时、cron、UA、历史保留、失败阈值、时区、通知目标、模板、图片数）**只存在于 SQLite**，config.yaml 中配置无效。保存后全部**即时生效**。
 
 ## 全局设置（SQLite）
 
@@ -52,17 +52,17 @@ camofox:
 | `telegram_url` | 全局通知目标（`tgram://`） |
 | `max_images_per_event` | 单事件最多附带图片数 |
 
-### 生效档位（热更新）
+### 热更新
 
-保存设置后按「生效档位」处理，Web 控制台会以徽标标注每项字段：
+所有全局设置保存后**即时生效**。
 
-| 档位 | 含义 | 字段 |
-|---|---|---|
-| **即时生效** | 保存后立刻生效，无需重启 | `telegram_url`、`template`、`max_images_per_event`、`failure_notify_threshold`、`history_limit_per_source` |
-| **下次任务生效** | 下一次调度 / 下一次建源时读取，无需重启 daemon | `timezone`、`default_cron`、`default_user_agent`、`default_timeout_secs` |
-| **需重启** | 启动时一次性分配线程池 / 队列，改动需重启 daemon 生效 | `concurrency`、`queue_capacity` |
+其中：
 
-即时生效字段由 notifier / runtime 在每次使用时读取；「下次任务生效」字段由调度器在下一轮调度或新建监控源时装载。并发数 / 队列容量因涉及工作线程池与有界队列的启动期分配，强行热改收益低且易引入竞态，故保留重启生效。
+- `concurrency`（并发数）由 daemon 调度循环在每轮动态调整信号量许可数，即时生效。
+- `queue_capacity`（队列容量）在每轮入队时读取，即时生效。
+- 其余字段（`timezone`、`default_cron`、`default_user_agent`、`default_timeout_secs`、
+  `telegram_url`、`template`、`max_images_per_event`、`failure_notify_threshold`、
+  `history_limit_per_source`）由 runtime / notifier 在每次使用时读取，保存即生效。
 
 ### 通知目标（tgram://）
 

@@ -252,7 +252,6 @@ export const api = {
       applied: boolean
       immediate: boolean
       restart_required: boolean
-      restart_only: string[]
       config: string
     }>(
       "/api/settings",

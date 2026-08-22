@@ -33,43 +33,17 @@ const labelCls = "text-xs font-medium text-muted-foreground"
 function Field({
   label,
   hint,
-  effect,
   className,
   children,
 }: {
   label: string
   hint?: string
-  /** 生效档位徽标：immediate=即时 / next=下次任务 / restart=需重启 */
-  effect?: "immediate" | "next" | "restart"
   className?: string
   children: React.ReactNode
 }) {
-  const effectLabel =
-    effect === "restart"
-      ? "需重启"
-      : effect === "next"
-        ? "下次任务生效"
-        : effect === "immediate"
-          ? "即时生效"
-          : null
   return (
     <div className={className}>
-      <label className={`${labelCls} flex items-center gap-2`}>
-        {label}
-        {effectLabel && (
-          <span
-            className={`rounded-full px-2 py-0.5 text-[10px] font-medium ${
-              effect === "restart"
-                ? "bg-amber-100 text-amber-700"
-                : effect === "next"
-                  ? "bg-sky-100 text-sky-700"
-                  : "bg-green-100 text-green-700"
-            }`}
-          >
-            {effectLabel}
-          </span>
-        )}
-      </label>
+      <label className={labelCls}>{label}</label>
       <div className="mt-1">{children}</div>
       {hint && <p className="mt-1 text-xs text-muted-foreground">{hint}</p>}
     </div>
@@ -161,14 +135,8 @@ export function SettingsPage() {
     setNotice(null)
     setError(null)
     try {
-      const res = await api.updateSettings(settings)
-      const hot =
-        "已保存并即时生效（除「并发数 / 队列容量」需重启 daemon 外，其余均已热更新）。"
-      const restart =
-        res.restart_required || res.restart_only?.length
-          ? "并发数与队列容量在下次重启 daemon 后生效。"
-          : ""
-      setNotice(`已保存到 ${res.config}。${restart}${restart ? " " : ""}${hot}`)
+      await api.updateSettings(settings)
+      setNotice(`已保存并即时生效。`)
     } catch (e) {
       setError((e as Error).message)
     } finally {
@@ -365,15 +333,10 @@ export function SettingsPage() {
           <CardTitle className="flex items-center gap-2">
             <Save className="h-5 w-5" /> 全局设置
           </CardTitle>
-          <p className="text-xs text-muted-foreground">
-            保存后：<span className="text-green-600">即时生效</span> /{" "}
-            <span className="text-sky-600">下次任务生效</span> /{" "}
-            <span className="text-amber-600">需重启 daemon</span>（并发数、队列容量）
-          </p>
         </CardHeader>
         <CardContent>
           <div className="grid grid-cols-2 gap-4">
-            <Field label="抓取并发数" effect="restart">
+            <Field label="抓取并发数">
               <input
                 type="number"
                 className={inputCls}
@@ -383,7 +346,7 @@ export function SettingsPage() {
                 }
               />
             </Field>
-            <Field label="队列容量" effect="restart">
+            <Field label="队列容量">
               <input
                 type="number"
                 className={inputCls}
@@ -393,7 +356,7 @@ export function SettingsPage() {
                 }
               />
             </Field>
-            <Field label="默认请求超时（秒）" effect="next">
+            <Field label="默认请求超时（秒）">
               <input
                 type="number"
                 className={inputCls}
@@ -406,7 +369,6 @@ export function SettingsPage() {
             <Field
               label="默认 cron 表达式"
               hint="新建监控源未单独配置时使用；留空回退到每小时（0 * * * *）"
-              effect="next"
             >
               <input
                 className={inputCls}
@@ -417,7 +379,7 @@ export function SettingsPage() {
                 }
               />
             </Field>
-            <Field label="默认 User-Agent" hint="留空使用内置默认值" effect="next">
+            <Field label="默认 User-Agent" hint="留空使用内置默认值">
               <input
                 className={inputCls}
                 value={settings.default_user_agent}
@@ -426,7 +388,7 @@ export function SettingsPage() {
                 }
               />
             </Field>
-            <Field label="每个监控源保留历史条数" hint="0 表示不限制" effect="immediate">
+            <Field label="每个监控源保留历史条数" hint="0 表示不限制">
               <input
                 type="number"
                 className={inputCls}
@@ -439,7 +401,7 @@ export function SettingsPage() {
                 }
               />
             </Field>
-            <Field label="连续失败通知阈值" hint="0 表示禁用失败通知" effect="immediate">
+            <Field label="连续失败通知阈值" hint="0 表示禁用失败通知">
               <input
                 type="number"
                 className={inputCls}
@@ -452,7 +414,7 @@ export function SettingsPage() {
                 }
               />
             </Field>
-            <Field label="调度器时区" hint="IANA 名称，如 Asia/Shanghai；留空使用系统本地时区" effect="next">
+            <Field label="调度器时区" hint="IANA 名称，如 Asia/Shanghai；留空使用系统本地时区">
               <input
                 className={inputCls}
                 value={settings.timezone}
@@ -461,7 +423,7 @@ export function SettingsPage() {
                 }
               />
             </Field>
-            <Field label="单事件最多附带图片数" effect="immediate">
+            <Field label="单事件最多附带图片数">
               <input
                 type="number"
                 className={inputCls}
@@ -477,7 +439,6 @@ export function SettingsPage() {
             <Field
               label="Telegram 通知目标"
               hint="格式：tgram://bottoken/ChatID1/ChatID2，编码 bot token 与一个或多个接收 chat id"
-              effect="immediate"
               className="col-span-2"
             >
               <input
@@ -492,7 +453,6 @@ export function SettingsPage() {
             <Field
               label="变更通知模板"
               hint="占位符：{label} {watch} {time} {tz} {summary} {items}"
-              effect="immediate"
               className="col-span-2"
             >
               <textarea
