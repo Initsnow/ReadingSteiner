@@ -46,10 +46,18 @@ impl AppState {
     }
 
     pub fn with_config_path(cfg: Config, config_path: Option<PathBuf>) -> Result<Self> {
-        let runtime = RuntimeConfig::from_config(&cfg);
-        std::fs::create_dir_all(&runtime.state_dir)?;
-        let db_path = runtime.state_dir.join("reading-steiner.db");
+        // 全局可编辑设置存于 SQLite，是配置的唯一来源；config.yaml 只保留启动所需的基础项。
+        // 先算基础 runtime（用于定位 DB），再打开 DB 读取设置并覆盖到 cfg，最后重建 runtime。
+        let base_runtime = RuntimeConfig::from_config(&cfg);
+        std::fs::create_dir_all(&base_runtime.state_dir)?;
+        let db_path = base_runtime.state_dir.join("reading-steiner.db");
         let db = Db::open(db_path)?;
+        // 将 SQLite 中的全局设置覆盖到 cfg（daemon / telegram 段），实现 SQLite 优先。
+        let mut cfg = cfg;
+        if let Ok(Some(settings)) = db.get_settings() {
+            settings.apply_to(&mut cfg);
+        }
+        let runtime = RuntimeConfig::from_config(&cfg);
         let notifier = match TelegramNotifier::new(&cfg.telegram, &runtime.timezone) {
             Ok(n) => Some(Arc::new(n)),
             Err(e) => {

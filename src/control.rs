@@ -414,28 +414,33 @@ pub(crate) async fn handle_request(state: &Arc<AppState>, req: ControlRequest) -
             None => ControlResponse::err("telegram notifier disabled"),
         },
         ControlRequest::GetSettings => {
-            let s = EditableSettings::from_config(&state.cfg);
+            // 全局可编辑设置以 SQLite 为准；未配置时回退到 config.yaml / 默认值。
+            let s = {
+                let db = state.db.lock().await;
+                match db.get_settings() {
+                    Ok(Some(settings)) => settings,
+                    _ => EditableSettings::from_config(&state.cfg),
+                }
+            };
             match serde_json::to_value(s) {
                 Ok(v) => ControlResponse::ok(v),
                 Err(e) => ControlResponse::err(e.to_string()),
             }
         }
         ControlRequest::UpdateSettings { settings } => {
-            // 持久化到 config 文件；部分参数（并发数、超时、UA、时区、模板）需重启 daemon 生效。
-            let Some(config_path) = state.config_path.clone() else {
-                return ControlResponse::err(
-                    "no config file path available; cannot persist settings",
-                );
-            };
-            let mut cfg = state.cfg.clone();
-            settings.apply_to(&mut cfg);
-            if let Err(e) = cfg.save(&config_path) {
-                return ControlResponse::err(format!("failed to save config: {e}"));
+            // 持久化到 SQLite（`settings` 表），不再写入 config.yaml。
+            // 部分参数（并发数、超时、UA、时区、模板、图片数）在启动时固化到
+            // runtime / notifier，需重启 daemon 生效。
+            {
+                let db = state.db.lock().await;
+                if let Err(e) = db.set_settings(&settings) {
+                    return ControlResponse::err(format!("failed to save settings: {e}"));
+                }
             }
             ControlResponse::ok(json!({
                 "saved": true,
                 "restart_required": true,
-                "config": config_path.display().to_string(),
+                "config": "SQLite (settings 表)",
             }))
         }
         ControlRequest::Backup => {
