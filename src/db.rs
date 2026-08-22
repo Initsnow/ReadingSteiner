@@ -11,7 +11,7 @@ use crate::models::{
     SystemNotification, TagConfig,
 };
 
-const SCHEMA_VERSION: i64 = 7;
+const SCHEMA_VERSION: i64 = 8;
 
 pub struct Db {
     conn: Connection,
@@ -107,6 +107,7 @@ impl Db {
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     event_id INTEGER NOT NULL,
                     chat_id TEXT NOT NULL,
+                    target_json TEXT NOT NULL DEFAULT '',
                     message_ids_json TEXT NOT NULL DEFAULT '[]',
                     status TEXT NOT NULL DEFAULT 'pending',
                     attempts INTEGER NOT NULL DEFAULT 0,
@@ -126,6 +127,7 @@ impl Db {
                 CREATE TABLE IF NOT EXISTS system_notifications (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     chat_id TEXT NOT NULL,
+                    target_json TEXT NOT NULL DEFAULT '',
                     text TEXT NOT NULL,
                     status TEXT NOT NULL DEFAULT 'pending',
                     attempts INTEGER NOT NULL DEFAULT 0,
@@ -136,7 +138,9 @@ impl Db {
                     name TEXT PRIMARY KEY,
                     enabled INTEGER NOT NULL DEFAULT 1,
                     notify_enabled INTEGER NOT NULL DEFAULT 1,
-                    history_limit INTEGER NOT NULL DEFAULT 0
+                    history_limit INTEGER NOT NULL DEFAULT 0,
+                    notify_url TEXT NOT NULL DEFAULT '',
+                    extract TEXT
                 );
                 "#,
             )?;
@@ -192,6 +196,17 @@ impl Db {
             )?;
             self.conn.pragma_update(None, "user_version", 7)?;
             info!("database schema migrated to v7");
+        }
+        if v < 8 {
+            // v8：分组（标签）新增通知 URL 与默认内容提取；通知记录新增目标信息。
+            self.conn.execute_batch(
+                "ALTER TABLE tags ADD COLUMN notify_url TEXT NOT NULL DEFAULT '';\n\
+                 ALTER TABLE tags ADD COLUMN extract TEXT;\n\
+                 ALTER TABLE notifications ADD COLUMN target_json TEXT NOT NULL DEFAULT '';\n\
+                 ALTER TABLE system_notifications ADD COLUMN target_json TEXT NOT NULL DEFAULT '';",
+            )?;
+            self.conn.pragma_update(None, "user_version", 8)?;
+            info!("database schema migrated to v8");
         }
         Ok(())
     }
@@ -368,15 +383,19 @@ impl Db {
 
     /// 列出全部分组（标签）设置。
     pub fn list_tags(&self) -> Result<Vec<TagConfig>> {
-        let mut stmt = self
-            .conn
-            .prepare("SELECT name, enabled, notify_enabled, history_limit FROM tags ORDER BY name")?;
+        let mut stmt = self.conn.prepare(
+            "SELECT name, enabled, notify_enabled, history_limit, notify_url, extract FROM tags ORDER BY name",
+        )?;
         let rows = stmt.query_map([], |r| {
             Ok(TagConfig {
                 name: r.get(0)?,
                 enabled: r.get::<_, i64>(1)? != 0,
                 notify_enabled: r.get::<_, i64>(2)? != 0,
                 history_limit: r.get::<_, i64>(3)? as usize,
+                notify_url: r.get::<_, Option<String>>(4)?.unwrap_or_default(),
+                extract: r
+                    .get::<_, Option<String>>(5)?
+                    .and_then(|s| serde_json::from_str(&s).ok()),
             })
         })?;
         let mut out = Vec::new();
@@ -390,7 +409,7 @@ impl Db {
     pub fn get_tag(&self, name: &str) -> Result<Option<TagConfig>> {
         self.conn
             .query_row(
-                "SELECT name, enabled, notify_enabled, history_limit FROM tags WHERE name=?1",
+                "SELECT name, enabled, notify_enabled, history_limit, notify_url, extract FROM tags WHERE name=?1",
                 [name],
                 |r| {
                     Ok(TagConfig {
@@ -398,6 +417,10 @@ impl Db {
                         enabled: r.get::<_, i64>(1)? != 0,
                         notify_enabled: r.get::<_, i64>(2)? != 0,
                         history_limit: r.get::<_, i64>(3)? as usize,
+                        notify_url: r.get::<_, Option<String>>(4)?.unwrap_or_default(),
+                        extract: r
+                            .get::<_, Option<String>>(5)?
+                            .and_then(|s| serde_json::from_str(&s).ok()),
                     })
                 },
             )
@@ -407,15 +430,23 @@ impl Db {
 
     /// 新增 / 更新一个分组（标签）设置。
     pub fn upsert_tag(&self, tag: &TagConfig) -> Result<()> {
+        let extract_json = tag
+            .extract
+            .as_ref()
+            .map(|e| serde_json::to_string(e))
+            .transpose()?;
         self.conn.execute(
-            "INSERT INTO tags(name, enabled, notify_enabled, history_limit) VALUES (?1,?2,?3,?4)\n\
+            "INSERT INTO tags(name, enabled, notify_enabled, history_limit, notify_url, extract) VALUES (?1,?2,?3,?4,?5,?6)\n\
              ON CONFLICT(name) DO UPDATE SET enabled=excluded.enabled,\
-                 notify_enabled=excluded.notify_enabled, history_limit=excluded.history_limit",
+                 notify_enabled=excluded.notify_enabled, history_limit=excluded.history_limit,\
+                 notify_url=excluded.notify_url, extract=excluded.extract",
             params![
                 tag.name,
                 if tag.enabled { 1 } else { 0 },
                 if tag.notify_enabled { 1 } else { 0 },
-                tag.history_limit as i64
+                tag.history_limit as i64,
+                tag.notify_url,
+                extract_json
             ],
         )?;
         Ok(())
@@ -437,8 +468,8 @@ impl Db {
                 continue;
             }
             self.conn.execute(
-                "INSERT OR IGNORE INTO tags(name, enabled, notify_enabled, history_limit) \
-                 VALUES (?1, 1, 1, 0)",
+                "INSERT OR IGNORE INTO tags(name, enabled, notify_enabled, history_limit, notify_url, extract) \
+                 VALUES (?1, 1, 1, 0, '', NULL)",
                 [trimmed],
             )?;
         }
@@ -665,10 +696,11 @@ impl Db {
     }
 
     /// 插入一条系统级（非事件关联）通知，用于连续失败告警等场景。
-    pub fn insert_system_notification(&self, chat_id: &str, text: &str) -> Result<()> {
+    /// `target_json` 为发送目标（token + chat ids）的 JSON；为空时发送方回退到全局目标。
+    pub fn insert_system_notification(&self, chat_id: &str, text: &str, target_json: &str) -> Result<()> {
         self.conn.execute(
-            "INSERT INTO system_notifications(chat_id, text, status, attempts, next_retry_at, created_at) VALUES (?1,?2,'pending',0,NULL,?3)",
-            params![chat_id, text, Utc::now().to_rfc3339()],
+            "INSERT INTO system_notifications(chat_id, target_json, text, status, attempts, next_retry_at, created_at) VALUES (?1,?2,?3,'pending',0,NULL,?4)",
+            params![chat_id, target_json, text, Utc::now().to_rfc3339()],
         )?;
         Ok(())
     }
@@ -724,11 +756,12 @@ impl Db {
 
     pub fn insert_notification(&self, notif: &NotificationRecord) -> Result<i64> {
         self.conn.execute(
-            "INSERT INTO notifications(event_id, chat_id, message_ids_json, status, attempts, next_retry_at)
-             VALUES (?1,?2,?3,?4,?5,?6)",
+            "INSERT INTO notifications(event_id, chat_id, target_json, message_ids_json, status, attempts, next_retry_at)
+             VALUES (?1,?2,?3,?4,?5,?6,?7)",
             params![
                 notif.event_id,
                 notif.chat_id,
+                notif.target_json,
                 notif.message_ids_json,
                 notif.status,
                 notif.attempts,
@@ -743,17 +776,18 @@ impl Db {
         // 非空则需等到重试时间点之后才允许再次尝试，避免失败通知每 500ms 疯狂重试。
         let now = Utc::now().to_rfc3339();
         let mut stmt = self.conn.prepare(
-            "SELECT id, event_id, chat_id, message_ids_json, status, attempts, next_retry_at FROM notifications WHERE status='pending' AND (next_retry_at IS NULL OR next_retry_at <= ?1) ORDER BY id ASC LIMIT ?2",
+            "SELECT id, event_id, chat_id, target_json, message_ids_json, status, attempts, next_retry_at FROM notifications WHERE status='pending' AND (next_retry_at IS NULL OR next_retry_at <= ?1) ORDER BY id ASC LIMIT ?2",
         )?;
         let rows = stmt.query_map(params![now, limit as i64], |r| {
             Ok(NotificationRecord {
                 id: r.get(0)?,
                 event_id: r.get(1)?,
                 chat_id: r.get(2)?,
-                message_ids_json: r.get(3)?,
-                status: r.get(4)?,
-                attempts: r.get(5)?,
-                next_retry_at: r.get::<_, Option<String>>(6)?.map(|s| parse_ts(&s)),
+                target_json: r.get::<_, Option<String>>(3)?.unwrap_or_default(),
+                message_ids_json: r.get(4)?,
+                status: r.get(5)?,
+                attempts: r.get(6)?,
+                next_retry_at: r.get::<_, Option<String>>(7)?.map(|s| parse_ts(&s)),
             })
         })?;
         let mut out = Vec::new();
@@ -793,16 +827,17 @@ impl Db {
     pub fn pending_system_notifications(&self, limit: usize) -> Result<Vec<SystemNotification>> {
         let now = Utc::now().to_rfc3339();
         let mut stmt = self.conn.prepare(
-            "SELECT id, chat_id, text, status, attempts, next_retry_at FROM system_notifications WHERE status='pending' AND (next_retry_at IS NULL OR next_retry_at <= ?1) ORDER BY id ASC LIMIT ?2",
+            "SELECT id, chat_id, target_json, text, status, attempts, next_retry_at FROM system_notifications WHERE status='pending' AND (next_retry_at IS NULL OR next_retry_at <= ?1) ORDER BY id ASC LIMIT ?2",
         )?;
         let rows = stmt.query_map(params![now, limit as i64], |r| {
             Ok(SystemNotification {
                 id: r.get(0)?,
                 chat_id: r.get(1)?,
-                text: r.get(2)?,
-                status: r.get(3)?,
-                attempts: r.get(4)?,
-                next_retry_at: r.get::<_, Option<String>>(5)?.map(|s| parse_ts(&s)),
+                target_json: r.get::<_, Option<String>>(2)?.unwrap_or_default(),
+                text: r.get(3)?,
+                status: r.get(4)?,
+                attempts: r.get(5)?,
+                next_retry_at: r.get::<_, Option<String>>(6)?.map(|s| parse_ts(&s)),
             })
         })?;
         let mut out = Vec::new();

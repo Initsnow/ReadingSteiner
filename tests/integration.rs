@@ -3,7 +3,8 @@ use std::collections::HashMap;
 use chrono::Utc;
 use reading_steiner::config::{
     CamofoxConfig, ChangeType, Config, ExtractConfig, FetchConfig, ItemField, ItemSelector,
-    SourceConfig, resolve_effective_source,
+    SourceConfig, parse_telegram_url, resolve_effective_extract, resolve_effective_source,
+    resolve_notify_target,
 };
 use reading_steiner::db::Db;
 use reading_steiner::differ;
@@ -344,6 +345,7 @@ fn test_pending_notifications_respects_retry_backoff() {
         id: 0,
         event_id: 1,
         chat_id: "c".into(),
+        target_json: "".into(),
         message_ids_json: "[]".into(),
         status: "pending".into(),
         attempts: 0,
@@ -355,6 +357,7 @@ fn test_pending_notifications_respects_retry_backoff() {
         id: 0,
         event_id: 2,
         chat_id: "c".into(),
+        target_json: "".into(),
         message_ids_json: "[]".into(),
         status: "pending".into(),
         attempts: 1,
@@ -366,6 +369,7 @@ fn test_pending_notifications_respects_retry_backoff() {
         id: 0,
         event_id: 3,
         chat_id: "c".into(),
+        target_json: "".into(),
         message_ids_json: "[]".into(),
         status: "pending".into(),
         attempts: 2,
@@ -614,6 +618,8 @@ fn test_resolve_effective_source_with_groups() {
         enabled: true,
         notify_enabled: true,
         history_limit: 50,
+        extract: None,
+        notify_url: String::new(),
     }];
     assert_eq!(
         resolve_effective_source(&source, &group_tags, 100),
@@ -626,6 +632,8 @@ fn test_resolve_effective_source_with_groups() {
         enabled: false,
         notify_enabled: true,
         history_limit: 0,
+        extract: None,
+        notify_url: String::new(),
     }];
     assert_eq!(
         resolve_effective_source(&source, &group_tags_off, 100),
@@ -638,6 +646,8 @@ fn test_resolve_effective_source_with_groups() {
         enabled: true,
         notify_enabled: false,
         history_limit: 0,
+        extract: None,
+        notify_url: String::new(),
     }];
     assert_eq!(
         resolve_effective_source(&source, &group_tags_notify_off, 100),
@@ -660,12 +670,16 @@ fn test_resolve_effective_source_with_groups() {
             enabled: true,
             notify_enabled: true,
             history_limit: 50,
+            extract: None,
+            notify_url: String::new(),
         },
         TagConfig {
             name: "alert".into(),
             enabled: false,
             notify_enabled: false,
             history_limit: 20,
+            extract: None,
+            notify_url: String::new(),
         },
     ];
     assert_eq!(resolve_effective_source(&source, &multi, 100), (false, false, 20));
@@ -682,6 +696,127 @@ fn test_resolve_effective_source_with_groups() {
 }
 
 #[test]
+fn test_parse_telegram_url() {
+    // 单 chat id。
+    let t = parse_telegram_url("tgram://123:ABC/1000").unwrap();
+    assert_eq!(t.token, "123:ABC");
+    assert_eq!(t.chat_ids, vec!["1000".to_string()]);
+
+    // 多 chat id。
+    let t = parse_telegram_url("tgram://123:ABC/1000/2000/3000").unwrap();
+    assert_eq!(t.token, "123:ABC");
+    assert_eq!(t.chat_ids, vec!["1000".to_string(), "2000".to_string(), "3000".to_string()]);
+
+    // 非法：非 tgram:// 前缀。
+    assert!(parse_telegram_url("https://api.telegram.org").is_err());
+    // 非法：缺 token。
+    assert!(parse_telegram_url("tgram:///1000").is_err());
+    // 非法：缺 chat id。
+    assert!(parse_telegram_url("tgram://123:ABC").is_err());
+}
+
+#[test]
+fn test_resolve_notify_target() {
+    let source = SourceConfig {
+        tags: vec!["news".into()],
+        ..SourceConfig::default()
+    };
+
+    // 分组未配置通知 URL 时回退到全局。
+    let tags = vec![TagConfig {
+        name: "news".into(),
+        enabled: true,
+        notify_enabled: true,
+        history_limit: 0,
+        extract: None,
+        notify_url: String::new(),
+    }];
+    let t = resolve_notify_target(&source, &tags, "tgram://G/C9").unwrap();
+    assert_eq!(t.token, "G");
+    assert_eq!(t.chat_ids, vec!["C9".to_string()]);
+
+    // 分组配置了通知 URL 时优先使用分组的。
+    let tags = vec![TagConfig {
+        name: "news".into(),
+        enabled: true,
+        notify_enabled: true,
+        history_limit: 0,
+        extract: None,
+        notify_url: "tgram://P/1/2".into(),
+    }];
+    let t = resolve_notify_target(&source, &tags, "tgram://G/C9").unwrap();
+    assert_eq!(t.token, "P");
+    assert_eq!(t.chat_ids, vec!["1".to_string(), "2".to_string()]);
+
+    // 关闭跟随分组时用全局。
+    let mut src_no_follow = source.clone();
+    src_no_follow.follow_group = false;
+    let t = resolve_notify_target(&src_no_follow, &tags, "tgram://G/C9").unwrap();
+    assert_eq!(t.token, "G");
+
+    // 分组与全局均未配置时返回 None。
+    let no_url_tags = vec![TagConfig {
+        name: "news".into(),
+        enabled: true,
+        notify_enabled: true,
+        history_limit: 0,
+        extract: None,
+        notify_url: String::new(),
+    }];
+    assert!(resolve_notify_target(&source, &no_url_tags, "").is_none());
+}
+
+#[test]
+fn test_resolve_effective_extract() {
+    let source = SourceConfig {
+        tags: vec!["news".into()],
+        extract: ExtractConfig::Text { images: None },
+        ..SourceConfig::default()
+    };
+
+    // 分组未配置提取时使用源自身。
+    let tags = vec![TagConfig {
+        name: "news".into(),
+        enabled: true,
+        notify_enabled: true,
+        history_limit: 0,
+        extract: None,
+        notify_url: String::new(),
+    }];
+    assert!(matches!(
+        resolve_effective_extract(&source, &tags),
+        ExtractConfig::Text { .. }
+    ));
+
+    // 分组配置了提取时，源「跟随分组」则用分组的提取。
+    let tags = vec![TagConfig {
+        name: "news".into(),
+        enabled: true,
+        notify_enabled: true,
+        history_limit: 0,
+        extract: Some(ExtractConfig::Items {
+            selector: ItemSelector::Css { selector: ".item".into() },
+            fields: vec![],
+            dedupe_key: None,
+            images: None,
+        }),
+        notify_url: String::new(),
+    }];
+    assert!(matches!(
+        resolve_effective_extract(&source, &tags),
+        ExtractConfig::Items { .. }
+    ));
+
+    // 关闭「跟随分组」时使用源自身，即使分组配置了提取。
+    let mut src_no_follow = source.clone();
+    src_no_follow.follow_group = false;
+    assert!(matches!(
+        resolve_effective_extract(&src_no_follow, &tags),
+        ExtractConfig::Text { .. }
+    ));
+}
+
+#[test]
 fn test_tag_db_roundtrip() {
     let db = Db::open_in_memory().unwrap();
     // 初始为空。
@@ -694,6 +829,8 @@ fn test_tag_db_roundtrip() {
         enabled: true,
         notify_enabled: false,
         history_limit: 30,
+        extract: None,
+        notify_url: String::new(),
     };
     db.upsert_tag(&tag).unwrap();
     assert_eq!(db.list_tags().unwrap().len(), 1);
@@ -707,11 +844,14 @@ fn test_tag_db_roundtrip() {
         enabled: false,
         notify_enabled: true,
         history_limit: 0,
+        extract: None,
+        notify_url: "tgram://tok/C1".into(),
     })
     .unwrap();
     let loaded = db.get_tag("news").unwrap().unwrap();
     assert_eq!(loaded.enabled, false);
     assert_eq!(loaded.history_limit, 0);
+    assert_eq!(loaded.notify_url, "tgram://tok/C1");
 
     // 删除。
     assert_eq!(db.delete_tag("news").unwrap(), 1);
@@ -736,6 +876,8 @@ fn test_ensure_tags_registers_new_tags() {
         enabled: false,
         notify_enabled: false,
         history_limit: 10,
+        extract: None,
+        notify_url: String::new(),
     })
     .unwrap();
     db.ensure_tags(&["news".into()]).unwrap();

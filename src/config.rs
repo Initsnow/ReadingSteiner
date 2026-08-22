@@ -5,6 +5,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use serde::{Deserialize, Serialize};
 
 use crate::error::{Error, Result};
+use crate::models::{TagConfig, TelegramTarget};
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(default)]
@@ -139,6 +140,9 @@ impl DaemonConfig {
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(default)]
 pub struct TelegramConfig {
+    /// 全局通知目标，格式：`tgram://bottoken/ChatID1/ChatID2`。
+    /// 编码了 bot token 与一个或多个 chat id；为空时回退到旧字段 token / default_chat_id。
+    pub url: String,
     pub token: String,
     pub token_file: PathBuf,
     pub default_chat_id: String,
@@ -192,8 +196,8 @@ pub struct EditableSettings {
     pub timezone: String,
     /// 通知模板。
     pub template: String,
-    /// Telegram 默认 chat id。
-    pub default_chat_id: String,
+    /// 全局 Telegram 通知目标（`tgram://bottoken/ChatID1/ChatID2`）。
+    pub telegram_url: String,
     /// 单事件最多附带图片数。
     pub max_images_per_event: usize,
 }
@@ -210,7 +214,7 @@ impl EditableSettings {
             failure_notify_threshold: cfg.daemon.failure_notify_threshold,
             timezone: cfg.daemon.timezone.clone(),
             template: cfg.telegram.template.clone(),
-            default_chat_id: cfg.telegram.default_chat_id.clone(),
+            telegram_url: cfg.telegram.url.clone(),
             max_images_per_event: cfg.telegram.max_images_per_event,
         }
     }
@@ -226,7 +230,7 @@ impl EditableSettings {
         cfg.daemon.failure_notify_threshold = self.failure_notify_threshold;
         cfg.daemon.timezone = self.timezone.clone();
         cfg.telegram.template = self.template.clone();
-        cfg.telegram.default_chat_id = self.default_chat_id.clone();
+        cfg.telegram.url = self.telegram_url.clone();
         cfg.telegram.max_images_per_event = self.max_images_per_event;
     }
 }
@@ -330,6 +334,89 @@ pub fn resolve_effective_source(
         .min()
         .unwrap_or(global_history_limit);
     (enabled, notify, history)
+}
+
+/// 解析 `tgram://bottoken/ChatID1/ChatID2` 形式的 Telegram 通知目标。
+///
+/// 格式：`tgram://<token>/<chat_id1>/<chat_id2>/...`，其中 token 为
+/// Bot API 的完整 token（如 `123456:ABC`），chat id 为接收者 ID，可多个。
+/// 解析失败（非 tgram:// 前缀、缺少 token 或 chat id）时返回错误。
+pub fn parse_telegram_url(url: &str) -> Result<TelegramTarget> {
+    let s = url.trim();
+    if s.is_empty() {
+        return Err(Error::config("telegram url is empty"));
+    }
+    let rest = s
+        .strip_prefix("tgram://")
+        .ok_or_else(|| Error::config("telegram url must start with tgram://"))?;
+    let mut parts: Vec<&str> = rest.split('/').collect();
+    let token = parts.remove(0).trim().to_string();
+    if token.is_empty() {
+        return Err(Error::config("telegram url missing bot token"));
+    }
+    let chat_ids: Vec<String> = parts
+        .iter()
+        .map(|p| p.trim().to_string())
+        .filter(|p| !p.is_empty())
+        .collect();
+    if chat_ids.is_empty() {
+        return Err(Error::config("telegram url missing chat id"));
+    }
+    Ok(TelegramTarget { token, chat_ids })
+}
+
+/// 解析监控源的生效通知目标（token + chat ids）。
+///
+/// 若监控源「跟随分组」且所属分组配置了 `notify_url`，则使用分组的通知目标；
+/// 多个分组配置冲突时按分组名升序取第一个非空的分组。否则沿用全局通知目标。
+/// 返回 `None` 表示全局也未配置可用的通知目标。
+pub fn resolve_notify_target(
+    source: &SourceConfig,
+    tags: &[TagConfig],
+    global_url: &str,
+) -> Option<TelegramTarget> {
+    let fallback = || {
+        parse_telegram_url(global_url)
+            .ok()
+            .filter(|t| t.is_valid())
+    };
+    if !source.follow_group || source.tags.is_empty() {
+        return fallback();
+    }
+    let mut group_urls: Vec<&TagConfig> = tags
+        .iter()
+        .filter(|t| source.tags.contains(&t.name) && !t.notify_url.trim().is_empty())
+        .collect();
+    group_urls.sort_by_key(|t| t.name.clone());
+    if let Some(t) = group_urls.first() {
+        if let Ok(target) = parse_telegram_url(&t.notify_url) {
+            if target.is_valid() {
+                return Some(target);
+            }
+        }
+    }
+    fallback()
+}
+
+/// 解析监控源的生效内容提取配置。
+///
+/// 若监控源「跟随分组」且所属分组配置了 `extract`，则使用分组的提取设置；
+/// 否则使用监控源自身的提取设置。多个分组都配置了提取时按分组名升序取第一个。
+pub fn resolve_effective_extract(source: &SourceConfig, tags: &[TagConfig]) -> ExtractConfig {
+    if !source.follow_group || source.tags.is_empty() {
+        return source.extract.clone();
+    }
+    let mut group_extracts: Vec<&TagConfig> = tags
+        .iter()
+        .filter(|t| source.tags.contains(&t.name) && t.extract.is_some())
+        .collect();
+    group_extracts.sort_by_key(|t| t.name.clone());
+    if let Some(t) = group_extracts.first() {
+        if let Some(extract) = &t.extract {
+            return extract.clone();
+        }
+    }
+    source.extract.clone()
 }
 
 /// 自动生成监控源 ID：优先从名称生成可读 slug，否则从 URL 主机名生成，
