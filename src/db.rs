@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::path::Path;
 
 use chrono::{DateTime, Utc};
@@ -695,6 +696,41 @@ impl Db {
             )
             .optional()
             .map_err(Into::into)
+    }
+
+    /// 批量加载全部监控源的调度状态，用于 scheduler 主循环按轮扫描。
+    /// 相比逐源调用 `get_schedule_state`，一次查询即可获取全部状态，避免每 500ms 的
+    /// 循环对每个源发起一次 SQLite 查询（N+1 查询）。
+    pub fn list_schedule_states(&self) -> Result<HashMap<String, ScheduleState>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT source_id, next_due_at, consecutive_failures, consecutive_changes, backoff_until, last_success_at, last_error, last_notified_fingerprint, last_notified_at, failure_notified FROM schedule_state",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            let source_id: String = r.get(0)?;
+            Ok((
+                source_id.clone(),
+                ScheduleState {
+                    source_id,
+                    next_due_at: parse_ts(&r.get::<_, String>(1)?),
+                    consecutive_failures: r.get::<_, i64>(2)? as u32,
+                    consecutive_changes: r.get::<_, i64>(3)? as u32,
+                    backoff_until: r.get::<_, Option<String>>(4)?.map(|s| parse_ts(&s)),
+                    last_success_at: r.get::<_, Option<String>>(5)?.map(|s| parse_ts(&s)),
+                    last_error: r.get(6)?,
+                    last_notified_fingerprint: r.get(7)?,
+                    last_notified_at: r
+                        .get::<_, Option<String>>(8)?
+                        .map(|s| parse_ts(&s)),
+                    failure_notified: r.get::<_, i64>(9)? != 0,
+                },
+            ))
+        })?;
+        let mut out = HashMap::new();
+        for row in rows {
+            let (sid, state) = row?;
+            out.insert(sid, state);
+        }
+        Ok(out)
     }
 
     pub fn upsert_schedule_state(&self, state: &ScheduleState) -> Result<()> {
