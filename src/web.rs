@@ -23,8 +23,8 @@ use crate::config::Config;
 
 use crate::config::{EditableSettings, SourceConfig};
 use crate::control::{self, ControlRequest, ControlResponse};
-use crate::models::TagConfig;
 use crate::error::Result;
+use crate::models::TagConfig;
 use crate::scheduler::AppState;
 
 /// 上传 zip 备份的最大允许体积（默认 4 GiB，覆盖绝大多数含 media 的备份）。
@@ -76,7 +76,11 @@ async fn require_auth(
             // 先比长度再比内容，降低低熵 token 下的枚举成本。
             let a = s.as_bytes();
             let b = expected.as_bytes();
-            a.len() == b.len() && a.iter().zip(b.iter()).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
+            a.len() == b.len()
+                && a.iter()
+                    .zip(b.iter())
+                    .fold(0u8, |acc, (x, y)| acc | (x ^ y))
+                    == 0
         }
         _ => false,
     };
