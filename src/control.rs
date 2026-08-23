@@ -38,7 +38,12 @@ fn validate_settings(s: &EditableSettings) -> Result<()> {
     }
     // 非空 timezone 必须是合法的 IANA 时区名，避免坏值时区入库后
     // 调度/通知渲染时静默回退到 UTC，造成行为与配置不一致。
-    if !s.timezone.trim().is_empty() && chrono_tz::Tz::from_str(&s.timezone).is_err() {
+    // 系统本地时区字符串（如 Windows 上 iana_time_zone 返回的非 IANA 名称）
+    // 作为例外放行，否则默认种子值在“取回再保存”时会误判为非法。
+    if !s.timezone.trim().is_empty()
+        && chrono_tz::Tz::from_str(&s.timezone).is_err()
+        && s.timezone != crate::config::system_local_timezone()
+    {
         return Err(Error::config(format!(
             "timezone 不是合法的 IANA 时区: {}",
             s.timezone
