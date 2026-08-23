@@ -27,6 +27,7 @@ import {
   type TagConfig,
 } from "@/lib/api"
 import { validateCron } from "@/lib/utils"
+import { AuthImage } from "@/components/auth-image"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription } from "@/components/ui/card"
@@ -1444,11 +1445,10 @@ function EventRow({ event }: { event: ChangeEvent }) {
 
       {hasScreenshot && (
         <div className="mt-2">
-          <img
-            src={api.eventScreenshotUrl(event.id)}
+          <AuthImage
+            url={`/api/events/${event.id}/screenshot`}
             alt={`截图 #${event.id}`}
             className="max-h-48 rounded-md border object-contain"
-            loading="lazy"
           />
         </div>
       )}

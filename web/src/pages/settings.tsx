@@ -13,7 +13,7 @@ import {
   Plus,
   Hash,
 } from "lucide-react"
-import { api, type EditableSettings, type TagConfig } from "@/lib/api"
+import { api, fetchBlobUrl, type EditableSettings, type TagConfig } from "@/lib/api"
 import { validateCron } from "@/lib/utils"
 import { Button } from "@/components/ui/button"
 import {
@@ -246,6 +246,25 @@ export function SettingsPage() {
       await api.deleteBackup(name)
       setNotice(`已删除备份 ${name}。`)
       loadBackups()
+    } catch (e) {
+      setError((e as Error).message)
+    }
+  }
+
+  // 备份下载受鉴权保护，原生 `<a download>` 无法附加 Authorization 头，
+  // 需经 fetch 拉取 blob 后触发浏览器下载。
+  async function handleDownload(name: string) {
+    setNotice(null)
+    setError(null)
+    try {
+      const url = await fetchBlobUrl(`/api/backups/${encodeURIComponent(name)}/download`)
+      const a = document.createElement("a")
+      a.href = url
+      a.download = `${name}.zip`
+      document.body.appendChild(a)
+      a.click()
+      a.remove()
+      URL.revokeObjectURL(url)
     } catch (e) {
       setError((e as Error).message)
     }
@@ -712,11 +731,9 @@ export function SettingsPage() {
                 >
                   <span className="font-mono text-xs">{b.name}</span>
                   <div className="flex items-center gap-1">
-                    <a href={api.downloadBackup(b.name)} download>
-                      <Button variant="outline" size="sm">
-                        下载 zip
-                      </Button>
-                    </a>
+                    <Button variant="outline" size="sm" onClick={() => handleDownload(b.name)}>
+                      下载 zip
+                    </Button>
                     <Button
                       variant="outline"
                       size="sm"
