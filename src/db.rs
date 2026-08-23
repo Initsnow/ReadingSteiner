@@ -221,7 +221,8 @@ impl Db {
         }
         if v < 10 {
             // v10：schedule_state 记录最近一次错误信息，供 Web 控制台展示错误原因。
-            self.conn.execute_batch("ALTER TABLE schedule_state ADD COLUMN last_error TEXT;")?;
+            self.conn
+                .execute_batch("ALTER TABLE schedule_state ADD COLUMN last_error TEXT;")?;
             self.conn.pragma_update(None, "user_version", 10)?;
             info!("database schema migrated to v10");
         }
@@ -412,9 +413,10 @@ impl Db {
 
     /// 标记指定监控源的全部变更事件为已读。返回受影响的行数。
     pub fn mark_source_events_read(&self, source_id: &str) -> Result<usize> {
-        Ok(self
-            .conn
-            .execute("UPDATE change_events SET read=1 WHERE watchpoint_id=?1", [source_id])?)
+        Ok(self.conn.execute(
+            "UPDATE change_events SET read=1 WHERE watchpoint_id=?1",
+            [source_id],
+        )?)
     }
 
     /// 标记指定变更事件为已读。返回受影响的行数。
@@ -426,9 +428,9 @@ impl Db {
 
     /// 列出全部分组（标签）设置。
     pub fn list_tags(&self) -> Result<Vec<TagConfig>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT name, history_limit, notify_url, extract FROM tags ORDER BY name",
-        )?;
+        let mut stmt = self
+            .conn
+            .prepare("SELECT name, history_limit, notify_url, extract FROM tags ORDER BY name")?;
         let rows = stmt.query_map([], |r| {
             Ok(TagConfig {
                 name: r.get(0)?,
@@ -478,7 +480,12 @@ impl Db {
             "INSERT INTO tags(name, history_limit, notify_url, extract) VALUES (?1,?2,?3,?4)\n\
              ON CONFLICT(name) DO UPDATE SET history_limit=excluded.history_limit,\
                  notify_url=excluded.notify_url, extract=excluded.extract",
-            params![tag.name, tag.history_limit as i64, tag.notify_url, extract_json],
+            params![
+                tag.name,
+                tag.history_limit as i64,
+                tag.notify_url,
+                extract_json
+            ],
         )?;
         Ok(())
     }
@@ -513,11 +520,9 @@ impl Db {
     pub fn get_settings(&self) -> Result<Option<EditableSettings>> {
         let row: Option<String> = self
             .conn
-            .query_row(
-                "SELECT value FROM settings WHERE key='global'",
-                [],
-                |r| r.get::<_, String>(0),
-            )
+            .query_row("SELECT value FROM settings WHERE key='global'", [], |r| {
+                r.get::<_, String>(0)
+            })
             .optional()?;
         match row {
             None => Ok(None),
@@ -583,7 +588,10 @@ impl Db {
     }
 
     /// 获取所有监控源的展示用元信息。
-    pub fn list_source_meta(&self, sources: &[SourceConfig]) -> Result<Vec<crate::models::SourceMeta>> {
+    pub fn list_source_meta(
+        &self,
+        sources: &[SourceConfig],
+    ) -> Result<Vec<crate::models::SourceMeta>> {
         use crate::models::SourceMeta;
         use std::collections::HashMap;
 
@@ -718,9 +726,7 @@ impl Db {
                     last_success_at: r.get::<_, Option<String>>(5)?.map(|s| parse_ts(&s)),
                     last_error: r.get(6)?,
                     last_notified_fingerprint: r.get(7)?,
-                    last_notified_at: r
-                        .get::<_, Option<String>>(8)?
-                        .map(|s| parse_ts(&s)),
+                    last_notified_at: r.get::<_, Option<String>>(8)?.map(|s| parse_ts(&s)),
                     failure_notified: r.get::<_, i64>(9)? != 0,
                 },
             ))
@@ -813,7 +819,12 @@ impl Db {
 
     /// 插入一条系统级（非事件关联）通知，用于连续失败告警等场景。
     /// `target_json` 为发送目标（token + chat ids）的 JSON；为空时发送方回退到全局目标。
-    pub fn insert_system_notification(&self, chat_id: &str, text: &str, target_json: &str) -> Result<()> {
+    pub fn insert_system_notification(
+        &self,
+        chat_id: &str,
+        text: &str,
+        target_json: &str,
+    ) -> Result<()> {
         self.conn.execute(
             "INSERT INTO system_notifications(chat_id, target_json, text, status, attempts, next_retry_at, created_at) VALUES (?1,?2,?3,'pending',0,NULL,?4)",
             params![chat_id, target_json, text, Utc::now().to_rfc3339()],
