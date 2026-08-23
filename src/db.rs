@@ -471,7 +471,7 @@ impl Db {
         let extract_json = tag
             .extract
             .as_ref()
-            .map(|e| serde_json::to_string(e))
+            .map(serde_json::to_string)
             .transpose()?;
         self.conn.execute(
             "INSERT INTO tags(name, history_limit, notify_url, extract) VALUES (?1,?2,?3,?4)\n\
