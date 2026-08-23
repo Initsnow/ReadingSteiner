@@ -336,12 +336,11 @@ pub fn resolve_notify_target(
         .filter(|t| source.tags.contains(&t.name) && !t.notify_url.trim().is_empty())
         .collect();
     group_urls.sort_by_key(|t| t.name.clone());
-    if let Some(t) = group_urls.first() {
-        if let Ok(target) = parse_telegram_url(&t.notify_url) {
-            if target.is_valid() {
-                return Some(target);
-            }
-        }
+    if let Some(t) = group_urls.first()
+        && let Ok(target) = parse_telegram_url(&t.notify_url)
+        && target.is_valid()
+    {
+        return Some(target);
     }
     fallback()
 }
@@ -359,10 +358,10 @@ pub fn resolve_effective_extract(source: &SourceConfig, tags: &[TagConfig]) -> E
         .filter(|t| source.tags.contains(&t.name) && t.extract.is_some())
         .collect();
     group_extracts.sort_by_key(|t| t.name.clone());
-    if let Some(t) = group_extracts.first() {
-        if let Some(extract) = &t.extract {
-            return extract.clone();
-        }
+    if let Some(t) = group_extracts.first()
+        && let Some(extract) = &t.extract
+    {
+        return extract.clone();
     }
     source.extract.clone()
 }

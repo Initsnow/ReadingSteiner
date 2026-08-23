@@ -171,15 +171,7 @@ impl TelegramNotifier {
                 return Ok(None);
             }
             let bytes = tokio::fs::read(path).await?;
-            let part = Part::bytes(bytes)
-                .file_name(
-                    path.file_name()
-                        .and_then(|s| s.to_str())
-                        .unwrap_or("image.bin")
-                        .to_string(),
-                )
-                .mime_str(&entry.mime)
-                .unwrap_or_else(|_| Part::bytes(Vec::new()));
+            let part = build_image_part(bytes, path, &entry.mime);
             let form = Form::new()
                 .text("chat_id", chat_id.to_string())
                 .text("caption", caption.to_string())
@@ -237,15 +229,7 @@ impl TelegramNotifier {
             }
             let bytes = tokio::fs::read(path).await?;
             let attach = format!("photo_{}", entry.sha256);
-            let part = Part::bytes(bytes)
-                .file_name(
-                    path.file_name()
-                        .and_then(|s| s.to_str())
-                        .unwrap_or("image.bin")
-                        .to_string(),
-                )
-                .mime_str(&entry.mime)
-                .unwrap_or_else(|_| Part::bytes(Vec::new()));
+            let part = build_image_part(bytes, path, &entry.mime);
             form = form.part(attach.clone(), part);
             if is_first {
                 media.push(json!({
@@ -298,6 +282,25 @@ impl TelegramNotifier {
         Ok(Some(
             body.result.into_iter().map(|r| r.message_id).collect(),
         ))
+    }
+}
+
+/// 用图片字节与本地文件路径构造上传用 multipart Part。
+/// mime 非法时保留原始字节、仅不设置 Content-Type，避免把整张图丢弃成空文件。
+fn build_image_part(bytes: Vec<u8>, path: &Path, mime: &str) -> Part {
+    let file_name = path
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("image.bin")
+        .to_string();
+    let part = Part::bytes(bytes).file_name(file_name);
+    // 仅在 mime 合法时设置 Content-Type；mime_str 会消费 part，两个分支互斥，
+    // 各自独立 move，失败时也不会丢失图片字节。
+    if mime.parse::<mime::Mime>().is_ok() {
+        part.mime_str(mime)
+            .unwrap_or_else(|_| unreachable!("mime already validated"))
+    } else {
+        part
     }
 }
 
