@@ -174,7 +174,7 @@ pub struct NotificationRecord {
 /// 分组（标签）级设置。分组下未单独覆盖的监控源会继承这里的配置。
 /// `history_limit` 控制该分组内每个监控源最多保留的变更历史条数
 /// （0 表示不限制，跟随全局）。监控 / 通知开关由监控源自身控制，分组不参与。
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(default)]
 pub struct TagConfig {
     pub name: String,
@@ -188,17 +188,6 @@ pub struct TagConfig {
     /// 空表示沿用全局通知设置。
     #[serde(default)]
     pub notify_url: String,
-}
-
-impl Default for TagConfig {
-    fn default() -> Self {
-        Self {
-            name: String::new(),
-            history_limit: 0,
-            extract: None,
-            notify_url: String::new(),
-        }
-    }
 }
 
 /// 解析后的 Telegram 通知目标：一个 bot token + 一个或多个 chat id。
@@ -218,21 +207,12 @@ impl TelegramTarget {
 
 /// 通知记录中携带的发送目标（token + chat ids）的 JSON 形式。
 /// 兼容旧数据：从单个 chat_id 迁移而来时，token 由发送方补齐。
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(default)]
 pub struct NotificationTarget {
     pub token: String,
     #[serde(default)]
     pub chat_ids: Vec<String>,
-}
-
-impl Default for NotificationTarget {
-    fn default() -> Self {
-        Self {
-            token: String::new(),
-            chat_ids: Vec::new(),
-        }
-    }
 }
 
 /// 系统级通知（连续失败告警等），不关联某个变更事件。

@@ -23,6 +23,7 @@ axum = { version = "0.8", features = ["multipart"] }
 tower-http = { version = "0.6", features = ["fs"] }
 futures = "0.3"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
+mime = "0.3"
 mime_guess = "2"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "gzip", "brotli", "stream", "multipart"] }
 rusqlite = { version = "0.32", features = ["bundled", "backup"] }

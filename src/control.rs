@@ -36,11 +36,9 @@ fn validate_settings(s: &EditableSettings) -> Result<()> {
             s.default_cron
         )));
     }
-    if !s.timezone.trim().is_empty()
-        && iana_time_zone::get_timezone().is_ok()
-        && s.timezone != crate::config::system_local_timezone()
-        && chrono_tz::Tz::from_str(&s.timezone).is_err()
-    {
+    // 非空 timezone 必须是合法的 IANA 时区名，避免坏值时区入库后
+    // 调度/通知渲染时静默回退到 UTC，造成行为与配置不一致。
+    if !s.timezone.trim().is_empty() && chrono_tz::Tz::from_str(&s.timezone).is_err() {
         return Err(Error::config(format!(
             "timezone 不是合法的 IANA 时区: {}",
             s.timezone
@@ -274,10 +272,10 @@ pub(crate) async fn handle_request(state: &Arc<AppState>, req: ControlRequest) -
                 source.id = crate::config::generate_source_id(&source.name, &source.fetch.url);
             }
             // 名称未填时自动从 URL 主机名生成可读名称。
-            if source.name.trim().is_empty() {
-                if let Ok(u) = url::Url::parse(&source.fetch.url) {
-                    source.name = u.host_str().unwrap_or("").to_string();
-                }
+            if source.name.trim().is_empty()
+                && let Ok(u) = url::Url::parse(&source.fetch.url)
+            {
+                source.name = u.host_str().unwrap_or("").to_string();
             }
             let id = source.id.clone();
             if sources.iter().any(|s| s.id == id) {
@@ -700,21 +698,21 @@ async fn preview_url(state: &Arc<AppState>, url: &str, engine: &str) -> Result<S
     }
 
     let doc_html = scraper::Html::parse_document(text);
-    if let Ok(sel) = scraper::Selector::parse("title") {
-        if let Some(el) = doc_html.select(&sel).next() {
-            let title = el.text().collect::<Vec<_>>().join(" ").trim().to_string();
-            if !title.is_empty() {
-                return Ok(title);
-            }
+    if let Ok(sel) = scraper::Selector::parse("title")
+        && let Some(el) = doc_html.select(&sel).next()
+    {
+        let title = el.text().collect::<Vec<_>>().join(" ").trim().to_string();
+        if !title.is_empty() {
+            return Ok(title);
         }
     }
     // 部分页面没有 `<title>`，回退到 `<h1>`。
-    if let Ok(sel) = scraper::Selector::parse("h1") {
-        if let Some(el) = doc_html.select(&sel).next() {
-            let title = el.text().collect::<Vec<_>>().join(" ").trim().to_string();
-            if !title.is_empty() {
-                return Ok(title);
-            }
+    if let Ok(sel) = scraper::Selector::parse("h1")
+        && let Some(el) = doc_html.select(&sel).next()
+    {
+        let title = el.text().collect::<Vec<_>>().join(" ").trim().to_string();
+        if !title.is_empty() {
+            return Ok(title);
         }
     }
     Ok(String::new())
@@ -750,12 +748,12 @@ fn assert_safe_preview_url(url: &str) -> Result<()> {
                 .and_then(|mut it| it.next().map(|s| s.ip()))
         });
 
-    if let Some(ip) = ip {
-        if is_private_ip(ip) {
-            return Err(Error::config(format!(
-                "preview url target resolves to private/internal address: {ip}"
-            )));
-        }
+    if let Some(ip) = ip
+        && is_private_ip(ip)
+    {
+        return Err(Error::config(format!(
+            "preview url target resolves to private/internal address: {ip}"
+        )));
     }
     Ok(())
 }
