@@ -317,7 +317,9 @@ pub async fn run_daemon(state: Arc<AppState>) -> Result<()> {
         }
 
         // Drain notification outbox periodically（含事件通知与系统告警）。
-        if let Some(notifier) = state.notifier.read().unwrap().clone() {
+        // 显式限定读取锁作用域，clone 出 Arc 后立即释放锁，避免跨 await 持锁。
+        let notifier = state.notifier.read().unwrap().clone();
+        if let Some(notifier) = notifier {
             let db = state.db.clone();
             let images = state.images.clone();
             if let Err(e) = notifier::process_outbox(&db, &images, &notifier, None).await {
