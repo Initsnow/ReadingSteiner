@@ -410,26 +410,30 @@ async fn api_event_screenshot(
             Json(json!({ "ok": false, "error": "invalid screenshot path" })),
         ));
     }
-    match tokio::fs::read(&canonical).await {
-        Ok(bytes) => {
-            let mime = if rel.ends_with(".jpg") || rel.ends_with(".jpeg") {
-                "image/jpeg"
-            } else if rel.ends_with(".webp") {
-                "image/webp"
-            } else {
-                "image/png"
-            };
-            let mut builder = axum::response::Response::builder()
-                .status(StatusCode::OK)
-                .header(header::CONTENT_TYPE, mime);
-            builder = builder.header(header::CACHE_CONTROL, "public, max-age=3600");
-            Ok(builder.body(Body::from(bytes)).unwrap())
+    // 用流式读取代替全量内存加载，避免大截图一次性占用大量内存。
+    let file = match tokio::fs::File::open(&canonical).await {
+        Ok(f) => f,
+        Err(e) => {
+            return Err((
+                StatusCode::NOT_FOUND,
+                Json(json!({ "ok": false, "error": format!("screenshot not found: {e}") })),
+            ));
         }
-        Err(e) => Err((
-            StatusCode::NOT_FOUND,
-            Json(json!({ "ok": false, "error": format!("screenshot not found: {e}") })),
-        )),
-    }
+    };
+    let stream = tokio_util::io::ReaderStream::new(file);
+    let body = Body::from_stream(stream);
+    let mime = if rel.ends_with(".jpg") || rel.ends_with(".jpeg") {
+        "image/jpeg"
+    } else if rel.ends_with(".webp") {
+        "image/webp"
+    } else {
+        "image/png"
+    };
+    let mut builder = axum::response::Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, mime);
+    builder = builder.header(header::CACHE_CONTROL, "public, max-age=3600");
+    Ok(builder.body(body).unwrap())
 }
 
 #[derive(Deserialize)]
