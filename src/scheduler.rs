@@ -185,6 +185,8 @@ pub async fn run_daemon(state: Arc<AppState>) -> Result<()> {
     let semaphore = Arc::new(Semaphore::new(concurrency));
     // 记录当前信号量的并发许可数，用于在每轮动态增减（实现并发数热更新）。
     let mut last_concurrency = concurrency;
+    // 历史清理的节流计时器：每 60s 执行一次全量清理，避免高频 DELETE 扫描。
+    let mut last_prune = std::time::Instant::now();
 
     loop {
         if !state.running.load(Ordering::Relaxed) {
@@ -213,20 +215,25 @@ pub async fn run_daemon(state: Arc<AppState>) -> Result<()> {
             );
         }
 
+        let sched_map = match { state.db.lock().await.list_schedule_states() } {
+            Ok(m) => m,
+            Err(e) => {
+                warn!(error = %e, "failed to load schedule states; skip this tick");
+                tokio::time::sleep(Duration::from_millis(500)).await;
+                continue;
+            }
+        };
+
         let due = {
-            let db = state.db.lock().await;
             let now = Utc::now();
-            let tags = db.list_tags().unwrap_or_default();
             let mut due: Vec<SourceConfig> = Vec::new();
             let sources = state.sources.lock().await;
             for source in sources.iter() {
                 // 监控开关由监控源自身控制（分组不参与叠加）；关闭则跳过调度。
-                let (enabled, _, _) =
-                    crate::config::resolve_effective_source(source, &tags, 0);
-                if !enabled {
+                if !source.enabled {
                     continue;
                 }
-                let sched = db.get_schedule_state(&source.id)?.unwrap_or(ScheduleState {
+                let sched = sched_map.get(&source.id).cloned().unwrap_or(ScheduleState {
                     source_id: source.id.clone(),
                     next_due_at: now,
                     consecutive_failures: 0,
@@ -325,10 +332,17 @@ pub async fn run_daemon(state: Arc<AppState>) -> Result<()> {
             if let Err(e) = notifier::process_outbox(&db, &images, &notifier, None).await {
                 warn!(error = %e, "outbox processing failed");
             }
+        }
+
+        // 历史清理是低频操作：每 60s 执行一次，避免每 500ms 对全表扫描做
+        // DELETE（大库下尤其浪费）。历史事件通常只在检测到变更时新增，
+        // 60s 的粒度已足够及时回收空间。
+        // 独立于 notifier：即使未配置通知器，历史清理也应照常执行。
+        if last_prune.elapsed() >= Duration::from_secs(60) {
             // 按每个监控源保留条数限制清理历史（事件与快照）。
             // 解析分组继承后的生效保留条数：若分组配置了更严格的保留策略，
             // 则优先按分组的限制清理，否则使用全局限制。
-            let db = db.lock().await;
+            let db = state.db.lock().await;
             let tags = db.list_tags().unwrap_or_default();
             let global_limit = state.runtime.read().unwrap().history_limit_per_source;
             // 快速路径：没有任何分组配置历史限制（全部跟随全局）时，用一次全表清理，
@@ -353,6 +367,7 @@ pub async fn run_daemon(state: Arc<AppState>) -> Result<()> {
                 }
             }
             drop(db);
+            last_prune = std::time::Instant::now();
         }
 
         tokio::time::sleep(Duration::from_millis(500)).await;

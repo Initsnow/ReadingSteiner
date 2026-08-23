@@ -13,6 +13,7 @@ import {
   setAuthToken,
   verifyToken,
   onUnauthorized,
+  checkAuthRequired,
 } from "@/lib/api"
 
 const inputCls =
@@ -24,13 +25,24 @@ const inputCls =
  * 后端未启用鉴权（token 为空）时直接放行，不影响原有本地使用方式。
  */
 export function AuthGate({ children }: { children: ReactNode }) {
-  const [ready, setReady] = useState(() => {
-    // 已有 token：直接进入，后续请求若 401 再由订阅逻辑切回解锁页。
-    return !!getAuthToken()
-  })
+  const [ready, setReady] = useState(() => !!getAuthToken())
   const [token, setToken] = useState("")
   const [error, setError] = useState("")
   const [checking, setChecking] = useState(false)
+
+  // 首次进入且本地无 token 时，探测后端是否需要鉴权。
+  // 后端未启用 auth_token 时直接放行，不展示解锁页。
+  useEffect(() => {
+    if (getAuthToken()) return
+    checkAuthRequired()
+      .then((required) => {
+        if (!required) setReady(true)
+      })
+      .catch(() => {
+        // 网络异常（daemon 未启动等）：交由实际请求报错，先放行避免误拦。
+        setReady(true)
+      })
+  }, [])
 
   useEffect(() => {
     return onUnauthorized(() => {
@@ -71,11 +83,7 @@ export function AuthGate({ children }: { children: ReactNode }) {
             <Lock className="h-4 w-4" />
             需要鉴权
           </CardTitle>
-          <CardDescription>
-            Web 控制台已启用鉴权，请输入 config.yaml 中{" "}
-            <code className="rounded bg-muted px-1">web.auth_token</code>{" "}
-            配置的 Token 解锁。
-          </CardDescription>
+          <CardDescription>请输入访问 Token 解锁控制台。</CardDescription>
         </CardHeader>
         <CardContent>
           <form onSubmit={handleSubmit} className="space-y-3">

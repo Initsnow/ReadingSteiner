@@ -210,6 +210,14 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   return body.result as T
 }
 
+/** 探测后端是否需要鉴权。
+ * 不带 token 请求 /api/status：返回 401 说明需要鉴权；其他状态码说明无需鉴权。
+ * 网络异常时抛出错误，由调用方处理。 */
+export async function checkAuthRequired(): Promise<boolean> {
+  const res = await fetch("/api/status")
+  return res.status === 401
+}
+
 /** 校验 token 是否有效：调用一个轻量只读接口（/api/status）。
  * 仅当后端明确返回 401 视为无效；其余错误（5xx / 网络异常等）由调用方区分，
  * 避免把服务端故障误判为“token 错误”而阻塞用户。 */
