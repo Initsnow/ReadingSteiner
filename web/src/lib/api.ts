@@ -149,16 +149,73 @@ export interface EditableSettings {
   max_images_per_event: number
 }
 
+// ---- Web 控制台鉴权（Bearer Token）----
+// token 存在 localStorage；`web.auth_token` 未配置时后端不校验，携带与否均可用。
+// 401 时清除 token 并通知 UI 展示解锁界面。
+
+const TOKEN_KEY = "reading-steiner.auth-token"
+
+export function getAuthToken(): string | null {
+  return localStorage.getItem(TOKEN_KEY)
+}
+
+export function setAuthToken(token: string): void {
+  if (token.trim()) {
+    localStorage.setItem(TOKEN_KEY, token.trim())
+  } else {
+    localStorage.removeItem(TOKEN_KEY)
+  }
+}
+
+export function clearAuthToken(): void {
+  localStorage.removeItem(TOKEN_KEY)
+}
+
+/** 401 订阅：后端启用鉴权且未授权时触发，由 UI 展示解锁界面。 */
+type AuthSubscriber = () => void
+const authSubscribers = new Set<AuthSubscriber>()
+
+export function onUnauthorized(cb: AuthSubscriber): () => void {
+  authSubscribers.add(cb)
+  return () => authSubscribers.delete(cb)
+}
+
+function notifyUnauthorized(): void {
+  clearAuthToken()
+  authSubscribers.forEach((cb) => cb())
+}
+
+export class AuthError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = "AuthError"
+  }
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(path, {
-    headers: { "Content-Type": "application/json" },
-    ...init,
-  })
+  const headers = new Headers(init?.headers)
+  headers.set("Content-Type", "application/json")
+  const token = getAuthToken()
+  if (token) headers.set("Authorization", `Bearer ${token}`)
+
+  const res = await fetch(path, { ...init, headers })
+  if (res.status === 401) {
+    notifyUnauthorized()
+    throw new AuthError("unauthorized: 需要鉴权 Token")
+  }
   const body = (await res.json()) as ApiEnvelope<T>
   if (!res.ok || !body.ok) {
     throw new Error(body.error ?? `HTTP ${res.status}`)
   }
   return body.result as T
+}
+
+/** 校验 token 是否有效：调用一个轻量只读接口（/api/status），401 视为无效。 */
+export async function verifyToken(token: string): Promise<boolean> {
+  const res = await fetch("/api/status", {
+    headers: { Authorization: `Bearer ${token.trim()}` },
+  })
+  return res.status !== 401
 }
 
 export const api = {
@@ -285,7 +342,18 @@ export const api = {
   restoreFromZip: async (file: File) => {
     const form = new FormData()
     form.append("file", file)
-    const res = await fetch("/api/restore/upload", { method: "POST", body: form })
+    const headers = new Headers()
+    const token = getAuthToken()
+    if (token) headers.set("Authorization", `Bearer ${token}`)
+    const res = await fetch("/api/restore/upload", {
+      method: "POST",
+      headers,
+      body: form,
+    })
+    if (res.status === 401) {
+      notifyUnauthorized()
+      throw new AuthError("unauthorized: 需要鉴权 Token")
+    }
     const body = (await res.json()) as ApiEnvelope<{
       restored: boolean
       name: string

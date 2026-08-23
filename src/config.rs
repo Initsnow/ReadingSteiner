@@ -56,6 +56,10 @@ impl Config {
 pub struct WebConfig {
     pub listen: String,
     pub static_dir: PathBuf,
+    /// Web 控制台 API 的鉴权 Token（Bearer）。留空表示不启用鉴权（默认仅本地访问）。
+    /// 建议在把 `listen` 绑定到非回环地址时务必设置。
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub auth_token: String,
 }
 
 impl WebConfig {

@@ -8,14 +8,18 @@ use std::sync::Arc;
 
 use axum::{
     Json, Router,
-    extract::{Multipart, Path, Query, State},
+    extract::{Multipart, Path, Query, Request, State},
     http::StatusCode,
+    middleware::{self, Next},
+    response::Response,
     routing::{delete, get, post, put},
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
 use tower_http::services::{ServeDir, ServeFile};
 use tracing::info;
+
+use crate::config::Config;
 
 use crate::config::{EditableSettings, SourceConfig};
 use crate::control::{self, ControlRequest, ControlResponse};
@@ -44,7 +48,50 @@ pub async fn serve_web(state: Arc<AppState>) -> Result<()> {
     Ok(())
 }
 
+/// 对 `/api/*` 请求做 Bearer Token 鉴权。
+/// 当 `config.yaml` 的 `web.auth_token` 为空时不启用鉴权（保持向后兼容，默认本地访问）；
+/// 非空时要求请求头携带 `Authorization: Bearer <token>`，否则返回 401。
+///
+/// 由于授权后的 api 可修改监控源 / 设置 / 备份恢复等敏感数据，鉴权失败必须硬拒绝，
+/// 不提供任何降级路径。
+async fn require_auth(
+    State(cfg): State<Config>,
+    req: Request,
+    next: Next,
+) -> std::result::Result<Response, (StatusCode, Json<Value>)> {
+    let expected = cfg.web.auth_token.trim();
+    // 未配置 token：不启用鉴权。
+    if expected.is_empty() {
+        return Ok(next.run(req).await);
+    }
+    let supplied = req
+        .headers()
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .map(str::trim);
+    // 恒定时间比较，避免时序侧信道泄露 token 长度/内容。
+    let ok = match supplied {
+        Some(s) if !s.is_empty() => {
+            // 先比长度再比内容，降低低熵 token 下的枚举成本。
+            let a = s.as_bytes();
+            let b = expected.as_bytes();
+            a.len() == b.len() && a.iter().zip(b.iter()).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
+        }
+        _ => false,
+    };
+    if ok {
+        Ok(next.run(req).await)
+    } else {
+        Err((
+            StatusCode::UNAUTHORIZED,
+            Json(json!({ "ok": false, "error": "unauthorized: missing or invalid auth token" })),
+        ))
+    }
+}
+
 /// 构建 axum 路由：`/api/*` JSON 接口 + 前端静态资源（SPA 路由回退到 index.html）。
+/// 当配置了 `web.auth_token` 时，`/api/*` 全部接口受 Bearer Token 鉴权保护。
 fn build_router(state: Arc<AppState>) -> Router {
     let static_dir = state.cfg.web.static_dir();
     let index = static_dir.join("index.html");
@@ -75,11 +122,17 @@ fn build_router(state: Arc<AppState>) -> Router {
         .route("/backups/{name}", delete(api_delete_backup))
         .route("/backups/{name}/download", get(api_download_backup))
         .route("/restore", post(api_restore))
-        .route("/restore/upload", post(api_restore_upload))
-        .with_state(state);
+        .route("/restore/upload", post(api_restore_upload));
+
+    // 鉴权中间件需要一份只读的 Config（读取 web.auth_token）。
+    let auth_cfg = state.cfg.clone();
 
     Router::new()
-        .nest("/api", api)
+        .nest(
+            "/api",
+            api.layer(middleware::from_fn_with_state(auth_cfg, require_auth)),
+        )
+        .with_state(state)
         .fallback_service(ServeDir::new(&static_dir).not_found_service(ServeFile::new(index)))
 }
 
