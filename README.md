@@ -49,7 +49,3 @@ tests/         集成测试
 nixos/         NixOS 模块与集成测试
 config.yaml    启动引导配置（可编辑的全局设置已存 SQLite）
 ```
-
-## License
-
-待补充。
