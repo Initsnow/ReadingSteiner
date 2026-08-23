@@ -215,11 +215,17 @@ pub async fn run_daemon(state: Arc<AppState>) -> Result<()> {
             );
         }
 
+        let sched_map = match { state.db.lock().await.list_schedule_states() } {
+            Ok(m) => m,
+            Err(e) => {
+                warn!(error = %e, "failed to load schedule states; skip this tick");
+                tokio::time::sleep(Duration::from_millis(500)).await;
+                continue;
+            }
+        };
+
         let due = {
-            let db = state.db.lock().await;
             let now = Utc::now();
-            // 批量加载全部调度状态，避免每 tick 对每个源发起一次 SQLite 查询（N+1）。
-            let sched_map = db.list_schedule_states()?;
             let mut due: Vec<SourceConfig> = Vec::new();
             let sources = state.sources.lock().await;
             for source in sources.iter() {
@@ -326,40 +332,42 @@ pub async fn run_daemon(state: Arc<AppState>) -> Result<()> {
             if let Err(e) = notifier::process_outbox(&db, &images, &notifier, None).await {
                 warn!(error = %e, "outbox processing failed");
             }
-            // 历史清理是低频操作：每 60s 执行一次，避免每 500ms 对全表扫描做
-            // DELETE（大库下尤其浪费）。历史事件通常只在检测到变更时新增，
-            // 60s 的粒度已足够及时回收空间。
-            if last_prune.elapsed() >= Duration::from_secs(60) {
-                // 按每个监控源保留条数限制清理历史（事件与快照）。
-                // 解析分组继承后的生效保留条数：若分组配置了更严格的保留策略，
-                // 则优先按分组的限制清理，否则使用全局限制。
-                let db = db.lock().await;
-                let tags = db.list_tags().unwrap_or_default();
-                let global_limit = state.runtime.read().unwrap().history_limit_per_source;
-                // 快速路径：没有任何分组配置历史限制（全部跟随全局）时，用一次全表清理，
-                // 避免对每个源逐条执行 DELETE 带来额外开销（与旧实现的单条 SQL 相当）。
-                let any_group_limit = tags.iter().any(|t| t.history_limit > 0);
-                let sources = state.sources.lock().await;
-                if !any_group_limit {
-                    if global_limit > 0
-                        && let Err(e) = db.prune_history(global_limit)
+        }
+
+        // 历史清理是低频操作：每 60s 执行一次，避免每 500ms 对全表扫描做
+        // DELETE（大库下尤其浪费）。历史事件通常只在检测到变更时新增，
+        // 60s 的粒度已足够及时回收空间。
+        // 独立于 notifier：即使未配置通知器，历史清理也应照常执行。
+        if last_prune.elapsed() >= Duration::from_secs(60) {
+            // 按每个监控源保留条数限制清理历史（事件与快照）。
+            // 解析分组继承后的生效保留条数：若分组配置了更严格的保留策略，
+            // 则优先按分组的限制清理，否则使用全局限制。
+            let db = state.db.lock().await;
+            let tags = db.list_tags().unwrap_or_default();
+            let global_limit = state.runtime.read().unwrap().history_limit_per_source;
+            // 快速路径：没有任何分组配置历史限制（全部跟随全局）时，用一次全表清理，
+            // 避免对每个源逐条执行 DELETE 带来额外开销（与旧实现的单条 SQL 相当）。
+            let any_group_limit = tags.iter().any(|t| t.history_limit > 0);
+            let sources = state.sources.lock().await;
+            if !any_group_limit {
+                if global_limit > 0
+                    && let Err(e) = db.prune_history(global_limit)
+                {
+                    warn!(error = %e, "history pruning failed");
+                }
+            } else {
+                for source in sources.iter() {
+                    let (_, _, history) =
+                        crate::config::resolve_effective_source(source, &tags, global_limit);
+                    if history > 0
+                        && let Err(e) = db.prune_history_for_source(&source.id, history)
                     {
-                        warn!(error = %e, "history pruning failed");
-                    }
-                } else {
-                    for source in sources.iter() {
-                        let (_, _, history) =
-                            crate::config::resolve_effective_source(source, &tags, global_limit);
-                        if history > 0
-                            && let Err(e) = db.prune_history_for_source(&source.id, history)
-                        {
-                            warn!(source = %source.id, error = %e, "history pruning failed");
-                        }
+                        warn!(source = %source.id, error = %e, "history pruning failed");
                     }
                 }
-                drop(db);
-                last_prune = std::time::Instant::now();
             }
+            drop(db);
+            last_prune = std::time::Instant::now();
         }
 
         tokio::time::sleep(Duration::from_millis(500)).await;
