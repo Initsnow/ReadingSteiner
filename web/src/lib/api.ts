@@ -149,16 +149,101 @@ export interface EditableSettings {
   max_images_per_event: number
 }
 
+// ---- Web 控制台鉴权（Bearer Token）----
+// token 存在 localStorage；`web.auth_token` 未配置时后端不校验，携带与否均可用。
+// 401 时清除 token 并通知 UI 展示解锁界面。
+
+const TOKEN_KEY = "reading-steiner.auth-token"
+
+export function getAuthToken(): string | null {
+  return localStorage.getItem(TOKEN_KEY)
+}
+
+export function setAuthToken(token: string): void {
+  if (token.trim()) {
+    localStorage.setItem(TOKEN_KEY, token.trim())
+  } else {
+    localStorage.removeItem(TOKEN_KEY)
+  }
+}
+
+export function clearAuthToken(): void {
+  localStorage.removeItem(TOKEN_KEY)
+}
+
+/** 401 订阅：后端启用鉴权且未授权时触发，由 UI 展示解锁界面。 */
+type AuthSubscriber = () => void
+const authSubscribers = new Set<AuthSubscriber>()
+
+export function onUnauthorized(cb: AuthSubscriber): () => void {
+  authSubscribers.add(cb)
+  return () => authSubscribers.delete(cb)
+}
+
+function notifyUnauthorized(): void {
+  clearAuthToken()
+  authSubscribers.forEach((cb) => cb())
+}
+
+export class AuthError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = "AuthError"
+  }
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(path, {
-    headers: { "Content-Type": "application/json" },
-    ...init,
-  })
+  const headers = new Headers(init?.headers)
+  headers.set("Content-Type", "application/json")
+  const token = getAuthToken()
+  if (token) headers.set("Authorization", `Bearer ${token}`)
+
+  const res = await fetch(path, { ...init, headers })
+  if (res.status === 401) {
+    notifyUnauthorized()
+    throw new AuthError("unauthorized: 需要鉴权 Token")
+  }
   const body = (await res.json()) as ApiEnvelope<T>
   if (!res.ok || !body.ok) {
     throw new Error(body.error ?? `HTTP ${res.status}`)
   }
   return body.result as T
+}
+
+/** 校验 token 是否有效：调用一个轻量只读接口（/api/status）。
+ * 仅当后端明确返回 401 视为无效；其余错误（5xx / 网络异常等）由调用方区分，
+ * 避免把服务端故障误判为“token 错误”而阻塞用户。 */
+export async function verifyToken(token: string): Promise<boolean> {
+  try {
+    const res = await fetch("/api/status", {
+      headers: { Authorization: `Bearer ${token.trim()}` },
+    })
+    return res.status !== 401
+  } catch {
+    // 网络不通（daemon 未启动等）：让调用方按“无法连接”处理。
+    throw new Error("cannot reach daemon")
+  }
+}
+
+/**
+ * 带鉴权头拉取二进制资源并返回 objectURL。
+ * 截图、备份下载等接口受 Bearer Token 保护，浏览器原生 `<img>`/`<a download>`
+ * 无法附加 Authorization 头，必须经此 fetch 获取 blob。
+ */
+export async function fetchBlobUrl(url: string): Promise<string> {
+  const token = getAuthToken()
+  const headers = new Headers()
+  if (token) headers.set("Authorization", `Bearer ${token}`)
+  const res = await fetch(url, { headers })
+  if (res.status === 401) {
+    notifyUnauthorized()
+    throw new AuthError("unauthorized: 需要鉴权 Token")
+  }
+  if (!res.ok) {
+    throw new Error(`HTTP ${res.status}`)
+  }
+  const blob = await res.blob()
+  return URL.createObjectURL(blob)
 }
 
 export const api = {
@@ -221,8 +306,6 @@ export const api = {
       method: "DELETE",
     }),
 
-  eventScreenshotUrl: (id: number) => `/api/events/${id}/screenshot`,
-
   check: (sourceId: string) =>
     request<{ source_id: string; checked: boolean }>("/api/check", {
       method: "POST",
@@ -267,8 +350,6 @@ export const api = {
   listBackups: () =>
     request<{ backups: { name: string; has_zip: boolean }[] }>("/api/backups"),
 
-  downloadBackup: (name: string) => `/api/backups/${encodeURIComponent(name)}/download`,
-
   restoreBackup: (name: string) =>
     request<unknown>("/api/restore", {
       method: "POST",
@@ -285,7 +366,18 @@ export const api = {
   restoreFromZip: async (file: File) => {
     const form = new FormData()
     form.append("file", file)
-    const res = await fetch("/api/restore/upload", { method: "POST", body: form })
+    const headers = new Headers()
+    const token = getAuthToken()
+    if (token) headers.set("Authorization", `Bearer ${token}`)
+    const res = await fetch("/api/restore/upload", {
+      method: "POST",
+      headers,
+      body: form,
+    })
+    if (res.status === 401) {
+      notifyUnauthorized()
+      throw new AuthError("unauthorized: 需要鉴权 Token")
+    }
     const body = (await res.json()) as ApiEnvelope<{
       restored: boolean
       name: string
