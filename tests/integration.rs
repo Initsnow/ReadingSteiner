@@ -666,7 +666,10 @@ fn test_resolve_effective_source_with_groups() {
             notify_url: String::new(),
         },
     ];
-    assert_eq!(resolve_effective_source(&source, &multi, 100), (true, true, 20));
+    assert_eq!(
+        resolve_effective_source(&source, &multi, 100),
+        (true, true, 20)
+    );
 
     // 开关始终由监控源自身控制，不受分组影响。
     let mut src_off = source.clone();
@@ -688,7 +691,10 @@ fn test_parse_telegram_url() {
     // 多 chat id。
     let t = parse_telegram_url("tgram://123:ABC/1000/2000/3000").unwrap();
     assert_eq!(t.token, "123:ABC");
-    assert_eq!(t.chat_ids, vec!["1000".to_string(), "2000".to_string(), "3000".to_string()]);
+    assert_eq!(
+        t.chat_ids,
+        vec!["1000".to_string(), "2000".to_string(), "3000".to_string()]
+    );
 
     // 非法：非 tgram:// 前缀。
     assert!(parse_telegram_url("https://api.telegram.org").is_err());
@@ -768,7 +774,9 @@ fn test_resolve_effective_extract() {
         name: "news".into(),
         history_limit: 0,
         extract: Some(ExtractConfig::Items {
-            selector: ItemSelector::Css { selector: ".item".into() },
+            selector: ItemSelector::Css {
+                selector: ".item".into(),
+            },
             fields: vec![],
             dedupe_key: None,
             images: None,
@@ -871,8 +879,10 @@ fn test_reload_settings_hot_update() {
     let dir = std::env::temp_dir().join(format!("rst-reload-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
-    let mut cfg = Config::default();
-    cfg.state_dir = dir.clone();
+    let cfg = Config {
+        state_dir: dir.clone(),
+        ..Default::default()
+    };
     let state = AppState::with_config_path(cfg, None).unwrap();
 
     // 初始值（默认）。
@@ -904,11 +914,11 @@ fn test_reload_settings_hot_update() {
     assert_eq!(state.runtime.read().unwrap().timezone, "Asia/Shanghai");
     assert_eq!(state.runtime.read().unwrap().default_cron, "*/10 * * * *");
     // settings 内存视图已更新（fetcher 的 UA / 超时来源）。
-    assert_eq!(state.settings.read().unwrap().default_user_agent, "hot-agent");
     assert_eq!(
-        state.settings.read().unwrap().default_timeout_secs,
-        30
+        state.settings.read().unwrap().default_user_agent,
+        "hot-agent"
     );
+    assert_eq!(state.settings.read().unwrap().default_timeout_secs, 30);
     // notifier 重建后全局目标指向热更新的 url。
     let n = state.notifier.read().unwrap().clone().unwrap();
     assert!(n.global_target().is_some());

@@ -35,12 +35,10 @@ pub fn create_fetcher(
     settings: &crate::config::EditableSettings,
 ) -> Result<Box<dyn Fetcher>> {
     match engine {
-        "http" => {
-            Ok(Box::new(http::HttpFetcher::new(
-                &settings.default_user_agent,
-                settings.default_timeout_secs,
-            )?))
-        }
+        "http" => Ok(Box::new(http::HttpFetcher::new(
+            &settings.default_user_agent,
+            settings.default_timeout_secs,
+        )?)),
         "camofox" => {
             if !cfg.camofox.enabled {
                 return Err(crate::error::Error::config(
