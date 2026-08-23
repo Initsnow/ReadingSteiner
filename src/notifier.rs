@@ -135,8 +135,9 @@ impl TelegramNotifier {
                     all_ids.push(id);
                 }
             } else if entries.len() > 1 {
-                if let Some(group_ids) =
-                    self.send_media_group(&token, chat_id, &entries, &text).await?
+                if let Some(group_ids) = self
+                    .send_media_group(&token, chat_id, &entries, &text)
+                    .await?
                 {
                     all_ids.extend(group_ids);
                 }
@@ -436,7 +437,10 @@ pub async fn process_outbox(
         {
             Some(t) => t,
             None => {
-                warn!(notification = notif.id, "notification target unavailable; marking failed");
+                warn!(
+                    notification = notif.id,
+                    "notification target unavailable; marking failed"
+                );
                 db.lock()
                     .await
                     .update_notification_status(notif.id, "failed", "[]")?;
@@ -480,7 +484,10 @@ pub async fn process_outbox(
         let target = match build_target_from_record(&sys.target_json, notifier, chat_id_override) {
             Some(t) => t,
             None => {
-                warn!(notification = sys.id, "system notification target unavailable; marking failed");
+                warn!(
+                    notification = sys.id,
+                    "system notification target unavailable; marking failed"
+                );
                 db.lock()
                     .await
                     .update_system_notification_status(sys.id, "failed")?;
@@ -532,7 +539,9 @@ fn resolve_target_token(cfg: &TelegramConfig, target: &TelegramTarget) -> Result
         resolve_global_target(cfg)
             .filter(|t| !t.token.is_empty())
             .map(|t| t.token)
-            .ok_or_else(|| Error::config("telegram url is required to configure notification target"))
+            .ok_or_else(|| {
+                Error::config("telegram url is required to configure notification target")
+            })
     }
 }
 
@@ -546,10 +555,9 @@ fn build_target_from_record(
     chat_id_override: Option<&str>,
 ) -> Option<TelegramTarget> {
     let global = notifier.global_target();
-    let parsed: Option<NotificationTarget> =
-        serde_json::from_str(target_json).ok().filter(|t: &NotificationTarget| {
-            !t.chat_ids.is_empty()
-        });
+    let parsed: Option<NotificationTarget> = serde_json::from_str(target_json)
+        .ok()
+        .filter(|t: &NotificationTarget| !t.chat_ids.is_empty());
     let token = parsed
         .as_ref()
         .and_then(|t| {

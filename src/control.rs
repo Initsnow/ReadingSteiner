@@ -28,9 +28,7 @@ fn validate_settings(s: &EditableSettings) -> Result<()> {
     if s.default_timeout_secs == 0 {
         return Err(Error::config("default_timeout_secs 必须大于 0"));
     }
-    if !s.default_cron.trim().is_empty()
-        && s.default_cron.parse::<cron::Schedule>().is_err()
-    {
+    if !s.default_cron.trim().is_empty() && s.default_cron.parse::<cron::Schedule>().is_err() {
         return Err(Error::config(format!(
             "default_cron 不是合法的 cron 表达式: {}",
             s.default_cron
@@ -558,7 +556,13 @@ pub(crate) async fn handle_request(state: &Arc<AppState>, req: ControlRequest) -
                 return ControlResponse::err("invalid backup name");
             }
             let mut db = state.db.lock().await;
-            let dir = state.runtime.read().unwrap().state_dir.join("backups").join(&name);
+            let dir = state
+                .runtime
+                .read()
+                .unwrap()
+                .state_dir
+                .join("backups")
+                .join(&name);
             if !dir.join("reading-steiner.db").exists() {
                 return ControlResponse::err(format!("backup {name} not found"));
             }
@@ -606,7 +610,8 @@ pub(crate) async fn handle_request(state: &Arc<AppState>, req: ControlRequest) -
             };
             // 再单独持有 DB 锁执行恢复与刷新内存监控源，锁占用时间最小化。
             let mut db = state.db.lock().await;
-            if let Err(e) = crate::backup::restore(&restored_dir, &state.cfg, Some(db.connection_mut()))
+            if let Err(e) =
+                crate::backup::restore(&restored_dir, &state.cfg, Some(db.connection_mut()))
             {
                 drop(db);
                 // 恢复失败时清理解压残留，避免遗留无 zip 的“半成品”备份。
@@ -664,11 +669,7 @@ async fn preview_url(state: &Arc<AppState>, url: &str, engine: &str) -> Result<S
         url: url.to_string(),
         ..FetchConfig::default()
     };
-    let fetcher = create_fetcher(
-        engine,
-        &state.cfg,
-        &state.settings.read().unwrap().clone(),
-    )?;
+    let fetcher = create_fetcher(engine, &state.cfg, &state.settings.read().unwrap().clone())?;
     let doc = fetcher
         .fetch(&FetchSpec {
             fetch,
@@ -774,11 +775,7 @@ fn is_private_ip(ip: IpAddr) -> bool {
                 || v.is_unspecified()
                 || v.is_documentation()
         }
-        IpAddr::V6(v) => {
-            v.is_loopback()
-                || v.is_unspecified()
-                || is_v6_private(&v)
-        }
+        IpAddr::V6(v) => v.is_loopback() || v.is_unspecified() || is_v6_private(&v),
     }
 }
 

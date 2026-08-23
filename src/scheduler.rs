@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::str::FromStr;
-use std::sync::{Arc, RwLock};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 use chrono::{DateTime, Local, Utc};
@@ -12,8 +12,8 @@ use tokio::sync::{Mutex, Semaphore};
 use tracing::{debug, error, info, warn};
 
 use crate::config::{
-    ChangeType, Config, EditableSettings, ExtractConfig, ImageSelector, ItemSelector, RuntimeConfig,
-    SourceConfig,
+    ChangeType, Config, EditableSettings, ExtractConfig, ImageSelector, ItemSelector,
+    RuntimeConfig, SourceConfig,
 };
 use crate::db::Db;
 use crate::differ;
@@ -215,7 +215,9 @@ pub async fn run_daemon(state: Arc<AppState>) -> Result<()> {
             );
         }
 
-        let sched_map = match { state.db.lock().await.list_schedule_states() } {
+        // 独立绑定以尽早释放 db 读锁（避免在下方 error 分支的 await 期间持锁）。
+        let sched_states = state.db.lock().await.list_schedule_states();
+        let sched_map = match sched_states {
             Ok(m) => m,
             Err(e) => {
                 warn!(error = %e, "failed to load schedule states; skip this tick");
@@ -296,11 +298,7 @@ pub async fn run_daemon(state: Arc<AppState>) -> Result<()> {
                                         chat_ids: target.chat_ids.clone(),
                                     })
                                     .unwrap_or_default();
-                                let chat_id = target
-                                    .chat_ids
-                                    .first()
-                                    .cloned()
-                                    .unwrap_or_default();
+                                let chat_id = target.chat_ids.first().cloned().unwrap_or_default();
                                 let tz = state.runtime.read().unwrap().timezone.clone();
                                 let text = notifier::render_failure_message(
                                     &source.id,
@@ -309,11 +307,8 @@ pub async fn run_daemon(state: Arc<AppState>) -> Result<()> {
                                     &e.to_string(),
                                     &tz,
                                 );
-                                let _ = db.insert_system_notification(
-                                    &chat_id,
-                                    &text,
-                                    &target_json,
-                                );
+                                let _ =
+                                    db.insert_system_notification(&chat_id, &text, &target_json);
                                 sched.failure_notified = true;
                             }
                         }
@@ -632,29 +627,21 @@ pub async fn check_source(state: &Arc<AppState>, source_id: &str) -> Result<()> 
             let tags = db.list_tags().unwrap_or_default();
             // 解析通知目标：分组优先，回退全局（tgram:// URL，可热更新）。
             let hot_url = state.settings.read().unwrap().telegram_url.clone();
-            let target = crate::config::resolve_notify_target(
-                &source,
-                &tags,
-                &hot_url,
-            )
-            .or_else(|| {
-                state
-                    .notifier
-                    .read()
-                    .unwrap()
-                    .as_ref()
-                    .and_then(|n| n.global_target())
-            });
+            let target =
+                crate::config::resolve_notify_target(&source, &tags, &hot_url).or_else(|| {
+                    state
+                        .notifier
+                        .read()
+                        .unwrap()
+                        .as_ref()
+                        .and_then(|n| n.global_target())
+                });
             if let Some(target) = target {
                 let target_json = serde_json::to_string(&crate::models::NotificationTarget {
                     token: target.token.clone(),
                     chat_ids: target.chat_ids.clone(),
                 })?;
-                let chat_id = target
-                    .chat_ids
-                    .first()
-                    .cloned()
-                    .unwrap_or_default();
+                let chat_id = target.chat_ids.first().cloned().unwrap_or_default();
                 let notif = crate::models::NotificationRecord {
                     id: 0,
                     event_id,
@@ -698,7 +685,7 @@ pub async fn check_source(state: &Arc<AppState>, source_id: &str) -> Result<()> 
 /// 不支持命名形式（SUN/MON 等）——它们会原样透传，由 cron crate 解析。
 fn map_cron_dow_num(v: i32) -> i32 {
     match v {
-        0 | 7 => 1,  // 周日 → 1
+        0 | 7 => 1,                         // 周日 → 1
         n if (1..=6).contains(&n) => n + 1, // 周一~周六 → 2~7
         _ => v,
     }
@@ -754,9 +741,9 @@ fn convert_dow_field(field: &str) -> Result<String> {
         let item = item.trim();
         // 形如 a-b/n 或 a-b
         if let Some((range_part, step)) = item.split_once('/') {
-            let step: i32 = step.parse().map_err(|_| {
-                crate::error::Error::other(format!("无效的步进值: '{item}'"))
-            })?;
+            let step: i32 = step
+                .parse()
+                .map_err(|_| crate::error::Error::other(format!("无效的步进值: '{item}'")))?;
             if step < 1 {
                 return Err(crate::error::Error::other(format!(
                     "步进值必须为正: '{item}'"
@@ -766,12 +753,14 @@ fn convert_dow_field(field: &str) -> Result<String> {
                 // 标准环 0-6 到 cron crate 1-7 是线性偏移，*/n 结构保持不变，直接透传。
                 out.push(format!("*/{step}"));
             } else if let Some((a, b)) = range_part.split_once('-') {
-                let a: i32 = a.trim().parse().map_err(|_| {
-                    crate::error::Error::other(format!("无效的星期值: '{a}'"))
-                })?;
-                let b: i32 = b.trim().parse().map_err(|_| {
-                    crate::error::Error::other(format!("无效的星期值: '{b}'"))
-                })?;
+                let a: i32 = a
+                    .trim()
+                    .parse()
+                    .map_err(|_| crate::error::Error::other(format!("无效的星期值: '{a}'")))?;
+                let b: i32 = b
+                    .trim()
+                    .parse()
+                    .map_err(|_| crate::error::Error::other(format!("无效的星期值: '{b}'")))?;
                 let vals = expand_std_dow_range(a, b);
                 // 范围 + 步进：在展开后的序列上按 step 取样。
                 let stepped: Vec<i32> = vals.iter().step_by(step as usize).copied().collect();
@@ -792,12 +781,14 @@ fn convert_dow_field(field: &str) -> Result<String> {
                 out.push(map_dow_list(&vals).join(","));
             }
         } else if let Some((a, b)) = item.split_once('-') {
-            let a: i32 = a.trim().parse().map_err(|_| {
-                crate::error::Error::other(format!("无效的星期值: '{a}'"))
-            })?;
-            let b: i32 = b.trim().parse().map_err(|_| {
-                crate::error::Error::other(format!("无效的星期值: '{b}'"))
-            })?;
+            let a: i32 = a
+                .trim()
+                .parse()
+                .map_err(|_| crate::error::Error::other(format!("无效的星期值: '{a}'")))?;
+            let b: i32 = b
+                .trim()
+                .parse()
+                .map_err(|_| crate::error::Error::other(format!("无效的星期值: '{b}'")))?;
             if a == b {
                 out.push(map_cron_dow_num(a).to_string());
             } else {
@@ -806,9 +797,9 @@ fn convert_dow_field(field: &str) -> Result<String> {
             }
         } else {
             // 单个值
-            let v: i32 = item.parse().map_err(|_| {
-                crate::error::Error::other(format!("无效的星期值: '{item}'"))
-            })?;
+            let v: i32 = item
+                .parse()
+                .map_err(|_| crate::error::Error::other(format!("无效的星期值: '{item}'")))?;
             out.push(map_cron_dow_num(v).to_string());
         }
     }
@@ -830,7 +821,10 @@ fn cron_5field_to_7field(expr: &str) -> Result<String> {
     }
     let dow = convert_dow_field(parts[4])?;
     // 标准 5 段 → 7 段：前插 0（秒），末尾追加 *（年不限）。
-    Ok(format!("0 {} {} {} {} {} *", parts[0], parts[1], parts[2], parts[3], dow))
+    Ok(format!(
+        "0 {} {} {} {} {} *",
+        parts[0], parts[1], parts[2], parts[3], dow
+    ))
 }
 
 /// 按 cron 表达式计算下一次应触发的时间（配置时区的本地时间）。
@@ -838,9 +832,8 @@ fn cron_5field_to_7field(expr: &str) -> Result<String> {
 /// 解析失败或没有下一次触发时返回 Err。
 fn next_cron_due(expr: &str, tz: &str, after: DateTime<Utc>) -> Result<DateTime<Utc>> {
     let seven = cron_5field_to_7field(expr)?;
-    let sched = CronSchedule::from_str(&seven).map_err(|e| {
-        crate::error::Error::other(format!("cron 表达式解析失败 '{expr}': {e}"))
-    })?;
+    let sched = CronSchedule::from_str(&seven)
+        .map_err(|e| crate::error::Error::other(format!("cron 表达式解析失败 '{expr}': {e}")))?;
     // 优先使用配置的 IANA 时区；解析失败时回退到系统本地时区。
     let next = match tz.parse::<chrono_tz::Tz>() {
         Ok(zone) => sched
@@ -998,9 +991,15 @@ mod tests {
             cron_5field_to_7field("0 9 * * 1-5").unwrap(),
             "0 0 9 * * 2,3,4,5,6 *"
         );
-        assert_eq!(cron_5field_to_7field("*/15 * * * *").unwrap(), "0 */15 * * * * *");
+        assert_eq!(
+            cron_5field_to_7field("*/15 * * * *").unwrap(),
+            "0 */15 * * * * *"
+        );
         // 标准 0,6 = 周日,周六 → cron crate 1,7。
-        assert_eq!(cron_5field_to_7field("30 8,20 * * 0,6").unwrap(), "0 30 8,20 * * 1,7 *");
+        assert_eq!(
+            cron_5field_to_7field("30 8,20 * * 0,6").unwrap(),
+            "0 30 8,20 * * 1,7 *"
+        );
         // 7 也代表周日 → 1。
         assert_eq!(cron_5field_to_7field("0 9 * * 7").unwrap(), "0 0 9 * * 1 *");
     }
