@@ -2,7 +2,23 @@
 
 daemon 内置一个轻量 HTTP 服务（axum），监听地址与静态目录由 `config.yaml` 的 `web` 段配置。默认访问 `http://127.0.0.1:8901`。
 
-> 仅暴露在 `127.0.0.1` 时请勿把 `web.listen` 绑定到公网地址，或加一层鉴权反代。
+## 鉴权
+
+Web 控制台的 `/api/*` 接口可操作监控源、全局设置、备份恢复等敏感数据，**默认仅在 `127.0.0.1` 监听**。若要对外暴露，务必做好访问控制，二选一：
+
+1. 在 `config.yaml` 的 `web` 段配置 `auth_token`，启用内置的 Bearer Token 鉴权：
+
+   ```yaml
+   web:
+     listen: 0.0.0.0:8901
+     auth_token: your-strong-random-token
+   ```
+
+   启用后所有 `/api/*` 请求都要求携带 `Authorization: Bearer <token>` 头，否则返回 `401`。前端控制台首次访问（或收到 401）时会弹出 Token 输入页，校验通过后将 Token 保存在浏览器 `localStorage` 并自动附带。
+
+2. 或将 `web.listen` 绑定到回环地址，并在外层用反向代理（如 Nginx/Caddy）做鉴权。
+
+> 注意：`auth_token` 留空时不启用鉴权，仅建议在纯本机使用。把 `listen` 绑定到非回环地址时务必设置 `auth_token`，否则 Web 控制台的增删改 / 备份恢复 / 通知测试接口将对公网完全开放。
 
 ## 页面
 
