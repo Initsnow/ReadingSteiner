@@ -706,10 +706,11 @@ impl Db {
             "SELECT source_id, next_due_at, consecutive_failures, consecutive_changes, backoff_until, last_success_at, last_error, last_notified_fingerprint, last_notified_at, failure_notified FROM schedule_state",
         )?;
         let rows = stmt.query_map([], |r| {
+            let source_id: String = r.get(0)?;
             Ok((
-                r.get::<_, String>(0)?,
+                source_id.clone(),
                 ScheduleState {
-                    source_id: r.get(0)?,
+                    source_id,
                     next_due_at: parse_ts(&r.get::<_, String>(1)?),
                     consecutive_failures: r.get::<_, i64>(2)? as u32,
                     consecutive_changes: r.get::<_, i64>(3)? as u32,
