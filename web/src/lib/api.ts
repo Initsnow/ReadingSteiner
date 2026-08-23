@@ -210,12 +210,40 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   return body.result as T
 }
 
-/** 校验 token 是否有效：调用一个轻量只读接口（/api/status），401 视为无效。 */
+/** 校验 token 是否有效：调用一个轻量只读接口（/api/status）。
+ * 仅当后端明确返回 401 视为无效；其余错误（5xx / 网络异常等）由调用方区分，
+ * 避免把服务端故障误判为“token 错误”而阻塞用户。 */
 export async function verifyToken(token: string): Promise<boolean> {
-  const res = await fetch("/api/status", {
-    headers: { Authorization: `Bearer ${token.trim()}` },
-  })
-  return res.status !== 401
+  try {
+    const res = await fetch("/api/status", {
+      headers: { Authorization: `Bearer ${token.trim()}` },
+    })
+    return res.status !== 401
+  } catch {
+    // 网络不通（daemon 未启动等）：让调用方按“无法连接”处理。
+    throw new Error("cannot reach daemon")
+  }
+}
+
+/**
+ * 带鉴权头拉取二进制资源并返回 objectURL。
+ * 截图、备份下载等接口受 Bearer Token 保护，浏览器原生 `<img>`/`<a download>`
+ * 无法附加 Authorization 头，必须经此 fetch 获取 blob。
+ */
+export async function fetchBlobUrl(url: string): Promise<string> {
+  const token = getAuthToken()
+  const headers = new Headers()
+  if (token) headers.set("Authorization", `Bearer ${token}`)
+  const res = await fetch(url, { headers })
+  if (res.status === 401) {
+    notifyUnauthorized()
+    throw new AuthError("unauthorized: 需要鉴权 Token")
+  }
+  if (!res.ok) {
+    throw new Error(`HTTP ${res.status}`)
+  }
+  const blob = await res.blob()
+  return URL.createObjectURL(blob)
 }
 
 export const api = {
@@ -278,8 +306,6 @@ export const api = {
       method: "DELETE",
     }),
 
-  eventScreenshotUrl: (id: number) => `/api/events/${id}/screenshot`,
-
   check: (sourceId: string) =>
     request<{ source_id: string; checked: boolean }>("/api/check", {
       method: "POST",
@@ -323,8 +349,6 @@ export const api = {
 
   listBackups: () =>
     request<{ backups: { name: string; has_zip: boolean }[] }>("/api/backups"),
-
-  downloadBackup: (name: string) => `/api/backups/${encodeURIComponent(name)}/download`,
 
   restoreBackup: (name: string) =>
     request<unknown>("/api/restore", {
