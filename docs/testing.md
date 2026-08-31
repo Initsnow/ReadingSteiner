@@ -19,7 +19,7 @@ cargo run --release --bin loadgen -- 5000 256
 ## 前端构建校验
 
 ```bash
-cd web && npm install && npm run build
+cd web && pnpm install && pnpm build
 ```
 
 ## Nix

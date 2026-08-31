@@ -1,74 +1,90 @@
-{ pkgs, lib, ... }:
+{ pkgs, ... }:
+# ReadingSteiner NixOS 集成测试。需要 KVM；由 flake checks 里的
+# `builtins.pathExists "/dev/kvm"` 守卫，无 KVM 环境自动跳过。
 let
-  testConfig = pkgs.writeText "config.yaml" ''
-    state_dir: /var/lib/reading-steiner
-    media_dir: /var/lib/reading-steiner/media
-    daemon:
-      socket_path: /run/reading-steiner/daemon.sock
-      concurrency: 2
-      queue_capacity: 16
-    telegram:
-      url: "tgram://test:token/12345"
-      api_base: http://127.0.0.1:8443
-    camofox:
-      enabled: false
+  # Telegram Bot API mock 端口与页面服务端口
+  pagePort = 8080;
+  tgPort = 8443;
+
+  sourceYaml = pkgs.writeText "source.yaml" ''
+    id: test-source
+    name: Test Source
+    enabled: true
+    tags: []
+    fetch:
+      engine: http
+      url: http://127.0.0.1:${toString pagePort}/page
+      timeout_secs: 5
+    schedule:
+      cron: "* * * * *"
   '';
 in
 pkgs.testers.runNixOSTest {
   name = "reading-steiner";
+
   nodes.machine = { ... }: {
+    imports = [ ../../module.nix ];
+    _module.args.self = { packages.x86_64-linux = { inherit (pkgs) default; }; };
+
     services.reading-steiner = {
       enable = true;
-      configFile = testConfig;
-      settings = {
-        stateDir = "/var/lib/reading-steiner";
-        socketPath = "/run/reading-steiner/daemon.sock";
+      package = pkgs.default;
+      web = {
+        listenAddress = "127.0.0.1";
+        port = 8901;
       };
+      telegram.apiBase = "http://127.0.0.1:${toString tgPort}";
     };
+
     systemd.services.telegram-mock = {
-      description = "Telegram Bot API mock";
+      description = "Telegram Bot API mock + page server";
       wantedBy = [ "multi-user.target" ];
+      before = [ "reading-steiner-daemon.service" ];
       serviceConfig = {
         ExecStart = "${pkgs.python3}/bin/python3 ${./mock_servers.py}";
         DynamicUser = true;
       };
     };
+
     environment.systemPackages = [ pkgs.jq ];
   };
 
   testScript = ''
-    machine.wait_for_unit("reading-steiner-daemon.service")
+    machine.start()
     machine.wait_for_unit("telegram-mock.service")
-    machine.wait_for_open_port(8080)
-    machine.wait_for_open_port(8443)
+    machine.wait_for_open_port(${toString pagePort})
+    machine.wait_for_open_port(${toString tgPort})
 
-    # Add a monitoring source via CLI (sources are stored in SQLite, not config.yaml)
-    machine.succeed('''
-      cat > /tmp/source.yaml <<'EOF'
-      id: test-source
-      name: Test Source
-      enabled: true
-      tags: []
-      fetch:
-        engine: http
-        url: http://127.0.0.1:8080/page
-        timeout_secs: 5
-      schedule:
-        interval_secs: 1
-        jitter_secs: 0
-      priority: 0
-      pipeline: default
-      compare:
-        mode: raw_digest
-        stable_id: id
-        notify_on: [new, updated, removed]
-    EOF
-    reading-steiner sources add /tmp/source.yaml --config ${testConfig}
-    ''')
+    with subtest("daemon starts (preStart works under declared User/Group)"):
+        machine.wait_for_unit("reading-steiner-daemon.service")
+        machine.wait_for_open_port(8901)
 
-    machine.wait_until_succeeds(
-      "journalctl -u reading-steiner-daemon -n 100 --no-pager | grep -q 'change detected'"
-    )
-    machine.succeed("test -f /var/lib/reading-steiner/reading-steiner.db")
+    with subtest("state dir owned by service user"):
+        machine.succeed("test -d /var/lib/reading-steiner")
+        machine.succeed(
+            "test \"$(stat -c %U /var/lib/reading-steiner)\" = reading-steiner"
+        )
+
+    with subtest("control socket exists"):
+        machine.wait_for_file("/run/reading-steiner/daemon.sock")
+        machine.succeed("test -S /run/reading-steiner/daemon.sock")
+
+    with subtest("web console responds without token (loopback)"):
+        machine.succeed("curl -sf http://127.0.0.1:8901/api/status")
+
+    with subtest("CLI talks to daemon over socket"):
+        machine.succeed("reading-steiner status --config /run/reading-steiner/config.yaml")
+
+    with subtest("add a source and scheduler detects change"):
+        machine.succeed(
+            "reading-steiner sources add ${sourceYaml} --config /run/reading-steiner/config.yaml"
+        )
+        machine.wait_until_succeeds(
+            "journalctl -u reading-steiner-daemon -n 100 --no-pager | grep -q 'change detected'",
+            timeout=60,
+        )
+
+    with subtest("sqlite db created in state dir"):
+        machine.succeed("test -f /var/lib/reading-steiner/reading-steiner.db")
   '';
 }
