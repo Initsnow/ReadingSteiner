@@ -59,7 +59,7 @@
 | `openFirewall` | `false` | 防火墙放行 web 端口 |
 | `web.listenAddress` | `127.0.0.1` | Web 控制台监听地址 |
 | `web.port` | `8901` | Web 控制台端口 |
-| `web.staticDir` | `""` | 前端静态资源目录（空 = 仅 API） |
+| `web.staticDir` | flake `packages.web` | 前端静态资源目录（默认自动接线 flake 构建的前端产物；留空则回退 daemon 相对路径 `web/dist`） |
 | `web.authTokenFile` | `null` | Web Bearer token 文件（credential 注入） |
 | `telegram.apiBase` | `https://api.telegram.org` | Bot API 地址 |
 | `telegram.imageBytesBudget` | `10485760` | 单事件图片字节预算 |
