@@ -54,14 +54,17 @@
             cargoArtifacts = cargoArtifacts;
           };
           # NixOS 集成测试（需要 KVM，无 KVM 自动跳过）
-          nixos-test = (nixpkgs.lib.optionalAttrs hasKvm {
-            ${system} = import ./nixos/tests/reading-steiner.nix {
-              inherit pkgs;
-              reading-steiner = self;
-            };
-          }).${system} or (pkgs.runCommand "reading-steiner-nixos-test-skipped" { } ''
-            echo "skipped: no /dev/kvm" > $out
-          '');
+          nixos-test =
+            if hasKvm then
+              import ./nixos/tests/reading-steiner.nix {
+                inherit pkgs;
+                inherit (nixpkgs) lib;
+                reading-steiner = self;
+              }
+            else
+              pkgs.runCommand "reading-steiner-nixos-test-skipped" { } ''
+                echo "skipped: no /dev/kvm" > $out
+              '';
         });
 
       packages = forAllSystems (system:

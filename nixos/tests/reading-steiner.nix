@@ -1,4 +1,4 @@
-{ pkgs, ... }:
+{ pkgs, lib, reading-steiner, ... }:
 # ReadingSteiner NixOS 集成测试。需要 KVM；由 flake checks 里的
 # `builtins.pathExists "/dev/kvm"` 守卫，无 KVM 环境自动跳过。
 let
@@ -22,16 +22,19 @@ in
 pkgs.testers.runNixOSTest {
   name = "reading-steiner";
 
-  nodes.machine = { ... }: {
+  nodes.machine = { pkgs, config, ... }: {
     imports = [ ../../module.nix ];
-    _module.args.self = { packages.x86_64-linux = { inherit (pkgs) default; }; };
+    # module 期望 self 参数用于默认包回退，直接传入 flake 自身
+    _module.args.self = reading-steiner;
 
     services.reading-steiner = {
       enable = true;
-      package = pkgs.default;
+      package = reading-steiner.packages.x86_64-linux.default;
       web = {
         listenAddress = "127.0.0.1";
         port = 8901;
+        # 集成测试仅验证 API，不把前端 web 包拖入构建
+        staticDir = lib.mkForce "";
       };
       telegram.apiBase = "http://127.0.0.1:${toString tgPort}";
     };
@@ -46,7 +49,8 @@ pkgs.testers.runNixOSTest {
       };
     };
 
-    environment.systemPackages = [ pkgs.jq ];
+    # curl 探测 API；CLI 包入 PATH 以便 sources add / status 子命令
+    environment.systemPackages = [ pkgs.jq pkgs.curl config.services.reading-steiner.package ];
   };
 
   testScript = ''

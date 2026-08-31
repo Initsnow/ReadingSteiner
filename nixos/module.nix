@@ -28,9 +28,9 @@ let
       enabled = cfg.camofox.enabled;
       base_url = cfg.camofox.baseUrl;
       access_key_file =
-        if cfg.camofox.accessKeyFile != null then "/run/credentials/reading-steiner.service/camofox_access_key" else "";
+        if cfg.camofox.accessKeyFile != null then "/run/credentials/reading-steiner-daemon.service/camofox_access_key" else "";
       api_key_file =
-        if cfg.camofox.apiKeyFile != null then "/run/credentials/reading-steiner.service/camofox_api_key" else "";
+        if cfg.camofox.apiKeyFile != null then "/run/credentials/reading-steiner-daemon.service/camofox_api_key" else "";
       user_id = cfg.camofox.userId;
       session_key = cfg.camofox.sessionKey;
       health_check_interval_secs = cfg.camofox.healthCheckIntervalSecs;
@@ -127,10 +127,19 @@ in
       };
       staticDir = lib.mkOption {
         type = lib.types.str;
-        default = "";
+        # 默认接线 flake 的 packages.web（前端构建产物）；无该包时留空 = 仅 API。
+        # 注意留空时 Rust 端会回退到相对路径 web/dist，而非「仅 API」，
+        # 因此显式设为指向 flake web 包的绝对路径。
+        default = lib.mkDefault (
+          if (self.packages.${pkgs.system} or { }) ? web
+          then "${self.packages.${pkgs.system}.web}"
+          else ""
+        );
+        defaultText = lib.literalExpression "flake `packages.web` outPath, or \"\"";
         description = ''
-          Web console static assets directory. Leave empty to serve API only;
-          point it at the frontend build (e.g. the flake's `packages.web`).
+          Web console static assets directory. Empty means falling back to the
+          daemon's built-in relative `web/dist` lookup; prefer the flake's
+          `packages.web` for a fully declarative deployment.
         '';
       };
       authTokenFile = lib.mkOption {
@@ -276,6 +285,8 @@ in
           ${lib.optionalString hasToken ''
             ${lib.getExe pkgs.replace-secret} '@auth-token@' "$CREDENTIALS_DIRECTORY/auth_token" "$tmp"
           ''}
+          # ExecStartPre 默认以 User=/Group= 身份运行（非 root），无需也不能 chown：
+          # install 创建的文件自然归服务用户所有，服务进程 0640 可读。
           install -m 0640 "$tmp" ${runtimeConfigFile}
         '';
       };
