@@ -10,6 +10,14 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: web/pnpm-lock.yaml
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
@@ -23,4 +31,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: cachix/install-nix-action@v30
-      - run: nix flake check
+        with:
+          # 缺少 flakes 会导致 nix flake check 直接失败
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+      # 无 KVM 的 runner 上跑不了 NixOS 集成测试，--no-build 只做求值检查
+      - run: nix flake check --no-build

@@ -14,7 +14,7 @@
 cargo build --release
 
 # 构建 Web 控制台前端（可选；未构建时 daemon 仍可提供 /api 接口）
-cd web && npm install && npm run build && cd ..
+cd web && pnpm install && pnpm build && cd ..
 
 # 启动 daemon（默认读取 config.yaml）
 ./target/release/reading-steiner serve
