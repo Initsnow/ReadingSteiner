@@ -10,8 +10,8 @@ React + TypeScript + Vite + Tailwind CSS + [shadcn/ui](https://ui.shadcn.com/) �
 ## 开发
 
 ```bash
-npm install
-npm run dev
+pnpm install
+pnpm dev
 ```
 
 Vite 会把 `/api` 代理到 `http://127.0.0.1:8901`（需先启动 daemon）。
@@ -19,7 +19,7 @@ Vite 会把 `/api` 代理到 `http://127.0.0.1:8901`（需先启动 daemon）。
 ## 构建
 
 ```bash
-npm run build
+pnpm build
 # 产物输出到 dist/，由 daemon 的 web 服务托管
 ```
 
