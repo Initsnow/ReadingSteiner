@@ -351,7 +351,7 @@ pub fn render_event_message(
             ("{watch}", &event.watchpoint_id),
             (
                 "{time}",
-                &crate::scheduler::format_local_time(event.detected_at, tz),
+                &crate::cron_expr::format_local(event.detected_at, tz),
             ),
             ("{tz}", tz),
             ("{summary}", &html_escape(&event.diff_summary)),
@@ -369,7 +369,7 @@ pub fn render_failure_message(
     tz: &str,
 ) -> String {
     let now = Utc::now();
-    let t = crate::scheduler::format_local_time(now, tz);
+    let t = crate::cron_expr::format_local(now, tz);
     format!(
         "<b>⚠️ ReadingSteiner 连续失败告警</b>\n监控源 <b>{}</b> 已连续失败 {} 次（阈值 {}）。\n最近错误：<i>{}</i>\n本地时间（{}）：{}",
         html_escape(source_id),

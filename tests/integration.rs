@@ -802,7 +802,7 @@ fn test_tag_db_roundtrip() {
     let db = Db::open_in_memory().unwrap();
     // 初始为空。
     assert!(db.list_tags().unwrap().is_empty());
-    assert!(db.get_tag("news").unwrap().is_none());
+    assert!(find_tag(&db, "news").is_none());
 
     // 新增。
     let tag = TagConfig {
@@ -813,7 +813,7 @@ fn test_tag_db_roundtrip() {
     };
     db.upsert_tag(&tag).unwrap();
     assert_eq!(db.list_tags().unwrap().len(), 1);
-    let loaded = db.get_tag("news").unwrap().unwrap();
+    let loaded = find_tag(&db, "news").unwrap();
     assert_eq!(loaded.history_limit, 30);
 
     // 更新。
@@ -824,13 +824,13 @@ fn test_tag_db_roundtrip() {
         notify_url: "tgram://tok/C1".into(),
     })
     .unwrap();
-    let loaded = db.get_tag("news").unwrap().unwrap();
+    let loaded = find_tag(&db, "news").unwrap();
     assert_eq!(loaded.history_limit, 0);
     assert_eq!(loaded.notify_url, "tgram://tok/C1");
 
     // 删除。
     assert_eq!(db.delete_tag("news").unwrap(), 1);
-    assert!(db.get_tag("news").unwrap().is_none());
+    assert!(find_tag(&db, "news").is_none());
 }
 
 #[test]
@@ -933,7 +933,7 @@ fn test_ensure_tags_registers_new_tags() {
     db.ensure_tags(&["news".into(), "alert".into()]).unwrap();
     assert_eq!(db.list_tags().unwrap().len(), 2);
 
-    let news = db.get_tag("news").unwrap().unwrap();
+    let news = find_tag(&db, "news").unwrap();
     assert_eq!(news.history_limit, 0);
 
     // 更新 news 的分组配置后再次登记，不应覆盖。
@@ -945,10 +945,18 @@ fn test_ensure_tags_registers_new_tags() {
     })
     .unwrap();
     db.ensure_tags(&["news".into()]).unwrap();
-    let news = db.get_tag("news").unwrap().unwrap();
+    let news = find_tag(&db, "news").unwrap();
     assert_eq!(news.history_limit, 10);
 
     // 空标签 / 空白标签被忽略。
     db.ensure_tags(&["".into(), "   ".into()]).unwrap();
     assert_eq!(db.list_tags().unwrap().len(), 2);
+}
+
+/// 按名称取分组设置（走 `list_tags`，与生产代码同一路径）。
+fn find_tag(db: &Db, name: &str) -> Option<TagConfig> {
+    db.list_tags()
+        .unwrap_or_default()
+        .into_iter()
+        .find(|t| t.name == name)
 }
