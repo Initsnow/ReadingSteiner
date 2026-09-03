@@ -1,18 +1,16 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
-use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, RwLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-use chrono::{DateTime, Local, Utc};
-use cron::Schedule as CronSchedule;
+use chrono::{DateTime, Utc};
 use serde_json::{Value, json};
 use tokio::sync::{Mutex, Semaphore};
 use tracing::{debug, error, info, warn};
 
 use crate::config::{
-    ChangeType, Config, EditableSettings, ExtractConfig, ImageSelector, ItemSelector,
+    ChangeType, Config, DEFAULT_CRON, EditableSettings, ExtractConfig, ImageSelector, ItemSelector,
     RuntimeConfig, SourceConfig,
 };
 use crate::db::Db;
@@ -90,13 +88,48 @@ impl AppState {
         })
     }
 
+    /// 运行时配置快照（热更新后即时反映新值）。
+    fn runtime_snapshot(&self) -> RuntimeConfig {
+        self.runtime.read().unwrap().clone()
+    }
+
+    /// 全局可编辑设置快照（fetcher 的 UA / 超时从这里读）。
+    pub(crate) fn settings_snapshot(&self) -> EditableSettings {
+        self.settings.read().unwrap().clone()
+    }
+
+    /// 当前生效的时区（IANA 名称）。
+    pub(crate) fn timezone(&self) -> String {
+        self.runtime.read().unwrap().timezone.clone()
+    }
+
+    /// 状态目录（备份等落盘位置）。
+    pub(crate) fn state_dir(&self) -> PathBuf {
+        self.runtime.read().unwrap().state_dir.clone()
+    }
+
+    /// 媒体目录（图片缓存 / 截图）。
+    pub(crate) fn media_dir(&self) -> PathBuf {
+        self.runtime.read().unwrap().media_dir.clone()
+    }
+
+    /// 当前生效的全局 Telegram 通知目标（`tgram://` URL，支持热更新）。
+    pub(crate) fn telegram_url(&self) -> String {
+        self.settings.read().unwrap().telegram_url.clone()
+    }
+
+    /// 全部分组（标签）配置。
+    pub(crate) async fn tags(&self) -> Vec<crate::models::TagConfig> {
+        self.db.lock().await.list_tags().unwrap_or_default()
+    }
+
     pub async fn status(&self) -> DaemonStatus {
         let sources = self.sources.lock().await;
         let enabled = sources.iter().filter(|s| s.enabled).count();
         let last_tick = *self.last_tick_at.lock().await;
         let engine_health = self.engine_health.lock().await.clone();
         let now = Utc::now();
-        let tz = self.runtime.read().unwrap().timezone.clone();
+        let tz = self.timezone();
         DaemonStatus {
             running: self.running.load(Ordering::Relaxed),
             version: env!("CARGO_PKG_VERSION").to_string(),
@@ -107,7 +140,7 @@ impl AppState {
             engine_health,
             timezone: tz.clone(),
             server_time_utc: now,
-            server_time_local: format_local_time(now, &tz),
+            server_time_local: crate::cron_expr::format_local(now, &tz),
         }
     }
 
@@ -152,115 +185,34 @@ impl AppState {
     }
 }
 
+/// 调度主循环：每 500ms 扫一轮，把到期的监控源丢进并发任务执行。
+///
+/// 每轮做四件事：
+/// 1. 按 runtime 最新并发数动态调整信号量（并发热更新）；
+/// 2. 捞出到期且不在退避中的监控源，按队列容量截断后并发执行检测；
+/// 3. 排空通知发件箱（变更通知 + 系统告警）；
+/// 4. 每 60s 做一次历史清理（节流，避免高频全表 DELETE）。
 pub async fn run_daemon(state: Arc<AppState>) -> Result<()> {
     state.running.store(true, Ordering::Relaxed);
-    let source_count = state.sources.lock().await.len();
-    info!(sources = source_count, "ReadingSteiner daemon started");
+    info!(sources = state.sources.lock().await.len(), "daemon started");
+    init_schedule_states(&state).await?;
 
-    // Initialize schedule states for all live sources so they become due on first tick.
-    {
-        let db = state.db.lock().await;
-        let now = Utc::now();
-        let sources = state.sources.lock().await;
-        for source in sources.iter() {
-            if db.get_schedule_state(&source.id)?.is_none() {
-                let due = now + chrono::Duration::seconds(1);
-                db.upsert_schedule_state(&ScheduleState {
-                    source_id: source.id.clone(),
-                    next_due_at: due,
-                    consecutive_failures: 0,
-                    consecutive_changes: 0,
-                    backoff_until: None,
-                    last_success_at: None,
-                    last_error: None,
-                    last_notified_fingerprint: None,
-                    last_notified_at: None,
-                    failure_notified: false,
-                })?;
-            }
-        }
-    }
+    let semaphore = Arc::new(Semaphore::new(state.runtime_snapshot().concurrency.max(1)));
+    // 记录当前信号量的许可数，用于每轮动态增减（实现并发数热更新）。
+    let mut current_concurrency = state.runtime_snapshot().concurrency.max(1);
+    let mut last_prune = Instant::now();
 
-    let concurrency = state.runtime.read().unwrap().concurrency.max(1);
-    let semaphore = Arc::new(Semaphore::new(concurrency));
-    // 记录当前信号量的并发许可数，用于在每轮动态增减（实现并发数热更新）。
-    let mut last_concurrency = concurrency;
-    // 历史清理的节流计时器：每 60s 执行一次全量清理，避免高频 DELETE 扫描。
-    let mut last_prune = std::time::Instant::now();
-
-    loop {
-        if !state.running.load(Ordering::Relaxed) {
-            break;
-        }
+    while state.running.load(Ordering::Relaxed) {
         *state.last_tick_at.lock().await = Some(Utc::now());
 
-        // 并发数热更新：按 runtime 最新值动态调整信号量许可数。
-        let target_concurrency = state.runtime.read().unwrap().concurrency.max(1);
-        if target_concurrency != last_concurrency {
-            let old_concurrency = last_concurrency;
-            if target_concurrency > last_concurrency {
-                semaphore.add_permits(target_concurrency - last_concurrency);
-                last_concurrency = target_concurrency;
-            } else {
-                // forget_permits 可能因当前持有许可的任务而未完全减少，
-                // 用返回值修正 last_concurrency，以便后续循环继续收敛。
-                let reduced = semaphore.forget_permits(last_concurrency - target_concurrency);
-                last_concurrency -= reduced;
-            }
-            info!(
-                old = old_concurrency,
-                new = last_concurrency,
-                target = target_concurrency,
-                "concurrency hot-reloaded"
-            );
-        }
+        current_concurrency = sync_concurrency(&semaphore, current_concurrency, &state);
 
-        // 独立绑定以尽早释放 db 读锁（避免在下方 error 分支的 await 期间持锁）。
-        let sched_states = state.db.lock().await.list_schedule_states();
-        let sched_map = match sched_states {
-            Ok(m) => m,
-            Err(e) => {
-                warn!(error = %e, "failed to load schedule states; skip this tick");
-                tokio::time::sleep(Duration::from_millis(500)).await;
-                continue;
-            }
+        let Some(sched_map) = load_schedule_states(&state).await else {
+            tokio::time::sleep(TICK_INTERVAL).await;
+            continue;
         };
 
-        let due = {
-            let now = Utc::now();
-            let mut due: Vec<SourceConfig> = Vec::new();
-            let sources = state.sources.lock().await;
-            for source in sources.iter() {
-                // 监控开关由监控源自身控制（分组不参与叠加）；关闭则跳过调度。
-                if !source.enabled {
-                    continue;
-                }
-                let sched = sched_map.get(&source.id).cloned().unwrap_or(ScheduleState {
-                    source_id: source.id.clone(),
-                    next_due_at: now,
-                    consecutive_failures: 0,
-                    consecutive_changes: 0,
-                    backoff_until: None,
-                    last_success_at: None,
-                    last_error: None,
-                    last_notified_fingerprint: None,
-                    last_notified_at: None,
-                    failure_notified: false,
-                });
-                if let Some(until) = sched.backoff_until
-                    && until > now
-                {
-                    continue;
-                }
-                if sched.next_due_at <= now {
-                    due.push(source.clone());
-                }
-            }
-            // 有界队列：每 tick 最多入队 queue_capacity 个任务，超出部分下个 tick 再处理。
-            due.truncate(state.runtime.read().unwrap().queue_capacity.max(1));
-            due
-        };
-
+        let due = collect_due_sources(&state, &sched_map).await;
         state.queue_depth.store(due.len(), Ordering::Relaxed);
         for source in due {
             let state = state.clone();
@@ -268,176 +220,351 @@ pub async fn run_daemon(state: Arc<AppState>) -> Result<()> {
             tokio::spawn(async move {
                 let _permit = semaphore.acquire_owned().await;
                 if let Err(e) = check_source(&state, &source.id).await {
-                    error!(source = %source.id, error = %e, "check_source failed");
-                    let db = state.db.lock().await;
-                    if let Some(mut sched) = db.get_schedule_state(&source.id).unwrap_or(None) {
-                        sched.consecutive_failures += 1;
-                        // 记录最近一次错误信息，供 Web 控制台展示错误原因。
-                        sched.last_error = Some(e.to_string());
-                        let backoff = 30u64 * 2u64.pow(sched.consecutive_failures.min(5));
-                        sched.backoff_until =
-                            Some(Utc::now() + chrono::Duration::seconds(backoff as i64));
-                        sched.next_due_at = Utc::now() + chrono::Duration::seconds(1);
-                        // 连续失败达到阈值时，发送一条失败通知（同一段失败连击只发一次）。
-                        let threshold = state.runtime.read().unwrap().failure_notify_threshold;
-                        if threshold > 0
-                            && sched.consecutive_failures >= threshold
-                            && !sched.failure_notified
-                        {
-                            // 失败告警使用全局通知目标（tgram:// 形式）。
-                            let target = state
-                                .notifier
-                                .read()
-                                .unwrap()
-                                .as_ref()
-                                .and_then(|n| n.global_target());
-                            if let Some(target) = target {
-                                let target_json =
-                                    serde_json::to_string(&crate::models::NotificationTarget {
-                                        token: target.token.clone(),
-                                        chat_ids: target.chat_ids.clone(),
-                                    })
-                                    .unwrap_or_default();
-                                let chat_id = target.chat_ids.first().cloned().unwrap_or_default();
-                                let tz = state.runtime.read().unwrap().timezone.clone();
-                                let text = notifier::render_failure_message(
-                                    &source.id,
-                                    sched.consecutive_failures,
-                                    threshold,
-                                    &e.to_string(),
-                                    &tz,
-                                );
-                                let _ =
-                                    db.insert_system_notification(&chat_id, &text, &target_json);
-                                sched.failure_notified = true;
-                            }
-                        }
-                        let _ = db.upsert_schedule_state(&sched);
-                    }
+                    record_failure(&state, &source.id, &e).await;
                 }
             });
         }
 
-        // Drain notification outbox periodically（含事件通知与系统告警）。
-        // 显式限定读取锁作用域，clone 出 Arc 后立即释放锁，避免跨 await 持锁。
-        let notifier = state.notifier.read().unwrap().clone();
-        if let Some(notifier) = notifier {
-            let db = state.db.clone();
-            let images = state.images.clone();
-            if let Err(e) = notifier::process_outbox(&db, &images, &notifier, None).await {
-                warn!(error = %e, "outbox processing failed");
-            }
-        }
+        drain_outbox(&state).await;
+        last_prune = maybe_prune_history(&state, last_prune).await;
 
-        // 历史清理是低频操作：每 60s 执行一次，避免每 500ms 对全表扫描做
-        // DELETE（大库下尤其浪费）。历史事件通常只在检测到变更时新增，
-        // 60s 的粒度已足够及时回收空间。
-        // 独立于 notifier：即使未配置通知器，历史清理也应照常执行。
-        if last_prune.elapsed() >= Duration::from_secs(60) {
-            // 按每个监控源保留条数限制清理历史（事件与快照）。
-            // 解析分组继承后的生效保留条数：若分组配置了更严格的保留策略，
-            // 则优先按分组的限制清理，否则使用全局限制。
-            let db = state.db.lock().await;
-            let tags = db.list_tags().unwrap_or_default();
-            let global_limit = state.runtime.read().unwrap().history_limit_per_source;
-            // 快速路径：没有任何分组配置历史限制（全部跟随全局）时，用一次全表清理，
-            // 避免对每个源逐条执行 DELETE 带来额外开销（与旧实现的单条 SQL 相当）。
-            let any_group_limit = tags.iter().any(|t| t.history_limit > 0);
-            let sources = state.sources.lock().await;
-            if !any_group_limit {
-                if global_limit > 0
-                    && let Err(e) = db.prune_history(global_limit)
-                {
-                    warn!(error = %e, "history pruning failed");
-                }
-            } else {
-                for source in sources.iter() {
-                    let (_, _, history) =
-                        crate::config::resolve_effective_source(source, &tags, global_limit);
-                    if history > 0
-                        && let Err(e) = db.prune_history_for_source(&source.id, history)
-                    {
-                        warn!(source = %source.id, error = %e, "history pruning failed");
-                    }
-                }
-            }
-            drop(db);
-            last_prune = std::time::Instant::now();
-        }
-
-        tokio::time::sleep(Duration::from_millis(500)).await;
+        tokio::time::sleep(TICK_INTERVAL).await;
     }
     Ok(())
 }
 
+/// 主循环每轮的间隔。
+const TICK_INTERVAL: Duration = Duration::from_millis(500);
+/// 历史清理的节流间隔。
+const PRUNE_INTERVAL: Duration = Duration::from_secs(60);
+/// 连续失败退避的基数与上限指数（退避 = BASE * 2^min(失败数, MAX_EXP)）。
+const BACKOFF_BASE_SECS: i64 = 30;
+const BACKOFF_MAX_EXP: u32 = 5;
+
+/// 首次启动时为所有监控源补一条调度状态，使其在第一轮即到期。
+async fn init_schedule_states(state: &Arc<AppState>) -> Result<()> {
+    let db = state.db.lock().await;
+    let now = Utc::now();
+    let sources = state.sources.lock().await;
+    for source in sources.iter() {
+        if db.get_schedule_state(&source.id)?.is_none() {
+            db.upsert_schedule_state(&ScheduleState {
+                source_id: source.id.clone(),
+                next_due_at: now + chrono::Duration::seconds(1),
+                ..ScheduleState::default()
+            })?;
+        }
+    }
+    Ok(())
+}
+
+/// 把信号量的许可数收敛到 runtime 的最新并发数，返回收敛后的值。
+///
+/// `forget_permits` 可能因仍有任务持有许可而未完全减少，故用其返回值修正计数，
+/// 让后续循环继续向目标收敛。
+fn sync_concurrency(semaphore: &Semaphore, current: usize, state: &AppState) -> usize {
+    let target = state.runtime_snapshot().concurrency.max(1);
+    if target == current {
+        return current;
+    }
+    let next = if target > current {
+        semaphore.add_permits(target - current);
+        target
+    } else {
+        current - semaphore.forget_permits(current - target)
+    };
+    info!(
+        old = current,
+        new = next,
+        target,
+        "concurrency hot-reloaded"
+    );
+    next
+}
+
+/// 一次查出全部调度状态（避免每轮对每个源发一次查询的 N+1 问题）。
+/// 失败时告警并返回 None，交由调用方跳过本轮。
+async fn load_schedule_states(state: &Arc<AppState>) -> Option<HashMap<String, ScheduleState>> {
+    match state.db.lock().await.list_schedule_states() {
+        Ok(map) => Some(map),
+        Err(e) => {
+            warn!(error = %e, "failed to load schedule states; skipping tick");
+            None
+        }
+    }
+}
+
+/// 收集本轮到期的监控源：启用、不在退避中、且已到下个触发时刻。
+/// 最多取 `queue_capacity` 个（有界队列），其余留到下轮。
+async fn collect_due_sources(
+    state: &Arc<AppState>,
+    sched_map: &HashMap<String, ScheduleState>,
+) -> Vec<SourceConfig> {
+    let now = Utc::now();
+    let capacity = state.runtime_snapshot().queue_capacity.max(1);
+    let sources = state.sources.lock().await;
+    sources
+        .iter()
+        // 监控开关由监控源自身控制（分组不参与叠加）。
+        .filter(|s| s.enabled)
+        .filter(|s| {
+            let sched = sched_map.get(&s.id);
+            // 退避期内跳过；无调度状态时立即视为到期。
+            let backed_off = sched
+                .and_then(|s| s.backoff_until)
+                .is_some_and(|until| until > now);
+            let due_at = sched.map(|s| s.next_due_at).unwrap_or(now);
+            !backed_off && due_at <= now
+        })
+        .take(capacity)
+        .cloned()
+        .collect()
+}
+
+/// 记录一次抓取失败：递增失败计数、设置指数退避、按需发送失败告警。
+async fn record_failure(state: &Arc<AppState>, source_id: &str, error: &Error) {
+    error!(source = %source_id, error = %error, "check_source failed");
+    let db = state.db.lock().await;
+    let Ok(Some(mut sched)) = db.get_schedule_state(source_id) else {
+        return;
+    };
+    sched.consecutive_failures += 1;
+    // 记录错误信息，供 Web 控制台展示失败原因。
+    sched.last_error = Some(error.to_string());
+    let exp = sched.consecutive_failures.min(BACKOFF_MAX_EXP);
+    sched.backoff_until =
+        Some(Utc::now() + chrono::Duration::seconds(BACKOFF_BASE_SECS * 2i64.pow(exp)));
+    sched.next_due_at = Utc::now() + chrono::Duration::seconds(1);
+
+    // 连续失败达到阈值时发一条告警，同一段失败连击只发一次。
+    let threshold = state.runtime_snapshot().failure_notify_threshold;
+    if threshold > 0 && sched.consecutive_failures >= threshold && !sched.failure_notified {
+        try_queue_failure_alert(state, &db, source_id, &sched, error, threshold);
+    }
+    let _ = db.upsert_schedule_state(&sched);
+}
+
+/// 把连续失败告警排入系统通知队列（失败告警走全局通知目标）。
+fn try_queue_failure_alert(
+    state: &Arc<AppState>,
+    db: &Db,
+    source_id: &str,
+    sched: &ScheduleState,
+    error: &Error,
+    threshold: u32,
+) {
+    let Some(target) = state
+        .notifier
+        .read()
+        .unwrap()
+        .as_ref()
+        .and_then(|n| n.global_target())
+    else {
+        return;
+    };
+    let target_json = serde_json::to_string(&crate::models::NotificationTarget {
+        token: target.token.clone(),
+        chat_ids: target.chat_ids.clone(),
+    })
+    .unwrap_or_default();
+    let chat_id = target.chat_ids.first().cloned().unwrap_or_default();
+    let text = notifier::render_failure_message(
+        source_id,
+        sched.consecutive_failures,
+        threshold,
+        &error.to_string(),
+        &state.timezone(),
+    );
+    if db
+        .insert_system_notification(&chat_id, &text, &target_json)
+        .is_ok()
+    {
+        sched_mark_failure_notified(db, source_id);
+    }
+}
+
+fn sched_mark_failure_notified(db: &Db, source_id: &str) {
+    if let Ok(Some(mut s)) = db.get_schedule_state(source_id) {
+        s.failure_notified = true;
+        let _ = db.upsert_schedule_state(&s);
+    }
+}
+
+/// 排空通知发件箱（变更通知 + 系统告警）。
+async fn drain_outbox(state: &Arc<AppState>) {
+    // 先 clone 出 Arc 再 await，避免跨 await 持有读写锁。
+    let Some(notifier) = state.notifier.read().unwrap().clone() else {
+        return;
+    };
+    if let Err(e) = notifier::process_outbox(&state.db, &state.images, &notifier, None).await {
+        warn!(error = %e, "outbox processing failed");
+    }
+}
+
+/// 每 [`PRUNE_INTERVAL`] 清理一次历史，返回更新后的计时起点。
+///
+/// 独立于 notifier：即使未配置通知器，历史清理也应照常执行。
+async fn maybe_prune_history(state: &Arc<AppState>, last_prune: Instant) -> Instant {
+    if last_prune.elapsed() < PRUNE_INTERVAL {
+        return last_prune;
+    }
+    let db = state.db.lock().await;
+    let tags = db.list_tags().unwrap_or_default();
+    let global_limit = state.runtime_snapshot().history_limit_per_source;
+    // 快速路径：没有任何分组配置历史限制时，一次全表清理即可，
+    // 避免对每个源逐条 DELETE。
+    if tags.iter().all(|t| t.history_limit == 0) {
+        if global_limit > 0
+            && let Err(e) = db.prune_history(global_limit)
+        {
+            warn!(error = %e, "history pruning failed");
+        }
+    } else {
+        let sources = state.sources.lock().await;
+        for source in sources.iter() {
+            let (_, _, history) =
+                crate::config::resolve_effective_source(source, &tags, global_limit);
+            if history > 0
+                && let Err(e) = db.prune_history_for_source(&source.id, history)
+            {
+                warn!(source = %source.id, error = %e, "history pruning failed");
+            }
+        }
+    }
+    Instant::now()
+}
+
+/// 执行一次监控源检测：抓取 → 提取 → 比对 → 落库 → 按需排队通知。
+///
+/// 这是「检测」的核心流程，由调度主循环与 Web/CLI 的「立即检测」共用。
+/// 失败时由调用方负责更新调度状态（退避 / 告警）。
 pub async fn check_source(state: &Arc<AppState>, source_id: &str) -> Result<()> {
     let source = get_live_source(state, source_id).await?;
-    // 生效的提取配置：若监控源跟随分组且所属分组配置了提取，则沿用分组的设置。
-    let tags = { state.db.lock().await.list_tags().unwrap_or_default() };
+    let tags = state.tags().await;
+    // 生效提取配置：跟随分组且分组配置了提取时，沿用分组设置。
     let extract_cfg = crate::config::resolve_effective_extract(&source, &tags);
-    // 本次检查的快照：时区 / 默认 cron 支持热更新，单次检查内用一致的取值。
-    let (tz, default_cron) = {
-        let rt = state.runtime.read().unwrap();
-        (rt.timezone.clone(), rt.default_cron.clone())
-    };
+    // 单次检查内用一致的时区 / 默认 cron 快照，避免中途热更新导致取值漂移。
+    let tz = state.timezone();
+    let default_cron = state.runtime_snapshot().default_cron;
 
-    let (prev_etag, prev_lm, prev_fp, prev_items_json) = {
-        let db = state.db.lock().await;
-        let snap = db.latest_snapshot(source_id)?;
-        match snap {
-            Some(s) => (
-                s.etag,
-                s.last_modified,
-                Some(s.normalized_fingerprint),
-                Some(s.items_json),
-            ),
-            None => (None, None, None, None),
-        }
-    };
+    let previous = load_previous_snapshot(state, source_id).await?;
+    let doc = fetch_document(state, &source, previous.etag, previous.last_modified).await?;
 
-    let fetcher = fetcher::create_fetcher(
-        &source.fetch.engine,
-        &state.cfg,
-        &state.settings.read().unwrap().clone(),
-    )?;
-    let spec = FetchSpec {
-        fetch: source.fetch.clone(),
-        etag: prev_etag,
-        last_modified: prev_lm,
-        source_id: source.id.clone(),
-    };
-    let doc = fetcher.fetch(&spec).await?;
-
+    // 304：内容未变，仅推进调度时间，不做后续比对。
     if doc.not_modified {
         debug!(source = %source.id, "304 not modified");
-        let db = state.db.lock().await;
-        let prev = db.get_schedule_state(&source.id)?;
-        db.upsert_schedule_state(&next_schedule(
-            &source,
-            0,
-            None,
-            false,
-            prev.as_ref(),
-            &tz,
-            &default_cron,
-        ))?;
+        advance_schedule(state, &source, &tz, &default_cron, None, false).await?;
         return Ok(());
     }
 
     let out = pipeline::run_pipeline(&doc, &extract_cfg)?;
-
-    let old_items: Vec<Item> = prev_items_json
+    let old_items: Vec<Item> = previous
+        .items_json
         .as_deref()
         .map(serde_json::from_str)
         .transpose()?
         .unwrap_or_default();
-    let diff_result = differ::diff(
-        prev_fp.as_deref().unwrap_or(""),
+    let diff = differ::diff(
+        previous.fingerprint.as_deref().unwrap_or(""),
         &out.fingerprint,
         &old_items,
         &out.items,
     );
 
+    save_snapshot(state, &source, &doc, &out).await?;
+    state
+        .engine_health
+        .lock()
+        .await
+        .insert(source.fetch.engine.clone(), true);
+
+    // 无变化：推进调度并结束。
+    if !diff.changed {
+        advance_schedule(state, &source, &tz, &default_cron, Some(Utc::now()), false).await?;
+        debug!(source = %source.id, "no change");
+        return Ok(());
+    }
+
+    // 指纹去重：同一内容指纹只通知一次。跨轮保留 last_notified_fingerprint，
+    // 因此内容在多个指纹间振荡时也不会重复轰炸。
+    {
+        let db = state.db.lock().await;
+        if let Some(sched) = db.get_schedule_state(&source.id)?
+            && sched
+                .last_notified_fingerprint
+                .as_deref()
+                .is_some_and(|fp| fp == diff.dedupe_key)
+        {
+            advance_schedule(state, &source, &tz, &default_cron, Some(Utc::now()), true).await?;
+            debug!(source = %source.id, "duplicate change, suppressed");
+            return Ok(());
+        }
+    }
+
+    let image_urls = resolve_image_urls(&doc, &extract_cfg, &out, &diff, &old_items);
+    record_change(
+        state,
+        &source,
+        &tags,
+        &doc,
+        &diff,
+        &image_urls,
+        &tz,
+        &default_cron,
+    )
+    .await
+}
+
+/// 上一轮快照中供比对的关键字段。
+#[derive(Default)]
+struct PreviousSnapshot {
+    etag: Option<String>,
+    last_modified: Option<String>,
+    fingerprint: Option<String>,
+    items_json: Option<String>,
+}
+
+async fn load_previous_snapshot(
+    state: &Arc<AppState>,
+    source_id: &str,
+) -> Result<PreviousSnapshot> {
+    let Some(snap) = state.db.lock().await.latest_snapshot(source_id)? else {
+        return Ok(PreviousSnapshot::default());
+    };
+    Ok(PreviousSnapshot {
+        etag: snap.etag,
+        last_modified: snap.last_modified,
+        fingerprint: Some(snap.normalized_fingerprint),
+        items_json: Some(snap.items_json),
+    })
+}
+
+/// 按监控源的引擎抓取文档。UA / 超时取自当前全局设置。
+async fn fetch_document(
+    state: &Arc<AppState>,
+    source: &SourceConfig,
+    etag: Option<String>,
+    last_modified: Option<String>,
+) -> Result<crate::models::FetchedDocument> {
+    let fetcher =
+        fetcher::create_fetcher(&source.fetch.engine, &state.cfg, &state.settings_snapshot())?;
+    fetcher
+        .fetch(&FetchSpec {
+            fetch: source.fetch.clone(),
+            etag,
+            last_modified,
+            source_id: source.id.clone(),
+        })
+        .await
+}
+
+/// 保存本轮快照（供下一轮比对）。
+async fn save_snapshot(
+    state: &Arc<AppState>,
+    source: &SourceConfig,
+    doc: &crate::models::FetchedDocument,
+    out: &pipeline::PipelineOutput,
+) -> Result<()> {
     let snapshot = SnapshotRecord {
         id: 0,
         watchpoint_id: source.id.clone(),
@@ -451,224 +578,152 @@ pub async fn check_source(state: &Arc<AppState>, source_id: &str) -> Result<()> 
         duration_ms: doc.duration_ms,
         engine: doc.engine.clone(),
     };
-    {
-        let db = state.db.lock().await;
-        db.save_snapshot(&snapshot)?;
-    }
-    state
-        .engine_health
-        .lock()
-        .await
-        .insert(source.fetch.engine.clone(), true);
+    state.db.lock().await.save_snapshot(&snapshot)?;
+    Ok(())
+}
 
-    // 连续无变化时清零连续变化计数。
-    if !diff_result.changed {
-        let db = state.db.lock().await;
-        let prev = db.get_schedule_state(&source.id)?;
-        db.upsert_schedule_state(&next_schedule(
-            &source,
-            0,
-            Some(Utc::now()),
-            false,
-            prev.as_ref(),
-            &tz,
-            &default_cron,
-        ))?;
-        debug!(source = %source.id, "no change");
-        return Ok(());
-    }
+/// 推进调度状态并落库。
+///
+/// `last_success` 为 `Some` 表示本次抓取成功；`had_change` 表示检测到变化
+/// （被抑制的重复变化也算，避免连续变化计数被清零）。
+async fn advance_schedule(
+    state: &Arc<AppState>,
+    source: &SourceConfig,
+    tz: &str,
+    default_cron: &str,
+    last_success: Option<DateTime<Utc>>,
+    had_change: bool,
+) -> Result<()> {
+    let db = state.db.lock().await;
+    let prev = db.get_schedule_state(&source.id)?;
+    let next = next_schedule(
+        source,
+        0,
+        last_success,
+        had_change,
+        prev.as_ref(),
+        tz,
+        default_cron,
+    );
+    db.upsert_schedule_state(&next)
+}
 
-    // 用指纹去重：同一内容指纹（同一轮变化）只通知一次，避免重复告警。
-    // 通过保留 last_notified_fingerprint（跨轮不清空）实现：
-    // 即使内容在多个指纹间振荡，只要目标指纹已经通知过，就不重复轰炸。
-    {
-        let db = state.db.lock().await;
-        let sched = db.get_schedule_state(&source.id)?;
-        if let Some(sched) = sched
-            && sched
-                .last_notified_fingerprint
-                .as_deref()
-                .is_some_and(|fp| fp == diff_result.dedupe_key.as_str())
-        {
-            db.upsert_schedule_state(&next_schedule(
-                &source,
-                0,
-                Some(Utc::now()),
-                true,
-                Some(&sched),
-                &tz,
-                &default_cron,
-            ))?;
-            debug!(source = %source.id, "duplicate change, suppressed");
-            return Ok(());
-        }
-    }
-
-    // 图片来源：若选用 `Changed`（只发变更元素相关图片），则根据 diff 计算变更元素图片。
-    let mut image_urls = out.image_urls.clone();
-    if matches!(
-        extract_cfg,
-        ExtractConfig::Items {
-            images: Some(ImageSelector::Changed),
-            ..
-        }
-    ) {
-        // 本次变更中新增 / 更新的条目 stable_id。
-        let changed_ids: std::collections::HashSet<String> = {
-            let old_ids: std::collections::HashSet<&str> = diff_result
-                .old_items
-                .iter()
-                .map(|i| i.stable_id.as_str())
-                .collect();
-            diff_result
-                .new_items
-                .iter()
-                .filter(|i| {
-                    !old_ids.contains(i.stable_id.as_str())
-                        || old_items.iter().any(|o| {
-                            o.stable_id == i.stable_id && o.fingerprint(&[]) != i.fingerprint(&[])
-                        })
-                })
-                .map(|i| i.stable_id.clone())
-                .collect()
-        };
-        if let ExtractConfig::Items {
-            selector, fields, ..
-        } = &extract_cfg
-        {
-            // Changed 模式依赖 CSS 定位 HTML 元素；JSONPath 源无法定位元素，
-            // 会静默丢弃全部图片，此时回退到整页 image_urls，避免丢图。
-            if matches!(selector, ItemSelector::Css { .. }) {
-                image_urls =
-                    pipeline::collect_changed_element_images(&doc, selector, fields, &changed_ids);
-            }
-        }
-    }
-
-    // camofox 源开启截图时，先把截图数据暂存（插入事件拿到 event_id 后再写文件，
-    // 文件命名 `event-{id}.png`，落在 media_dir/screenshots/ 下）。
-    // 写入失败时不引用不存在的文件（screenshot_path 置为 None）。
-    let screenshot_data = if source.fetch.engine == "camofox"
-        && source.fetch.screenshot
-        && let Some(data) = &doc.screenshot
-    {
-        Some(data.clone())
-    } else {
-        None
+/// 确定本次变更要随通知附带的图片 URL。
+///
+/// `Changed` 模式只收集**发生变更的元素**相关图片，需要结合 diff 结果定位
+/// HTML 元素，故在此按需重算；其余模式直接用提取阶段收集到的结果。
+fn resolve_image_urls(
+    doc: &crate::models::FetchedDocument,
+    extract_cfg: &ExtractConfig,
+    out: &pipeline::PipelineOutput,
+    diff: &crate::models::DiffResult,
+    old_items: &[Item],
+) -> Vec<String> {
+    let ExtractConfig::Items {
+        selector,
+        fields,
+        images: Some(ImageSelector::Changed),
+        ..
+    } = extract_cfg
+    else {
+        return out.image_urls.clone();
     };
+    // Changed 模式依赖 CSS 定位元素；JSONPath 源无法定位，回退整页图片避免丢图。
+    if !matches!(selector, ItemSelector::Css { .. }) {
+        return out.image_urls.clone();
+    }
+    pipeline::collect_changed_element_images(
+        doc,
+        selector,
+        fields,
+        &changed_item_ids(diff, old_items),
+    )
+}
 
-    let event = ChangeEvent {
+/// 本次变更中新增 / 更新的条目 stable_id。
+fn changed_item_ids(diff: &crate::models::DiffResult, old_items: &[Item]) -> HashSet<String> {
+    let old_ids: HashSet<&str> = diff
+        .old_items
+        .iter()
+        .map(|i| i.stable_id.as_str())
+        .collect();
+    diff.new_items
+        .iter()
+        .filter(|new| {
+            !old_ids.contains(new.stable_id.as_str())
+                || old_items.iter().any(|old| {
+                    old.stable_id == new.stable_id && old.fingerprint(&[]) != new.fingerprint(&[])
+                })
+        })
+        .map(|i| i.stable_id.clone())
+        .collect()
+}
+
+/// 落库变更事件（含截图）、按需排队通知，并推进调度状态。
+#[allow(clippy::too_many_arguments)]
+async fn record_change(
+    state: &Arc<AppState>,
+    source: &SourceConfig,
+    tags: &[crate::models::TagConfig],
+    doc: &crate::models::FetchedDocument,
+    diff: &crate::models::DiffResult,
+    image_urls: &[String],
+    tz: &str,
+    default_cron: &str,
+) -> Result<()> {
+    let mut event = ChangeEvent {
         id: 0,
         watchpoint_id: source.id.clone(),
-        change_type: diff_result.change_type.unwrap_or(ChangeType::Updated),
-        old_items_json: serde_json::to_string(&diff_result.old_items)?,
-        new_items_json: serde_json::to_string(&diff_result.new_items)?,
-        diff_summary: diff_result.diff_summary,
-        fingerprint: diff_result.fingerprint,
-        dedupe_key: diff_result.dedupe_key,
-        image_urls_json: serde_json::to_string(&image_urls)?,
+        change_type: diff.change_type.unwrap_or(ChangeType::Updated),
+        old_items_json: serde_json::to_string(&diff.old_items)?,
+        new_items_json: serde_json::to_string(&diff.new_items)?,
+        diff_summary: diff.diff_summary.clone(),
+        fingerprint: diff.fingerprint.clone(),
+        dedupe_key: diff.dedupe_key.clone(),
+        image_urls_json: serde_json::to_string(image_urls)?,
         detected_at: Utc::now(),
         read: false,
         screenshot_path: None,
     };
 
-    // 图片下载不阻塞检测：把挑选出的图片 URL 存入事件，
-    // 由 notifier 在发送通知时按需下载/取缓存（见 process_outbox）。
-    let event_id;
-    {
-        let db = state.db.lock().await;
-        event_id = db.insert_change_event(&event)?;
-        // 插入成功后再写截图：以 event_id 命名，写失败时事件不带截图，
-        // 不存在残留临时文件，也不存在 DB 与文件名不一致的问题。
-        if let Some(data) = &screenshot_data {
-            let dir = state.runtime.read().unwrap().media_dir.join("screenshots");
-            match std::fs::create_dir_all(&dir) {
-                Ok(()) => {
-                    let fname = format!("event-{event_id}.png");
-                    let path = dir.join(&fname);
-                    match std::fs::write(&path, data) {
-                        Ok(()) => {
-                            if let Err(e) = db.update_event_screenshot(
-                                event_id,
-                                Some(&format!("screenshots/{fname}")),
-                            ) {
-                                // DB 更新失败：清理已写入的文件，避免引用不存在的文件。
-                                tracing::warn!(
-                                    error = %e, event_id,
-                                    "failed to set screenshot path in db; removing file"
-                                );
-                                let _ = std::fs::remove_file(&path);
-                            }
-                        }
-                        Err(e) => {
-                            tracing::warn!(
-                                error = %e, event_id,
-                                "failed to write screenshot; event will have no screenshot"
-                            );
-                        }
-                    }
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        error = %e, event_id,
-                        "failed to create screenshots dir; event will have no screenshot"
-                    );
-                }
-            }
+    let db = state.db.lock().await;
+    let event_id = db.insert_change_event(&event)?;
+    event.id = event_id;
+    // 插入成功后再落盘截图（以 event_id 命名）；写失败时事件不带截图，
+    // 不留残留文件，也不会出现 DB 与文件名不一致。
+    store_screenshot(state, &db, event_id, doc, source);
+
+    // 通知开关由监控源自身控制（分组不参与叠加）；仅开启时排队发送。
+    let (_, notify_enabled, _) = crate::config::resolve_effective_source(source, tags, 0);
+    if notify_enabled && state.notifier.read().unwrap().is_some() {
+        // 目标解析：分组优先，回退全局（读热更新后的 tgram:// url）。
+        let target = crate::config::resolve_notify_target(source, tags, &state.telegram_url())
+            .or_else(|| {
+                state
+                    .notifier
+                    .read()
+                    .unwrap()
+                    .as_ref()
+                    .and_then(|n| n.global_target())
+            });
+        if let Some(target) = target {
+            queue_notification(&db, event_id, &target)?;
         }
-        // 仅当该源开启了通知（通知开关由监控源自身控制，分组不参与叠加）且已配置
-        // notifier 与可用通知目标时才排队发送。
-        // 注意：此处直接复用外层已持有的 `db`，避免对 `tokio::sync::Mutex` 二次加锁导致死锁。
-        let (_, effective_notify, _) = {
-            let tags = db.list_tags().unwrap_or_default();
-            crate::config::resolve_effective_source(&source, &tags, 0)
-        };
-        if effective_notify && state.notifier.read().unwrap().is_some() {
-            let tags = db.list_tags().unwrap_or_default();
-            // 解析通知目标：分组优先，回退全局（tgram:// URL，可热更新）。
-            let hot_url = state.settings.read().unwrap().telegram_url.clone();
-            let target =
-                crate::config::resolve_notify_target(&source, &tags, &hot_url).or_else(|| {
-                    state
-                        .notifier
-                        .read()
-                        .unwrap()
-                        .as_ref()
-                        .and_then(|n| n.global_target())
-                });
-            if let Some(target) = target {
-                let target_json = serde_json::to_string(&crate::models::NotificationTarget {
-                    token: target.token.clone(),
-                    chat_ids: target.chat_ids.clone(),
-                })?;
-                let chat_id = target.chat_ids.first().cloned().unwrap_or_default();
-                let notif = crate::models::NotificationRecord {
-                    id: 0,
-                    event_id,
-                    chat_id,
-                    target_json,
-                    message_ids_json: "[]".to_string(),
-                    status: "pending".to_string(),
-                    attempts: 0,
-                    next_retry_at: None,
-                };
-                db.insert_notification(&notif)?;
-            }
-        }
-        let prev = db.get_schedule_state(&source.id)?;
-        let mut sched = next_schedule(
-            &source,
-            0,
-            Some(Utc::now()),
-            true,
-            prev.as_ref(),
-            &tz,
-            &default_cron,
-        );
-        sched.last_notified_fingerprint = Some(event.dedupe_key.clone());
-        sched.last_notified_at = Some(Utc::now());
-        db.upsert_schedule_state(&sched)?;
     }
+
+    let prev = db.get_schedule_state(&source.id)?;
+    let mut sched = next_schedule(
+        source,
+        0,
+        Some(Utc::now()),
+        true,
+        prev.as_ref(),
+        tz,
+        default_cron,
+    );
+    sched.last_notified_fingerprint = Some(event.dedupe_key.clone());
+    sched.last_notified_at = Some(Utc::now());
+    db.upsert_schedule_state(&sched)?;
 
     info!(
         source = %source.id,
@@ -677,291 +732,69 @@ pub async fn check_source(state: &Arc<AppState>, source_id: &str) -> Result<()> 
         summary = %event.diff_summary,
         "change detected"
     );
-
     Ok(())
 }
 
-/// 把标准 cron 的星期值（0-7，0/7=周日）转为 cron crate 的星期值（1-7，1=周日）。
-/// 不支持命名形式（SUN/MON 等）——它们会原样透传，由 cron crate 解析。
-fn map_cron_dow_num(v: i32) -> i32 {
-    match v {
-        0 | 7 => 1,                         // 周日 → 1
-        n if (1..=6).contains(&n) => n + 1, // 周一~周六 → 2~7
-        _ => v,
-    }
-}
-
-/// 在标准 cron 星期环（0-6，0/7=周日）上展开范围 `a-b`，返回标准 cron 星期值序列。
-/// 支持跨周范围（如 `5-7` → [5,6,0]，`6-1` → [6,0,1]），`7` 视为周日（0）。
-fn expand_std_dow_range(a: i32, b: i32) -> Vec<i32> {
-    let norm = |v: i32| if v == 7 { 0 } else { v };
-    let na = norm(a);
-    let nb = norm(b);
-    let mut out = Vec::new();
-    if na <= nb {
-        for v in na..=nb {
-            out.push(v);
-        }
-    } else {
-        // 跨周：a..6 再接 0..b
-        for v in na..=6 {
-            out.push(v);
-        }
-        for v in 0..=nb {
-            out.push(v);
-        }
-    }
-    out
-}
-
-/// 把标准 cron 星期值列表映射为 cron crate 星期值（1-7，1=周日）字符串列表。
-fn map_dow_list(values: &[i32]) -> Vec<String> {
-    values
-        .iter()
-        .map(|&v| map_cron_dow_num(v).to_string())
-        .collect()
-}
-
-/// 把标准 cron 的星期字段（第 5 段）转为 cron crate 的星期字段。
-/// 支持 `*`、`n`、`a-b`、`a-b/n`、`*/n`、`n/n`、逗号列表（含范围）。
-/// 正确处理跨周范围（如 `5-7` 周五~周日、`6-1` 周六~周一）。
-/// 命名（SUN/MON 等）原样透传，由 cron crate 自己解析。
-fn convert_dow_field(field: &str) -> Result<String> {
-    let field = field.trim();
-    if field == "*" {
-        return Ok("*".to_string());
-    }
-    // 命名形式（如 SUN、MON）直接透传，由 cron crate 自己解析（sun=1, mon=2...）。
-    if field.chars().all(|c| c.is_ascii_alphabetic()) {
-        return Ok(field.to_string());
-    }
-
-    let mut out: Vec<String> = Vec::new();
-    for item in field.split(',') {
-        let item = item.trim();
-        // 形如 a-b/n 或 a-b
-        if let Some((range_part, step)) = item.split_once('/') {
-            let step: i32 = step
-                .parse()
-                .map_err(|_| crate::error::Error::other(format!("无效的步进值: '{item}'")))?;
-            if step < 1 {
-                return Err(crate::error::Error::other(format!(
-                    "步进值必须为正: '{item}'"
-                )));
-            }
-            if range_part == "*" {
-                // 标准环 0-6 到 cron crate 1-7 是线性偏移，*/n 结构保持不变，直接透传。
-                out.push(format!("*/{step}"));
-            } else if let Some((a, b)) = range_part.split_once('-') {
-                let a: i32 = a
-                    .trim()
-                    .parse()
-                    .map_err(|_| crate::error::Error::other(format!("无效的星期值: '{a}'")))?;
-                let b: i32 = b
-                    .trim()
-                    .parse()
-                    .map_err(|_| crate::error::Error::other(format!("无效的星期值: '{b}'")))?;
-                let vals = expand_std_dow_range(a, b);
-                // 范围 + 步进：在展开后的序列上按 step 取样。
-                let stepped: Vec<i32> = vals.iter().step_by(step as usize).copied().collect();
-                out.push(map_dow_list(&stepped).join(","));
-            } else {
-                // 单个值 + 步进（Vixie 语义，如 1/2 = 周一/三/五）：
-                // 从起点在标准环上每隔 step 取一个值。
-                let v: i32 = range_part.trim().parse().map_err(|_| {
-                    crate::error::Error::other(format!("无效的星期值: '{range_part}'"))
-                })?;
-                let start = if v == 7 { 0 } else { v };
-                let mut vals = Vec::new();
-                let mut cur = start;
-                while cur <= 6 {
-                    vals.push(cur);
-                    cur += step;
-                }
-                out.push(map_dow_list(&vals).join(","));
-            }
-        } else if let Some((a, b)) = item.split_once('-') {
-            let a: i32 = a
-                .trim()
-                .parse()
-                .map_err(|_| crate::error::Error::other(format!("无效的星期值: '{a}'")))?;
-            let b: i32 = b
-                .trim()
-                .parse()
-                .map_err(|_| crate::error::Error::other(format!("无效的星期值: '{b}'")))?;
-            if a == b {
-                out.push(map_cron_dow_num(a).to_string());
-            } else {
-                let vals = expand_std_dow_range(a, b);
-                out.push(map_dow_list(&vals).join(","));
-            }
-        } else {
-            // 单个值
-            let v: i32 = item
-                .parse()
-                .map_err(|_| crate::error::Error::other(format!("无效的星期值: '{item}'")))?;
-            out.push(map_cron_dow_num(v).to_string());
-        }
-    }
-    Ok(out.join(","))
-}
-
-/// 把标准 5 段 cron 表达式（`分 时 日 月 周`）转为 cron crate 的 7 段格式
-/// （`秒 分 时 日 月 周 年`），秒固定为 0、年不限。
-/// 星期字段做标准 cron（0/7=周日）→ cron crate（1=周日）的映射。
-/// 失败时返回描述性错误（原始表达式附在消息里）。
-fn cron_5field_to_7field(expr: &str) -> Result<String> {
-    let expr = expr.trim();
-    let parts: Vec<&str> = expr.split_whitespace().collect();
-    if parts.len() != 5 {
-        return Err(crate::error::Error::other(format!(
-            "cron 表达式需要 5 段（分 时 日 月 周），实际得到 {} 段: '{expr}'",
-            parts.len()
-        )));
-    }
-    let dow = convert_dow_field(parts[4])?;
-    // 标准 5 段 → 7 段：前插 0（秒），末尾追加 *（年不限）。
-    Ok(format!(
-        "0 {} {} {} {} {} *",
-        parts[0], parts[1], parts[2], parts[3], dow
-    ))
-}
-
-/// 按 cron 表达式计算下一次应触发的时间（配置时区的本地时间）。
-/// `after` 为当前时间，返回严格晚于它的下一个匹配时刻。
-/// 解析失败或没有下一次触发时返回 Err。
-fn next_cron_due(expr: &str, tz: &str, after: DateTime<Utc>) -> Result<DateTime<Utc>> {
-    let seven = cron_5field_to_7field(expr)?;
-    let sched = CronSchedule::from_str(&seven)
-        .map_err(|e| crate::error::Error::other(format!("cron 表达式解析失败 '{expr}': {e}")))?;
-    // 优先使用配置的 IANA 时区；解析失败时回退到系统本地时区。
-    let next = match tz.parse::<chrono_tz::Tz>() {
-        Ok(zone) => sched
-            .after(&after.with_timezone(&zone))
-            .take(1)
-            .next()
-            .map(|t| t.with_timezone(&Utc)),
-        Err(_) => sched
-            .after(&after.with_timezone(&Local))
-            .take(1)
-            .next()
-            .map(|t| t.with_timezone(&Utc)),
+/// 把 camofox 截图写入 `media_dir/screenshots/event-{id}.png` 并回填路径。
+fn store_screenshot(
+    state: &Arc<AppState>,
+    db: &Db,
+    event_id: i64,
+    doc: &crate::models::FetchedDocument,
+    source: &SourceConfig,
+) {
+    let Some(data) = doc.screenshot.as_deref() else {
+        return;
     };
-    next.ok_or_else(|| {
-        crate::error::Error::other(format!("cron 表达式没有可用的下一次触发时间: '{expr}'"))
-    })
-}
-
-/// 计算下一轮调度状态。
-///
-/// - `failures`：连续失败次数（成功时为 0，会清除失败计数与退避）。
-/// - `last_success`：本次抓取是否成功（Some(时间)）——用于记录最后成功时间。
-/// - `had_change`：本次抓取是否检测到内容变化。用于正确维护连续变化计数：
-///   有变化时保留/递增；无变化时清零。**重复变化（被抑制）也视为"有变化"**，
-///   避免连续变化计数被意外清零。
-/// - `prev`：上一轮调度状态。用于**保留** `last_notified_*`，从而让
-///   基于指纹的重复告警抑制跨轮生效。
-/// - `tz`：cron 表达式使用的 IANA 时区名称。
-///
-/// 调度完全由源的 `schedule.cron` 表达式驱动：按 cron 精确计算下一次触发时间；
-/// 表达式为空或无效时退化为 60s 短间隔重试，避免 daemon 因单个源卡死。
-fn next_schedule(
-    source: &crate::config::SourceConfig,
-    failures: u32,
-    last_success: Option<DateTime<Utc>>,
-    had_change: bool,
-    prev: Option<&ScheduleState>,
-    tz: &str,
-    default_cron: &str,
-) -> ScheduleState {
-    // 连续变化计数：本次有变化时保留/递增；无变化时清零。
-    let consecutive_changes = if had_change {
-        prev.map(|p| p.consecutive_changes.saturating_add(1))
-            .unwrap_or(1)
-    } else {
-        0
-    };
-
-    // —— cron 表达式驱动：按表达式精确调度。 ——
-    // 监控源未配置 cron 时使用全局默认 cron（default_cron）；
-    // default_cron 也为空时回退到每小时（与 RuntimeConfig 的默认一致）。
-    let expr = source
-        .schedule
-        .cron
-        .as_deref()
-        .map(|s| s.trim())
-        .filter(|s| !s.is_empty())
-        .or_else(|| {
-            let d = default_cron.trim();
-            if d.is_empty() { None } else { Some(d) }
-        })
-        .unwrap_or("0 * * * *");
-    let next_due_at = match next_cron_due(expr, tz, Utc::now()) {
-        Ok(t) => t,
-        Err(e) => {
-            // 表达式缺失或无效时退化为短间隔重试，避免 daemon 因单个源卡死。
-            warn!(source = %source.id, error = %e, "invalid cron, falling back to 60s retry");
-            Utc::now() + chrono::Duration::seconds(60)
-        }
-    };
-
-    ScheduleState {
-        source_id: source.id.clone(),
-        next_due_at,
-        consecutive_failures: failures,
-        consecutive_changes,
-        backoff_until: None,
-        last_success_at: last_success,
-        // 成功时清空最近错误信息。
-        last_error: None,
-        last_notified_fingerprint: prev.and_then(|p| p.last_notified_fingerprint.clone()),
-        last_notified_at: prev.and_then(|p| p.last_notified_at),
-        // 成功（无失败）路径会将失败通知标记清零。
-        failure_notified: failures == 0,
+    if source.fetch.engine != "camofox" || !source.fetch.screenshot {
+        return;
+    }
+    let dir = state.media_dir().join("screenshots");
+    if let Err(e) = std::fs::create_dir_all(&dir) {
+        warn!(error = %e, event_id, "failed to create screenshots dir; event will have no screenshot");
+        return;
+    }
+    let fname = format!("event-{event_id}.png");
+    let path = dir.join(&fname);
+    if let Err(e) = std::fs::write(&path, data) {
+        warn!(error = %e, event_id, "failed to write screenshot; event will have no screenshot");
+        return;
+    }
+    if let Err(e) = db.update_event_screenshot(event_id, Some(&format!("screenshots/{fname}"))) {
+        // DB 回填失败：删掉文件，避免留下无人引用的孤儿文件。
+        warn!(error = %e, event_id, "failed to set screenshot path in db; removing file");
+        let _ = std::fs::remove_file(&path);
     }
 }
 
-/// 将 UTC 时间按指定 IANA 时区格式化为 `%Y-%m-%d %H:%M:%S` 的本地时间字符串。
-/// 时区无法解析时退回 UTC。
-pub fn format_local_time(t: DateTime<Utc>, tz: &str) -> String {
-    match tz.parse::<chrono_tz::Tz>() {
-        Ok(zone) => t
-            .with_timezone(&zone)
-            .format("%Y-%m-%d %H:%M:%S")
-            .to_string(),
-        Err(_) => t.format("%Y-%m-%d %H:%M:%S UTC").to_string(),
-    }
+/// 把一条变更通知排入发件箱，由 notifier 异步发送。
+fn queue_notification(
+    db: &Db,
+    event_id: i64,
+    target: &crate::models::TelegramTarget,
+) -> Result<()> {
+    let target_json = serde_json::to_string(&crate::models::NotificationTarget {
+        token: target.token.clone(),
+        chat_ids: target.chat_ids.clone(),
+    })?;
+    db.insert_notification(&crate::models::NotificationRecord {
+        id: 0,
+        event_id,
+        chat_id: target.chat_ids.first().cloned().unwrap_or_default(),
+        target_json,
+        message_ids_json: "[]".to_string(),
+        status: "pending".to_string(),
+        attempts: 0,
+        next_retry_at: None,
+    })?;
+    Ok(())
 }
 
-/// Fetch a live source from the in-memory store (SQLite-backed).
-pub async fn get_live_source(state: &Arc<AppState>, source_id: &str) -> Result<SourceConfig> {
-    let sources = state.sources.lock().await;
-    sources
-        .iter()
-        .find(|s| s.id == source_id)
-        .cloned()
-        .ok_or_else(|| crate::error::Error::other(format!("source not found: {source_id}")))
-}
-
-/// Test a monitoring source: fetch its URL and run the configured pipeline,
-/// returning the extracted items / fingerprint without persisting any snapshot
-/// or change event. Used by the Web console "测试监控源" action.
-pub async fn test_source(state: &Arc<AppState>, source: &SourceConfig) -> Result<Value> {
-    // 生效的提取配置：跟随分组时优先用分组配置的提取。
-    let tags = { state.db.lock().await.list_tags().unwrap_or_default() };
-    let extract_cfg = crate::config::resolve_effective_extract(source, &tags);
-    let fetcher = fetcher::create_fetcher(
-        &source.fetch.engine,
-        &state.cfg,
-        &state.settings.read().unwrap().clone(),
-    )?;
-    let spec = FetchSpec {
-        fetch: source.fetch.clone(),
-        etag: None,
-        last_modified: None,
-        source_id: source.id.clone(),
-    };
-    let doc = fetcher.fetch(&spec).await?;
+/// 测试监控源：抓取并按配置提取，返回摘要，**不落库**（不写快照 / 不产生事件）。
+pub async fn test_source(state: &Arc<AppState>, source_id: &str) -> Result<Value> {
+    let source = get_live_source(state, source_id).await?;
+    let extract_cfg = crate::config::resolve_effective_extract(&source, &state.tags().await);
+    let doc = fetch_document(state, &source, None, None).await?;
     if doc.not_modified {
         return Ok(json!({ "not_modified": true }));
     }
@@ -979,117 +812,77 @@ pub async fn test_source(state: &Arc<AppState>, source: &SourceConfig) -> Result
     }))
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use chrono::TimeZone;
+/// 计算下一轮调度状态。
+///
+/// - `failures`：连续失败次数（成功路径传 0，会清除失败计数与退避）。
+/// - `last_success`：本次抓取是否成功（成功则记录时间）。
+/// - `had_change`：本次是否检测到内容变化。**重复变化（被抑制）也视为有变化**，
+///   避免连续变化计数被意外清零。
+/// - `prev`：上一轮状态，用于**保留** `last_notified_*`，让基于指纹的
+///   重复告警抑制跨轮生效。
+/// - `tz`：cron 表达式使用的 IANA 时区名。
+///
+/// 调度完全由源的 `schedule.cron` 驱动：按 cron 精确计算下一次触发时刻；
+/// 表达式为空或无效时退化为 60s 短间隔重试，避免单个源卡死 daemon。
+fn next_schedule(
+    source: &SourceConfig,
+    failures: u32,
+    last_success: Option<DateTime<Utc>>,
+    had_change: bool,
+    prev: Option<&ScheduleState>,
+    tz: &str,
+    default_cron: &str,
+) -> ScheduleState {
+    let consecutive_changes = if had_change {
+        prev.map(|p| p.consecutive_changes.saturating_add(1))
+            .unwrap_or(1)
+    } else {
+        0
+    };
 
-    #[test]
-    fn test_cron_5field_to_7field() {
-        // 标准 1-5 = 周一~周五 → cron crate 2,3,4,5,6。
-        assert_eq!(
-            cron_5field_to_7field("0 9 * * 1-5").unwrap(),
-            "0 0 9 * * 2,3,4,5,6 *"
-        );
-        assert_eq!(
-            cron_5field_to_7field("*/15 * * * *").unwrap(),
-            "0 */15 * * * * *"
-        );
-        // 标准 0,6 = 周日,周六 → cron crate 1,7。
-        assert_eq!(
-            cron_5field_to_7field("30 8,20 * * 0,6").unwrap(),
-            "0 30 8,20 * * 1,7 *"
-        );
-        // 7 也代表周日 → 1。
-        assert_eq!(cron_5field_to_7field("0 9 * * 7").unwrap(), "0 0 9 * * 1 *");
+    // 监控源未配置 cron 时用全局默认；两者都为空时回退到每小时。
+    let expr = source
+        .schedule
+        .cron
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .or_else(|| {
+            let d = default_cron.trim();
+            (!d.is_empty()).then_some(d)
+        })
+        .unwrap_or(DEFAULT_CRON);
+    let next_due_at = match crate::cron_expr::next_due(expr, tz, Utc::now()) {
+        Ok(t) => t,
+        Err(e) => {
+            warn!(source = %source.id, error = %e, "invalid cron, falling back to 60s retry");
+            Utc::now() + chrono::Duration::seconds(60)
+        }
+    };
+
+    ScheduleState {
+        source_id: source.id.clone(),
+        next_due_at,
+        consecutive_failures: failures,
+        consecutive_changes,
+        backoff_until: None,
+        last_success_at: last_success,
+        // 成功路径清空最近错误信息。
+        last_error: None,
+        last_notified_fingerprint: prev.and_then(|p| p.last_notified_fingerprint.clone()),
+        last_notified_at: prev.and_then(|p| p.last_notified_at),
+        failure_notified: failures == 0,
     }
+}
 
-    #[test]
-    fn test_cron_5field_to_7field_cross_week_range() {
-        // 跨周范围 5-7：周五(5)周六(6)周日(0) → cron crate 6,7,1。
-        assert_eq!(
-            cron_5field_to_7field("0 9 * * 5-7").unwrap(),
-            "0 0 9 * * 6,7,1 *"
-        );
-        // 跨周范围 6-1：周六(6)周日(0)周一(1) → cron crate 7,1,2。
-        assert_eq!(
-            cron_5field_to_7field("0 9 * * 6-1").unwrap(),
-            "0 0 9 * * 7,1,2 *"
-        );
-        // 完整周 0-6 → cron crate 1..7。
-        assert_eq!(
-            cron_5field_to_7field("0 9 * * 0-6").unwrap(),
-            "0 0 9 * * 1,2,3,4,5,6,7 *"
-        );
-    }
-
-    #[test]
-    fn test_cron_5field_to_7field_steps() {
-        // 单值步进 1/2（Vixie）：周一(1)/三(3)/五(5) → cron crate 2,4,6。
-        assert_eq!(
-            cron_5field_to_7field("0 9 * * 1/2").unwrap(),
-            "0 0 9 * * 2,4,6 *"
-        );
-        // 范围步进 1-5/2：1,3,5 → cron crate 2,4,6。
-        assert_eq!(
-            cron_5field_to_7field("0 9 * * 1-5/2").unwrap(),
-            "0 0 9 * * 2,4,6 *"
-        );
-        // 跨周范围步进 5-1/2：周五(5)周日(0) → cron crate 6,1。
-        assert_eq!(
-            cron_5field_to_7field("0 9 * * 5-1/2").unwrap(),
-            "0 0 9 * * 6,1 *"
-        );
-    }
-
-    #[test]
-    fn test_cron_5field_to_7field_bad_arity() {
-        assert!(cron_5field_to_7field("0 9 * *").is_err());
-        assert!(cron_5field_to_7field("0 9 * * 1 2 3").is_err());
-        assert!(cron_5field_to_7field("").is_err());
-    }
-
-    #[test]
-    fn test_next_cron_due_daily() {
-        // 每天 09:30 UTC，给定 after=2026-01-01 00:00，应得到 2026-01-01 09:30。
-        let after = Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap();
-        let due = next_cron_due("30 9 * * *", "UTC", after).unwrap();
-        assert_eq!(due, Utc.with_ymd_and_hms(2026, 1, 1, 9, 30, 0).unwrap());
-    }
-
-    #[test]
-    fn test_next_cron_due_next_day_when_past() {
-        // 每天 09:30，after 已过 09:30，应得到次日 09:30。
-        let after = Utc.with_ymd_and_hms(2026, 1, 1, 12, 0, 0).unwrap();
-        let due = next_cron_due("30 9 * * *", "UTC", after).unwrap();
-        assert_eq!(due, Utc.with_ymd_and_hms(2026, 1, 2, 9, 30, 0).unwrap());
-    }
-
-    #[test]
-    fn test_next_cron_due_weekday() {
-        // 2026-01-01 是周四。工作日（1-5）每天 09:00。
-        // after = 周四 08:00 → 周四 09:00。
-        let after = Utc.with_ymd_and_hms(2026, 1, 1, 8, 0, 0).unwrap();
-        let due = next_cron_due("0 9 * * 1-5", "UTC", after).unwrap();
-        assert_eq!(due, Utc.with_ymd_and_hms(2026, 1, 1, 9, 0, 0).unwrap());
-
-        // after = 周五 10:00 → 下周一 09:00。
-        let after2 = Utc.with_ymd_and_hms(2026, 1, 2, 10, 0, 0).unwrap();
-        let due2 = next_cron_due("0 9 * * 1-5", "UTC", after2).unwrap();
-        assert_eq!(due2, Utc.with_ymd_and_hms(2026, 1, 5, 9, 0, 0).unwrap());
-    }
-
-    #[test]
-    fn test_next_cron_due_every_15_min() {
-        let after = Utc.with_ymd_and_hms(2026, 1, 1, 10, 7, 0).unwrap();
-        let due = next_cron_due("*/15 * * * *", "UTC", after).unwrap();
-        // 10:07 → 下一个 15 分钟边界为 10:15。
-        assert_eq!(due, Utc.with_ymd_and_hms(2026, 1, 1, 10, 15, 0).unwrap());
-    }
-
-    #[test]
-    fn test_next_cron_due_invalid_expr() {
-        assert!(next_cron_due("61 * * * *", "UTC", Utc::now()).is_err());
-        assert!(next_cron_due("bad", "UTC", Utc::now()).is_err());
-    }
+/// 取内存中的监控源（SQLite 是持久层，内存列表是运行时视图）。
+pub async fn get_live_source(state: &Arc<AppState>, source_id: &str) -> Result<SourceConfig> {
+    state
+        .sources
+        .lock()
+        .await
+        .iter()
+        .find(|s| s.id == source_id)
+        .cloned()
+        .ok_or_else(|| Error::other(format!("source not found: {source_id}")))
 }

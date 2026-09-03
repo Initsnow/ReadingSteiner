@@ -448,27 +448,6 @@ impl Db {
         Ok(out)
     }
 
-    /// 获取单个分组（标签）设置。
-    pub fn get_tag(&self, name: &str) -> Result<Option<TagConfig>> {
-        self.conn
-            .query_row(
-                "SELECT name, history_limit, notify_url, extract FROM tags WHERE name=?1",
-                [name],
-                |r| {
-                    Ok(TagConfig {
-                        name: r.get(0)?,
-                        history_limit: r.get::<_, i64>(1)? as usize,
-                        notify_url: r.get::<_, Option<String>>(2)?.unwrap_or_default(),
-                        extract: r
-                            .get::<_, Option<String>>(3)?
-                            .and_then(|s| serde_json::from_str(&s).ok()),
-                    })
-                },
-            )
-            .optional()
-            .map_err(Into::into)
-    }
-
     /// 新增 / 更新一个分组（标签）设置。
     pub fn upsert_tag(&self, tag: &TagConfig) -> Result<()> {
         let extract_json = tag
@@ -553,47 +532,12 @@ impl Db {
         Ok(())
     }
 
-    /// 统计指定监控源未读变更事件数。
-    pub fn unread_count(&self, source_id: &str) -> Result<u32> {
-        let n: i64 = self.conn.query_row(
-            "SELECT COUNT(*) FROM change_events WHERE watchpoint_id=?1 AND read=0",
-            [source_id],
-            |r| r.get(0),
-        )?;
-        Ok(n as u32)
-    }
-
-    /// 获取指定监控源最近一次检查时间（最新快照时间）。
-    pub fn last_check_at(&self, source_id: &str) -> Result<Option<DateTime<Utc>>> {
-        self.conn
-            .query_row(
-                "SELECT fetched_at FROM snapshots WHERE watchpoint_id=?1 ORDER BY id DESC LIMIT 1",
-                [source_id],
-                |r| r.get::<_, String>(0).map(|s| parse_ts(&s)),
-            )
-            .optional()
-            .map_err(Into::into)
-    }
-
-    /// 获取指定监控源最近一次变更时间。
-    pub fn last_change_at(&self, source_id: &str) -> Result<Option<DateTime<Utc>>> {
-        self.conn
-            .query_row(
-                "SELECT detected_at FROM change_events WHERE watchpoint_id=?1 ORDER BY id DESC LIMIT 1",
-                [source_id],
-                |r| r.get::<_, String>(0).map(|s| parse_ts(&s)),
-            )
-            .optional()
-            .map_err(Into::into)
-    }
-
     /// 获取所有监控源的展示用元信息。
     pub fn list_source_meta(
         &self,
         sources: &[SourceConfig],
     ) -> Result<Vec<crate::models::SourceMeta>> {
         use crate::models::SourceMeta;
-        use std::collections::HashMap;
 
         // 最近检查时间：每个源取最新快照的 fetched_at。
         let mut last_check_at: HashMap<String, DateTime<Utc>> = HashMap::new();
@@ -1018,8 +962,4 @@ fn map_event(r: &rusqlite::Row<'_>) -> rusqlite::Result<ChangeEvent> {
         read: r.get::<_, i64>(10)? != 0,
         screenshot_path: r.get(11)?,
     })
-}
-
-pub fn ts_now() -> String {
-    Utc::now().to_rfc3339()
 }
