@@ -37,10 +37,13 @@ fn validate(s: &EditableSettings) -> Result<()> {
     if s.default_timeout_secs == 0 {
         return Err(Error::config("default_timeout_secs 必须大于 0"));
     }
-    if !s.default_cron.trim().is_empty() && s.default_cron.parse::<cron::Schedule>().is_err() {
+    // 用标准 5 段解析器校验：直接交给 cron crate 会把 5 段表达式按 7 段解释
+    // （`*/10 * * * *` 被当成「秒=*、分=*/10」而误判为非法）。
+    if !s.default_cron.trim().is_empty()
+        && let Err(e) = crate::cron_expr::validate(&s.default_cron)
+    {
         return Err(Error::config(format!(
-            "default_cron 不是合法的 cron 表达式: {}",
-            s.default_cron
+            "default_cron 不是合法的 cron 表达式: {e}"
         )));
     }
     // 非空 timezone 必须是合法 IANA 时区名，避免坏值入库后调度/通知渲染静默回退 UTC。
