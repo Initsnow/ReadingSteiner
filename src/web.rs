@@ -181,17 +181,43 @@ fn build_router(state: Arc<AppState>) -> Router {
         .layer(DefaultBodyLimit::max(MAX_UPLOAD_BYTES));
 
     let static_dir = state.cfg.web.static_dir();
-    let index = static_dir.join("index.html");
     // 鉴权中间件只需一份只读 Config（读 web.auth_token）。
     let auth_cfg = state.cfg.clone();
 
     Router::new()
         .nest(
             "/api",
-            api.layer(middleware::from_fn_with_state(auth_cfg, require_auth)),
+            api
+                // 未知 /api/* 路径返回 JSON 404，避免落进前端 SPA 回退
+                // 而得到一个 HTML 页面（前端 JSON 解析会失败且难以定位）。
+                .fallback(api_not_found)
+                .layer(middleware::from_fn_with_state(auth_cfg, require_auth)),
         )
         .with_state(state)
-        .fallback_service(ServeDir::new(&static_dir).not_found_service(ServeFile::new(index)))
+        // 静态资源命中则直接返回；未命中（SPA 深链如 /sources、/settings）
+        // 一律回退到 index.html，交给前端路由处理。
+        .fallback_service(ServeDir::new(&static_dir).fallback(spa_fallback(static_dir)))
+}
+
+/// 未知 API 路径：返回 JSON 404（而非 HTML）。
+async fn api_not_found(req: Request) -> Response {
+    (
+        StatusCode::NOT_FOUND,
+        Json(Envelope::<()> {
+            ok: false,
+            result: None,
+            error: Some(format!("unknown api path: {}", req.uri().path())),
+        }),
+    )
+        .into_response()
+}
+
+/// SPA 回退服务：任何未命中的静态路径都返回 `index.html`。
+///
+/// 用 `ServeDir::fallback` 而非 `not_found_service`：后者会透传 404 状态码，
+/// 浏览器虽仍渲染页面，但健康检查 / 爬虫会误判为缺页。
+fn spa_fallback(static_dir: std::path::PathBuf) -> ServeFile {
+    ServeFile::new(static_dir.join("index.html"))
 }
 
 // ---- 状态 ----
