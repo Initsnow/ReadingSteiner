@@ -18,7 +18,10 @@ use crate::config::Config;
 use crate::error::{Error, Result};
 
 /// 备份输出目录名（相对 state_dir）。
-const BACKUP_SUBDIR: &str = "backups";
+pub const BACKUP_SUBDIR: &str = "backups";
+
+/// 备份中数据库文件的固定名称。
+pub const DB_FILE_NAME: &str = "reading-steiner.db";
 
 /// 执行一次完整备份，返回备份目录路径。
 ///
@@ -31,7 +34,7 @@ pub fn backup(db_conn: &Connection, cfg: &Config, config_path: Option<&Path>) ->
     fs::create_dir_all(&backup_dir)?;
 
     // 1) 数据库一致性快照（在线备份到独立文件，避免 WAL 竞态损坏）。
-    let db_backup = backup_dir.join("reading-steiner.db");
+    let db_backup = backup_dir.join(DB_FILE_NAME);
     db_conn.backup(rusqlite::DatabaseName::Main, &db_backup, None)?;
     // 收敛为单文件（清理可能残留的 -wal / -shm），便于整目录归档。
     if let Ok(conn) = Connection::open(&db_backup) {
@@ -123,11 +126,12 @@ pub fn list_backups(state_dir: &Path) -> Result<Vec<BackupInfo>> {
     for entry in fs::read_dir(&dir)? {
         let entry = entry?;
         let path = entry.path();
-        if entry.file_type()?.is_dir() && path.join("reading-steiner.db").exists() {
+        if entry.file_type()?.is_dir() && path.join(DB_FILE_NAME).exists() {
             let name = entry.file_name().to_string_lossy().into_owned();
             let zip_path = dir.join(format!("{name}.zip"));
             infos.push(BackupInfo {
                 name,
+                path: path.clone(),
                 has_zip: zip_path.exists(),
             });
         }
@@ -141,6 +145,8 @@ pub fn list_backups(state_dir: &Path) -> Result<Vec<BackupInfo>> {
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct BackupInfo {
     pub name: String,
+    /// 备份目录的绝对路径。
+    pub path: PathBuf,
     pub has_zip: bool,
 }
 

@@ -129,6 +129,7 @@ pub struct SourceMeta {
     pub last_error: Option<String>,
 }
 
+/// 一个监控源的调度状态：下次触发时间、失败连击、退避与去重指纹。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ScheduleState {
     pub source_id: String,
@@ -143,6 +144,23 @@ pub struct ScheduleState {
     /// 当前失败连击是否已发送过失败通知（达到 failure_notify_threshold 后置真，
     /// 成功后清零），用于避免同一段失败连击反复通知。
     pub failure_notified: bool,
+}
+
+impl Default for ScheduleState {
+    fn default() -> Self {
+        Self {
+            source_id: String::new(),
+            next_due_at: Utc::now(),
+            consecutive_failures: 0,
+            consecutive_changes: 0,
+            backoff_until: None,
+            last_success_at: None,
+            last_error: None,
+            last_notified_fingerprint: None,
+            last_notified_at: None,
+            failure_notified: false,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
