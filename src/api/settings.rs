@@ -69,3 +69,84 @@ fn validate(s: &EditableSettings) -> Result<()> {
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn with_cron(defaults: EditableSettings, cron: &str) -> EditableSettings {
+        EditableSettings {
+            default_cron: cron.to_string(),
+            ..defaults
+        }
+    }
+
+    /// 标准 5 段表达式必须按 5 段校验：直接交给 cron crate 会按 7 段解释，
+    /// 把 `*/10 * * * *` 当成「秒=*、分=*/10」而误判为非法。
+    #[test]
+    fn accepts_standard_5field_cron() {
+        for expr in [
+            "*/10 * * * *",
+            "0 * * * *",
+            "*/15 * * * *",
+            "0 9,18 * * 1-5",
+        ] {
+            assert!(
+                validate(&with_cron(EditableSettings::default(), expr)).is_ok(),
+                "{expr} should be accepted"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_malformed_cron() {
+        for expr in ["90 * * * *", "0 25 * * *", "not-a-cron", "0 9 * *"] {
+            assert!(
+                validate(&with_cron(EditableSettings::default(), expr)).is_err(),
+                "{expr} should be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_zero_numeric_fields() {
+        let base = EditableSettings::default();
+        for bad in [
+            EditableSettings {
+                concurrency: 0,
+                ..base.clone()
+            },
+            EditableSettings {
+                queue_capacity: 0,
+                ..base.clone()
+            },
+            EditableSettings {
+                default_timeout_secs: 0,
+                ..base
+            },
+        ] {
+            assert!(validate(&with_cron(bad, "0 * * * *")).is_err());
+        }
+    }
+
+    #[test]
+    fn rejects_invalid_timezone_and_telegram_url() {
+        let bad_tz = EditableSettings {
+            timezone: "Mars/Olympus".to_string(),
+            ..EditableSettings::default()
+        };
+        assert!(validate(&bad_tz).is_err());
+
+        let bad_url = EditableSettings {
+            telegram_url: "https://example.com".to_string(),
+            ..EditableSettings::default()
+        };
+        assert!(validate(&bad_url).is_err());
+    }
+
+    #[test]
+    fn accepts_defaults_and_empty_optional_targets() {
+        // 空 telegram_url / 空 cron 表示「沿用默认」，应放行。
+        assert!(validate(&with_cron(EditableSettings::default(), "")).is_ok());
+    }
+}
