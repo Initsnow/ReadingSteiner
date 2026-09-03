@@ -117,6 +117,21 @@ fn to_7field(expr: &str) -> Result<String> {
     ))
 }
 
+/// 校验标准 5 段 cron 表达式是否合法，返回首个错误描述。
+///
+/// 必须走 5 段转换：直接把 5 段表达式交给 cron crate 会按 7 段解释
+/// （`*/10 * * * *` 被当成「秒=*、分=*/10」），导致合法表达式被误判为非法。
+pub fn validate(expr: &str) -> Result<()> {
+    let schedule = CronSchedule::from_str(&to_7field(expr.trim())?)
+        .map_err(|e| Error::other(format!("{e}")))?;
+    if schedule.upcoming(Utc).next().is_none() {
+        return Err(Error::other(format!(
+            "cron 表达式没有可用的触发时间: '{expr}'"
+        )));
+    }
+    Ok(())
+}
+
 /// 求表达式在 `after` 之后的下一个触发时刻（严格晚于 `after`）。
 ///
 /// `tz` 为 IANA 时区名；解析失败时回退到系统本地时区。
