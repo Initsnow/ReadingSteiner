@@ -30,6 +30,7 @@ cd web && pnpm install && pnpm build && cd ..
 
 | 文档 | 说明 |
 |---|---|
+| [架构](./docs/architecture.md) | 分层、模块职责、数据流与并发约定 |
 | [配置](./docs/configuration.md) | config.yaml 引导项 + SQLite 中的全局设置 |
 | [Web 控制台](./docs/web-console.md) | 监控源 / 设置 / 分组 / 备份 |
 | [CLI](./docs/cli.md) | 命令行用法 |
@@ -43,9 +44,14 @@ cd web && pnpm install && pnpm build && cd ..
 ## 目录结构
 
 ```text
-src/           Rust 后端（config / db / fetcher / pipeline / scheduler / web / ...）
-web/           React Web 控制台（Vite + shadcn/ui）
+src/api/       领域服务层：业务唯一实现（web 与 cli 共用）
+src/web/       HTTP 传输层（axum 路由 + 鉴权）
+src/control/   CLI 控制通道（Unix socket 行协议）
+src/           scheduler / db / fetcher / pipeline / differ / notifier / ...
+web/           React Web 控制台（Vite + Tailwind + Radix）
 tests/         集成测试
 nixos/         NixOS 模块与集成测试
 config.yaml    启动引导配置（可编辑的全局设置已存 SQLite）
 ```
+
+架构与模块职责见 [架构文档](./docs/architecture.md)。
