@@ -375,16 +375,39 @@ export function SourceFormDialog({
 
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                   <div>
-                    <label className="block text-zinc-400 mb-1">
-                      等待元素 CSS Selector
-                    </label>
-                    <input
-                      type="text"
-                      value={form.waitSelector}
-                      placeholder=".content-loaded, table.data"
-                      onChange={(e) => onChange({ waitSelector: e.target.value })}
-                      className="w-full rounded-md border border-zinc-800 bg-zinc-900 px-3 py-1.5 text-xs text-zinc-100 font-mono focus:border-zinc-700 focus:outline-none"
-                    />
+                    {(() => {
+                      const activeExtractSelector =
+                        form.extractType === "text"
+                          ? form.textSelector.trim()
+                          : form.extractType === "items" && form.selectorKind === "css"
+                          ? form.selector.trim()
+                          : ""
+                      return (
+                        <>
+                          <div className="flex items-center justify-between mb-1">
+                            <label className="text-zinc-400">
+                              等待元素 CSS Selector
+                            </label>
+                            {activeExtractSelector && !form.waitSelector && (
+                              <span className="text-[10px] text-amber-400/80">
+                                留空默认沿用
+                              </span>
+                            )}
+                          </div>
+                          <input
+                            type="text"
+                            value={form.waitSelector}
+                            placeholder={
+                              activeExtractSelector
+                                ? `留空自动沿用: ${activeExtractSelector}`
+                                : "留空默认沿用提取区域选择器"
+                            }
+                            onChange={(e) => onChange({ waitSelector: e.target.value })}
+                            className="w-full rounded-md border border-zinc-800 bg-zinc-900 px-3 py-1.5 text-xs text-zinc-100 font-mono focus:border-zinc-700 focus:outline-none"
+                          />
+                        </>
+                      )
+                    })()}
                   </div>
 
                   <div>

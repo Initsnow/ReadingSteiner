@@ -523,8 +523,20 @@ async fn fetch_document(
     last_modified: Option<String>,
 ) -> Result<crate::models::FetchedDocument> {
     let mut fetch = source.fetch.clone();
-    if matches!(source.extract.images(), Some(crate::config::ImageSelector::Screenshot)) {
+    let group = if let Some(ref gid) = source.group_id {
+        state.db.lock().await.get_group(gid).ok().flatten()
+    } else {
+        None
+    };
+    let extract = crate::config::resolve_effective_extract(source, group.as_ref());
+    if matches!(extract.images(), Some(crate::config::ImageSelector::Screenshot)) {
         fetch.screenshot = true;
+    }
+    // 当 wait.selector 留空时，自动回退继承提取规则中的 CSS 选择器
+    if fetch.wait.selector.as_ref().map_or(true, |s| s.trim().is_empty()) {
+        if let Some(css_sel) = extract.css_selector() {
+            fetch.wait.selector = Some(css_sel.to_string());
+        }
     }
     let fetcher =
         fetcher::create_fetcher(&fetch.engine, &state.config_snapshot())?;

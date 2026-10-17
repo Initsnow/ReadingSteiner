@@ -795,3 +795,33 @@ fn test_reload_settings_hot_update() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+#[test]
+fn test_wait_selector_fallback_to_extract_css() {
+    let extract_text = ExtractConfig::Text {
+        selector: Some("h1.title".to_string()),
+        images: None,
+    };
+    assert_eq!(extract_text.css_selector(), Some("h1.title"));
+
+    let extract_items_css = ExtractConfig::Items {
+        selector: ItemSelector::Css {
+            selector: "ul.articles > li".to_string(),
+        },
+        fields: vec![],
+        dedupe_key: None,
+        images: None,
+    };
+    assert_eq!(extract_items_css.css_selector(), Some("ul.articles > li"));
+
+    let extract_json = ExtractConfig::Json {
+        json_path: Some("$.data.items".to_string()),
+        images: None,
+    };
+    assert_eq!(extract_json.css_selector(), None);
+
+    let extract_empty_text = ExtractConfig::Text {
+        selector: Some("   ".to_string()),
+        images: None,
+    };
+    assert_eq!(extract_empty_text.css_selector(), None);
+}

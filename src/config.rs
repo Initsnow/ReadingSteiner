@@ -163,7 +163,7 @@ impl Default for DaemonConfig {
             log_level: "info".to_string(),
             concurrency: 16,
             queue_capacity: 1024,
-            default_timeout_secs: 30,
+            default_timeout_secs: 120,
             default_cron: DEFAULT_CRON.to_string(),
             default_user_agent: DEFAULT_USER_AGENT.to_string(),
             history_limit_per_source: 0,
@@ -187,7 +187,7 @@ impl Default for BrowserConfig {
         Self {
             enabled: false,
             cdp_url: "http://127.0.0.1:9222".to_string(),
-            timeout_secs: 30,
+            timeout_secs: 120,
         }
     }
 }
@@ -303,7 +303,7 @@ impl Default for SettingsView {
         Self {
             concurrency: 16,
             queue_capacity: 1024,
-            default_timeout_secs: 30,
+            default_timeout_secs: 120,
             default_cron: DEFAULT_CRON.to_string(),
             default_user_agent: DEFAULT_USER_AGENT.to_string(),
             history_limit_per_source: 0,
@@ -315,7 +315,7 @@ impl Default for SettingsView {
             max_images_per_event: 10,
             browser_enabled: false,
             browser_cdp_url: "http://127.0.0.1:9222".to_string(),
-            browser_timeout_secs: 30,
+            browser_timeout_secs: 120,
             readonly: false,
             config_path: None,
         }
@@ -600,7 +600,7 @@ impl Default for FetchConfig {
             method: "GET".to_string(),
             headers: HashMap::new(),
             max_body_bytes: 5 * 1024 * 1024,
-            timeout_secs: 30,
+            timeout_secs: 120,
             wait: WaitConfig::default(),
             tab_policy: "reuse".to_string(),
             evaluate: None,
@@ -677,6 +677,27 @@ impl ExtractConfig {
             ExtractConfig::Text { images, .. } => images.as_ref(),
             ExtractConfig::Json { images, .. } => images.as_ref(),
             ExtractConfig::Items { images, .. } => images.as_ref(),
+        }
+    }
+
+    /// 若提取规则定义了 CSS 选择器（Text 模式或 Items CSS 模式），返回其修剪后的选择器字符串。
+    pub fn css_selector(&self) -> Option<&str> {
+        match self {
+            ExtractConfig::Text { selector, .. } => {
+                selector.as_deref().map(str::trim).filter(|s| !s.is_empty())
+            }
+            ExtractConfig::Items {
+                selector: ItemSelector::Css { selector },
+                ..
+            } => {
+                let trimmed = selector.trim();
+                if !trimmed.is_empty() {
+                    Some(trimmed)
+                } else {
+                    None
+                }
+            }
+            _ => None,
         }
     }
 }

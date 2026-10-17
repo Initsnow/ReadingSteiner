@@ -4,7 +4,7 @@ daemon:
   log_level: info
   concurrency: 16
   queue_capacity: 1024
-  default_timeout_secs: 30
+  default_timeout_secs: 120
   default_cron: 0 * * * *
   default_user_agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36 Edg/151.0.0.0
   history_limit_per_source: 0
@@ -21,6 +21,6 @@ telegram:
   digest_window_secs: 30
   template: ''
 browser:
-  enabled: false
-  cdp_url: http://127.0.0.1:9222
-  timeout_secs: 30
+  enabled: true
+  cdp_url: ws://127.0.0.1:9222/devtools/browser
+  timeout_secs: 120

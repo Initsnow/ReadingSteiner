@@ -3,6 +3,7 @@ use std::time::{Duration, Instant};
 use async_trait::async_trait;
 use chromiumoxide::Browser;
 use chromiumoxide::cdp::browser_protocol::page::CaptureScreenshotFormat;
+use chromiumoxide::cdp::browser_protocol::target::CloseTargetParams;
 use chromiumoxide::page::ScreenshotParams;
 use futures::StreamExt;
 use reqwest::Client;
@@ -90,66 +91,79 @@ impl Fetcher for BrowserFetcher {
             });
 
             let page = browser
-                .new_page(&spec.fetch.url)
+                .new_page("about:blank")
                 .await
-                .map_err(|e| Error::other(format!("failed to create page for {}: {e}", spec.fetch.url)))?;
+                .map_err(|e| Error::other(format!("failed to create page: {e}")))?;
 
-            // 设置 User-Agent
-            if !self.user_agent.is_empty() {
-                let _ = page.set_user_agent(&self.user_agent).await;
-            }
+            let target_id = page.target_id().clone();
 
-            // 等待特定选择器（如果配置了 wait.selector）
-            if let Some(ref sel) = spec.fetch.wait.selector {
-                let trimmed = sel.trim();
-                if !trimmed.is_empty() {
-                    let wait_timeout = spec.fetch.wait.timeout.unwrap_or(10).max(1);
-                    let wait_until = Instant::now() + Duration::from_secs(wait_timeout);
-                    loop {
-                        if Instant::now() > wait_until {
-                            warn!("timed out waiting for selector: {trimmed}");
-                            break;
-                        }
-                        let eval_res = page
-                            .evaluate(format!("Boolean(document.querySelector({:?}))", trimmed))
-                            .await;
-                        if let Ok(val) = eval_res {
-                            if val.into_value::<bool>().unwrap_or(false) {
-                                break;
+            let fetch_result: Result<(String, Option<Vec<u8>>)> = async {
+                // 设置 User-Agent（在导航前设置，确保首包生效）
+                if !self.user_agent.is_empty() {
+                    let _ = page.set_user_agent(&self.user_agent).await;
+                }
+
+                // 显式导航至目标 URL 并等待导航完成
+                page.goto(&spec.fetch.url)
+                    .await
+                    .map_err(|e| Error::other(format!("failed to navigate to {}: {e}", spec.fetch.url)))?;
+
+                // 等待特定选择器（如果配置了 wait.selector）
+                if let Some(ref sel) = spec.fetch.wait.selector {
+                    let trimmed = sel.trim();
+                    if !trimmed.is_empty() {
+                        let wait_timeout = spec.fetch.wait.timeout.unwrap_or(10).max(1);
+                        let wait_until = Instant::now() + Duration::from_secs(wait_timeout);
+                        let mut matched = false;
+                        while Instant::now() <= wait_until {
+                            let eval_res = page
+                                .evaluate(format!("Boolean(document.querySelector({:?}))", trimmed))
+                                .await;
+                            if let Ok(val) = eval_res {
+                                if val.into_value::<bool>().unwrap_or(false) {
+                                    matched = true;
+                                    break;
+                                }
                             }
+                            tokio::time::sleep(Duration::from_millis(200)).await;
                         }
-                        tokio::time::sleep(Duration::from_millis(200)).await;
+                        if !matched {
+                            warn!("timed out waiting for selector: {trimmed}");
+                        }
                     }
                 }
-            }
 
-            // 执行自定义 JavaScript
-            if let Some(ref js) = spec.fetch.evaluate {
-                if !js.trim().is_empty() {
-                    let _ = page.evaluate(js.as_str()).await;
+                // 执行自定义 JavaScript
+                if let Some(ref js) = spec.fetch.evaluate {
+                    if !js.trim().is_empty() {
+                        let _ = page.evaluate(js.as_str()).await;
+                    }
                 }
+
+                // 获取页面 HTML 内容
+                let html = page
+                    .content()
+                    .await
+                    .map_err(|e| Error::other(format!("failed to get page content: {e}")))?;
+
+                // 截图（若配置了 screenshot: true）
+                let screenshot = if spec.fetch.screenshot {
+                    let params = ScreenshotParams::builder()
+                        .format(CaptureScreenshotFormat::Png)
+                        .build();
+                    page.screenshot(params).await.ok()
+                } else {
+                    None
+                };
+
+                Ok((html, screenshot))
             }
+            .await;
 
-            // 获取页面 HTML 内容
-            let html = page
-                .content()
-                .await
-                .map_err(|e| Error::other(format!("failed to get page content: {e}")))?;
+            // 无论导航成功还是失败，均关闭 target 释放资源（兼容 Chrome 与各类无头浏览器）
+            let _ = browser.execute(CloseTargetParams::new(target_id)).await;
 
-            // 截图（若配置了 screenshot: true）
-            let screenshot = if spec.fetch.screenshot {
-                let params = ScreenshotParams::builder()
-                    .format(CaptureScreenshotFormat::Png)
-                    .build();
-                page.screenshot(params).await.ok()
-            } else {
-                None
-            };
-
-            // 关闭页面释放资源
-            let _ = page.close().await;
-
-            Ok::<_, Error>((html, screenshot))
+            fetch_result
         };
 
         let (html, screenshot) = tokio::time::timeout(Duration::from_secs(timeout_secs), fetch_future)
