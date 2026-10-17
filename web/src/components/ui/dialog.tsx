@@ -1,11 +1,8 @@
 import { useEffect, type ReactNode } from "react"
+import { createPortal } from "react-dom"
 import { X } from "lucide-react"
 import { Button } from "@/components/ui/button"
 
-/**
- * 模态框：统一遮罩、Esc 关闭、标题栏与尺寸。
- * 原先「添加/编辑」与「测试结果」两处各写了一遍 fixed inset-0 样板。
- */
 export function Dialog({
   open,
   onClose,
@@ -18,11 +15,10 @@ export function Dialog({
   onClose: () => void
   title: ReactNode
   /** 内容最大宽度。 */
-  width?: "md" | "lg"
+  width?: "md" | "lg" | "xl" | "2xl"
   footer?: ReactNode
   children: ReactNode
 }) {
-  // Esc 关闭；仅当对话框打开时注册。
   useEffect(() => {
     if (!open) return
     const onKey = (e: KeyboardEvent) => {
@@ -34,31 +30,43 @@ export function Dialog({
 
   if (!open) return null
 
-  return (
+  const widthClass =
+    width === "2xl"
+      ? "max-w-5xl"
+      : width === "xl"
+      ? "max-w-4xl"
+      : width === "lg"
+      ? "max-w-3xl"
+      : "max-w-2xl"
+
+  return createPortal(
     <div
-      className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-black/50 p-4"
-      // 点击遮罩关闭；内容区的点击已在子层 stopPropagation。
+      className="fixed inset-0 z-[100] flex items-start justify-center overflow-y-auto bg-black/85 backdrop-blur-sm p-4 sm:p-6"
       onClick={onClose}
     >
       <div
-        className={`mt-8 w-full ${
-          width === "lg" ? "max-w-3xl" : "max-w-2xl"
-        } rounded-xl border bg-card p-6 shadow-lg`}
+        className={`mt-4 w-full ${widthClass} rounded-xl border border-zinc-800 bg-zinc-900/95 text-zinc-100 shadow-2xl p-6 backdrop-blur-md`}
         onClick={(e) => e.stopPropagation()}
       >
-        <div className="flex items-center justify-between">
-          <h2 className="text-lg font-semibold">{title}</h2>
-          <Button size="icon" variant="ghost" onClick={onClose}>
+        <div className="flex items-center justify-between border-b border-zinc-800 pb-3 mb-4">
+          <h2 className="text-base font-semibold tracking-tight text-zinc-100">{title}</h2>
+          <Button
+            size="icon"
+            variant="ghost"
+            onClick={onClose}
+            className="h-8 w-8 text-zinc-400 hover:text-zinc-100 hover:bg-zinc-800"
+          >
             <X className="h-4 w-4" />
           </Button>
         </div>
         {children}
         {footer && (
-          <div className="mt-6 flex items-center justify-end gap-2">
+          <div className="mt-5 flex items-center justify-end gap-2 border-t border-zinc-800 pt-4">
             {footer}
           </div>
         )}
       </div>
-    </div>
+    </div>,
+    document.body,
   )
 }

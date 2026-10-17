@@ -50,7 +50,6 @@ async fn main() -> anyhow::Result<()> {
     let fetcher = Arc::new(reading_steiner::fetcher::create_fetcher(
         "http",
         &cfg,
-        &Default::default(),
     )?);
     let sem = Arc::new(Semaphore::new(concurrency));
     let started = Instant::now();

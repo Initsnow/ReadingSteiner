@@ -16,8 +16,8 @@ export function Field({
   return (
     <div className={className}>
       <label className={labelCls}>{label}</label>
-      <div className="mt-1">{children}</div>
-      {hint && <p className="mt-1 text-xs text-muted-foreground">{hint}</p>}
+      <div className="mt-1.5">{children}</div>
+      {hint && <p className="mt-1 text-[11px] text-zinc-400">{hint}</p>}
     </div>
   )
 }
@@ -43,10 +43,10 @@ export function Checkbox({
   label: string
 }) {
   return (
-    <label className="flex cursor-pointer items-center gap-2 text-sm">
+    <label className="flex cursor-pointer items-center gap-2 text-xs text-zinc-300">
       <input
         type="checkbox"
-        className="h-4 w-4 accent-primary"
+        className="h-4 w-4 rounded border-zinc-700 bg-zinc-950 accent-zinc-200"
         checked={checked}
         onChange={(e) => onChange(e.target.checked)}
       />
@@ -66,7 +66,7 @@ export function FollowGlobal({
   children?: ReactNode
 }) {
   return (
-    <div className="flex items-center gap-3 rounded-md border bg-muted/30 px-3 py-2">
+    <div className="flex items-center gap-3 rounded-md border border-zinc-800 bg-zinc-950/60 px-3 py-2">
       <Checkbox checked={checked} onChange={onChange} label="跟随全局" />
       {!checked && children}
     </div>

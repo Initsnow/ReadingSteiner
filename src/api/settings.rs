@@ -1,33 +1,51 @@
-//! 全局设置领域服务：读取、校验并保存（保存即热更新）。
+//! 全局设置领域服务：读取、校验并保存（权威源为 config.yaml，保存即热更新）。
 
 use std::str::FromStr;
 
-use crate::config::EditableSettings;
+use crate::config::SettingsView;
 use crate::error::{Error, Result};
 use crate::scheduler::AppState;
 
-/// 读取全局设置。数据库迁移时已 seed 默认值，恒有值。
-pub async fn settings_get(state: &AppState) -> Result<EditableSettings> {
-    state
-        .db
-        .lock()
-        .await
-        .get_settings()?
-        .ok_or_else(|| Error::other("settings not seeded"))
+/// 读取全局设置视图（权威数据源为内存与磁盘中的 config.yaml）。
+pub async fn settings_get(state: &AppState) -> Result<SettingsView> {
+    let cfg = state.config_snapshot();
+    Ok(SettingsView::from_config(&cfg, state.config_path.as_deref()))
 }
 
-/// 保存全局设置并热更新到 runtime / notifier。
+/// 保存全局设置并热更新。
 ///
-/// 先校验后落库：非法值直接拒绝，避免坏值入库后反复影响运行。
-pub async fn settings_update(state: &AppState, settings: EditableSettings) -> Result<()> {
-    validate(&settings)?;
-    state.db.lock().await.set_settings(&settings)?;
-    state.reload_settings(&settings);
+/// 1. 检查配置文件是否只读（如 NixOS /nix/store 或只读挂载），若只读则直接拒绝。
+/// 2. 校验参数合法性。
+/// 3. 原子写回 config.yaml。
+/// 4. 在内存中热更新运行时配置与 Telegram notifier。
+pub async fn settings_update(state: &AppState, view: SettingsView) -> Result<()> {
+    if state.is_readonly() {
+        return Err(Error::config(
+            "配置文件处于只读模式（由 NixOS 或外部声明式配置管理），无法在此保存修改",
+        ));
+    }
+    let Some(config_path) = &state.config_path else {
+        return Err(Error::config(
+            "未指定配置文件路径（--config），无法持久化配置",
+        ));
+    };
+
+    validate(&view)?;
+
+    let mut new_cfg = state.config_snapshot();
+    view.apply_to_config(&mut new_cfg);
+
+    // 落盘保存到 config.yaml
+    new_cfg.save(config_path)?;
+
+    // 内存热更新
+    state.reload_config(new_cfg);
+
     Ok(())
 }
 
 /// 校验全局设置的合法值，返回首个错误。
-fn validate(s: &EditableSettings) -> Result<()> {
+fn validate(s: &SettingsView) -> Result<()> {
     if s.concurrency == 0 {
         return Err(Error::config("concurrency 必须大于 0"));
     }
@@ -67,12 +85,16 @@ fn validate(s: &EditableSettings) -> Result<()> {
             s.telegram_url
         )));
     }
+    if s.browser_enabled && s.browser_cdp_url.trim().is_empty() {
+        return Err(Error::config("启用浏览器渲染引擎时必须填写 Chrome CDP 调试地址"));
+    }
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::EditableSettings;
 
     fn with_cron(defaults: EditableSettings, cron: &str) -> EditableSettings {
         EditableSettings {

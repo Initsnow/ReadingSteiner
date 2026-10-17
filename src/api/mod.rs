@@ -1,20 +1,16 @@
 //! 领域服务层：Web 控制台与 CLI 共用的业务逻辑。
 //!
 //! 这一层是**所有业务操作的唯一实现**，与传输方式无关：
-//! - [`crate::web`]（HTTP/JSON）把 HTTP handler 转成这里的调用；
-//! - [`crate::control`]（Unix socket 行协议）把 socket 请求转成这里的调用。
+//! - [`crate::web`]（HTTP REST API）把 HTTP handler 转成这里的调用；
+//! - [`crate::cli`]（CLI 工具）通过 HTTP 调用 REST API。
 //!
-//! 好处是新增一个接口只需写一次逻辑、一处类型定义，不会出现
-//! 「Web 能改但 CLI 改不了」或两边行为漂移。
-//!
-//! 所有方法返回领域类型（不是 `serde_json::Value`），由传输层负责序列化，
-//! 因此不存在「先转 Value 再转回强类型」的双重转换开销。
+//! 所有方法返回领域类型（不是 `serde_json::Value`），由传输层负责序列化。
 
 mod backup;
 mod events;
+mod groups;
 mod settings;
 mod sources;
-mod tags;
 
 pub use backup::{
     BackupInfo, backup_create, backup_delete, backup_list, backup_restore, backup_restore_upload,
@@ -23,12 +19,12 @@ pub use backup::{
 pub use events::{
     event_get, event_mark_read, event_screenshot_file, events_list, source_mark_read,
 };
+pub use groups::{group_delete, group_get, group_upsert, groups_list};
 pub use settings::{settings_get, settings_update};
 pub use sources::{
     AddedSource, PreviewedTitle, check_source, preview_source_title, source_add, source_delete,
-    source_update, sources_list, sources_set_flags, test_source,
+    source_update, sources_list, sources_set_flags, test_source, test_source_dry_run,
 };
-pub use tags::{tag_delete, tag_update, tags_list};
 
 use crate::error::Result;
 use crate::models::{ChangeEvent, DaemonStatus, SourceMeta};

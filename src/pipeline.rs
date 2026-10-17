@@ -18,11 +18,26 @@ pub struct PipelineOutput {
 
 /// 从抓取到的文档中提取监控内容，返回条目列表与内容指纹。
 ///
-/// - `Text`：把整页文本作为单一条目，指纹跟随文本变化。
-/// - `Items`：按选择器提取若干条目，自动对比条目的增 / 改 / 删。
+/// 规范三大模式：
+/// - `Text`：文本提取模式（支持指定可选 CSS 选择器；未指定时整页纯文本）。
+/// - `Json`：JSON 接口提取模式（支持指定可选 JSONPath；未指定时格式化 JSON）。
+/// - `Items`：结构化条目列表提取模式（支持 CSS 或 JSONPath 根选择器与子字段提取）。
 pub fn run_pipeline(doc: &FetchedDocument, extract: &ExtractConfig) -> Result<PipelineOutput> {
     let (items, image_selector) = match extract {
-        ExtractConfig::Text { images } => (vec![whole_page_item(doc)], images.as_ref()),
+        ExtractConfig::Text { selector, images } => {
+            let item = match selector {
+                Some(sel) if !sel.trim().is_empty() => extract_css_text(doc, sel.trim()),
+                _ => whole_page_item(doc),
+            };
+            (vec![item], images.as_ref())
+        }
+        ExtractConfig::Json { json_path, images } => {
+            let item = match json_path {
+                Some(path) if !path.trim().is_empty() => extract_json_path_text(doc, path.trim())?,
+                _ => whole_json_item(doc),
+            };
+            (vec![item], images.as_ref())
+        }
         ExtractConfig::Items {
             selector,
             fields,
@@ -50,33 +65,92 @@ pub fn run_pipeline(doc: &FetchedDocument, extract: &ExtractConfig) -> Result<Pi
 /// 按图片选择器挑选本次要随通知附带的图片 URL。
 ///
 /// - `None` / `None` 选择器：不收集图片。
-/// - `Items`：收集条目提取时自动带出的图片。
-/// - `Css { selector }`：用 CSS 选择器从整页匹配图片元素。
+/// - `FirstItem`：附带条目列表提取到的首张图片。
+/// - `Css { selector }`：用 CSS 选择器从页面匹配 `<img>`。
+/// - `Screenshot`：不从网页抽取 URL（截图由浏览器引擎直接生成落盘）。
 fn collect_image_urls(
     doc: &FetchedDocument,
     items: &[Item],
     selector: Option<&ImageSelector>,
 ) -> Vec<String> {
     match selector {
-        None | Some(ImageSelector::None) => Vec::new(),
-        Some(ImageSelector::Items) => {
-            let mut urls = Vec::new();
+        None | Some(ImageSelector::None) | Some(ImageSelector::Screenshot) => Vec::new(),
+        Some(ImageSelector::FirstItem) => {
             for item in items {
-                urls.extend(item.image_urls.iter().cloned());
+                if let Some(url) = item.image_urls.first() {
+                    return vec![url.clone()];
+                }
             }
-            dedupe_urls(urls)
+            Vec::new()
         }
-        // `Changed` 模式需结合本次变更（diff）定位变更元素，由调度器在处理变更时收集。
-        Some(ImageSelector::Changed) => Vec::new(),
         Some(ImageSelector::Css { selector }) => {
-            // CSS 图片选择器仅适用于 HTML 内容。对 JSON/纯文本等非 HTML 内容
-            // 直接跳过，避免把文本当 HTML 解析产生无意义的匹配。
             if !is_html_doc(doc) {
                 return Vec::new();
             }
             let urls = collect_img_urls_from_doc(doc, selector);
             dedupe_urls(urls)
         }
+    }
+}
+
+/// 从 HTML 中按 CSS 选择器提取目标文本作为单个条目。
+fn extract_css_text(doc: &FetchedDocument, selector_str: &str) -> Item {
+    let html = Html::parse_document(&doc.text);
+    if let Ok(selector) = Selector::parse(selector_str) {
+        let texts: Vec<String> = html
+            .select(&selector)
+            .map(|el| el.text().collect::<Vec<_>>().join(" ").trim().to_string())
+            .filter(|t| !t.is_empty())
+            .collect();
+        if !texts.is_empty() {
+            return Item {
+                stable_id: "text".to_string(),
+                fields: HashMap::new(),
+                image_urls: Vec::new(),
+                text: texts.join("\n"),
+                meta: HashMap::new(),
+            };
+        }
+    }
+    whole_page_item(doc)
+}
+
+/// 从 JSON 中按 JSONPath 提取内容作为单个条目。
+fn extract_json_path_text(doc: &FetchedDocument, path: &str) -> Result<Item> {
+    let value: Value = serde_json::from_str(&doc.text)?;
+    let matches = eval_json_path(&value, path)?;
+    let text = if matches.is_empty() {
+        String::new()
+    } else if matches.len() == 1 {
+        match matches[0] {
+            Value::String(s) => s.clone(),
+            other => serde_json::to_string_pretty(other).unwrap_or_else(|_| other.to_string()),
+        }
+    } else {
+        let arr: Vec<&Value> = matches;
+        serde_json::to_string_pretty(&arr).unwrap_or_else(|_| format!("{arr:?}"))
+    };
+    Ok(Item {
+        stable_id: "json".to_string(),
+        fields: HashMap::new(),
+        image_urls: Vec::new(),
+        text,
+        meta: HashMap::new(),
+    })
+}
+
+/// 格式化整页 JSON 作为单个条目。
+fn whole_json_item(doc: &FetchedDocument) -> Item {
+    let text = match serde_json::from_str::<Value>(&doc.text) {
+        Ok(v) => serde_json::to_string_pretty(&v).unwrap_or_else(|_| doc.text.clone()),
+        Err(_) => doc.text.clone(),
+    };
+    Item {
+        stable_id: "json".to_string(),
+        fields: HashMap::new(),
+        image_urls: Vec::new(),
+        text,
+        meta: HashMap::new(),
     }
 }
 
@@ -99,7 +173,6 @@ fn collect_img_urls_from_doc(doc: &FetchedDocument, selector_str: &str) -> Vec<S
     };
     let mut urls = Vec::new();
     for el in html.select(&selector) {
-        // 元素本身是 <img>：取 src/data-src；否则取其内部的 <img>。
         if el.value().name() == "img" {
             for attr in ["src", "data-src", "data-lazy-src"] {
                 if let Some(v) = el.value().attr(attr) {
@@ -112,91 +185,6 @@ fn collect_img_urls_from_doc(doc: &FetchedDocument, selector_str: &str) -> Vec<S
         }
     }
     urls
-}
-
-/// 只收集**发生变更的元素**相关图片：其自身子树（子节点）及其父容器中的 `<img>`。
-/// 避免把整页全部图片都发出去。
-///
-/// `item_selector` 用于在 HTML 中重新定位条目元素，`changed_stable_ids` 为本次
-/// 变更中新增 / 更新的条目 stable_id 集合。稳定 id 为 `item-{idx}`（无 id 字段时）
-/// 时，按枚举索引定位元素；否则按条目字段值匹配。
-/// 对外暴露：按变更 stable_id 收集变更元素相关图片。
-pub fn collect_changed_element_images(
-    doc: &FetchedDocument,
-    item_selector: &ItemSelector,
-    fields: &[ItemField],
-    changed_stable_ids: &std::collections::HashSet<String>,
-) -> Vec<String> {
-    if !is_html_doc(doc) {
-        return Vec::new();
-    }
-    // JSONPath 提取无法定位 HTML 元素，无法做变更元素定位，直接返回空。
-    let ItemSelector::Css { selector } = item_selector else {
-        return Vec::new();
-    };
-    let html = Html::parse_document(&doc.text);
-    let Ok(sel) = Selector::parse(selector) else {
-        return Vec::new();
-    };
-    let elements: Vec<_> = html.select(&sel).collect();
-
-    let mut urls = Vec::new();
-    for (idx, el) in elements.iter().enumerate() {
-        let stable_id = element_stable_id(el, fields, idx);
-        if !changed_stable_ids.contains(&stable_id) {
-            continue;
-        }
-        // 1) 自身子树（子节点）中的 img。
-        urls.extend(collect_img_urls_from_element(el));
-        // 2) 父容器（父节点）中、但不属于变更元素自身的 img（即直接兄弟 img）。
-        if let Some(parent) = el.parent()
-            && let Some(parent_el) = scraper::ElementRef::wrap(parent)
-        {
-            urls.extend(collect_sibling_imgs(&parent_el, el));
-        }
-    }
-    dedupe_urls(urls)
-}
-
-/// 收集父容器中除指定子元素外、位于同一层级的**直接 `<img>` 兄弟**。
-/// 仅取父容器下紧邻的 `<img>`（如缩略图），不递归进其他兄弟容器，避免把整页图片都带出来。
-fn collect_sibling_imgs(
-    parent: &scraper::ElementRef<'_>,
-    exclude: &scraper::ElementRef<'_>,
-) -> Vec<String> {
-    let mut urls = Vec::new();
-    for child in parent.children() {
-        // 跳过变更元素自身（其 img 已由子树收集），只取父容器内紧邻的直接 `<img>`。
-        if child.id() == exclude.id() {
-            continue;
-        }
-        if let Some(child_el) = scraper::ElementRef::wrap(child)
-            && child_el.value().name() == "img"
-        {
-            for attr in ["src", "data-src", "data-lazy-src"] {
-                if let Some(v) = child_el.value().attr(attr) {
-                    urls.push(v.to_string());
-                    break;
-                }
-            }
-        }
-    }
-    urls
-}
-
-/// 复现 extract_css 中 stable_id 的计算逻辑，用于把变更条目映射回 HTML 元素。
-fn element_stable_id(el: &scraper::ElementRef<'_>, fields: &[ItemField], idx: usize) -> String {
-    if fields.is_empty() {
-        // 未配置字段时 extract_css 会捕获完整文本，stable_id 也用 index。
-        return format!("item-{idx}");
-    }
-    if let Some(id_field) = fields.iter().find(|f| f.name == "id") {
-        let v = extract_css_field(el, id_field);
-        if !v.is_empty() {
-            return v;
-        }
-    }
-    format!("item-{idx}")
 }
 
 fn dedupe_urls(urls: Vec<String>) -> Vec<String> {
@@ -547,15 +535,36 @@ mod tests {
 
     #[test]
     fn test_text_extract() {
-        let out = run_pipeline(&doc("hello world"), &ExtractConfig::Text { images: None }).unwrap();
+        let out = run_pipeline(
+            &doc("hello world"),
+            &ExtractConfig::Text {
+                selector: None,
+                images: None,
+            },
+        )
+        .unwrap();
         assert_eq!(out.items.len(), 1);
         assert_eq!(out.items[0].text, "hello world");
     }
 
     #[test]
     fn test_text_fingerprint_tracks_changes() {
-        let a = run_pipeline(&doc("hello world"), &ExtractConfig::Text { images: None }).unwrap();
-        let b = run_pipeline(&doc("hello world!"), &ExtractConfig::Text { images: None }).unwrap();
+        let a = run_pipeline(
+            &doc("hello world"),
+            &ExtractConfig::Text {
+                selector: None,
+                images: None,
+            },
+        )
+        .unwrap();
+        let b = run_pipeline(
+            &doc("hello world!"),
+            &ExtractConfig::Text {
+                selector: None,
+                images: None,
+            },
+        )
+        .unwrap();
         assert_ne!(a.fingerprint, b.fingerprint);
     }
 
@@ -598,6 +607,7 @@ mod tests {
         let html = r#"<html><body><div class="cover"><img src="/a.jpg"></div>
             <p>content</p><img src="/b.png" data-src="/b2.png"></body></html>"#;
         let extract = ExtractConfig::Text {
+            selector: None,
             images: Some(ImageSelector::Css {
                 selector: ".cover img".into(),
             }),
@@ -609,20 +619,27 @@ mod tests {
 
     #[test]
     fn test_text_without_image_selector_has_no_images() {
-        let out = run_pipeline(&doc("plain"), &ExtractConfig::Text { images: None }).unwrap();
+        let out = run_pipeline(
+            &doc("plain"),
+            &ExtractConfig::Text {
+                selector: None,
+                images: None,
+            },
+        )
+        .unwrap();
         assert!(out.image_urls.is_empty());
     }
 
     #[test]
-    fn test_items_image_selector_collects_item_images() {
-        // Items 模式下用 `images: items` 收集条目自动带出的图片。
+    fn test_items_image_selector_collects_first_item_images() {
+        // Items 模式下用 `images: first_item` 收集首个条目附带的图片。
         let extract = ExtractConfig::Items {
             selector: ItemSelector::Css {
                 selector: ".item".into(),
             },
             fields: vec![],
             dedupe_key: None,
-            images: Some(ImageSelector::Items),
+            images: Some(ImageSelector::FirstItem),
         };
         let html = r#"<html><body>
             <div class="item"><img src="/1.jpg"></div>
@@ -630,26 +647,7 @@ mod tests {
         </body></html>"#;
         let out = run_pipeline(&doc(html), &extract).unwrap();
         assert_eq!(out.items.len(), 2);
-        // 去重后保留顺序。
-        assert_eq!(out.image_urls, vec!["/1.jpg", "/2.jpg"]);
-    }
-
-    #[test]
-    fn test_collect_changed_element_images_only_changed() {
-        // `Changed` 模式：只收集发生变更条目的元素（自身子树 + 父容器）的 img，
-        // 不会把整页所有图片都发出去。
-        let html = r#"<html><body>
-            <div class="item"><img src="/a.jpg"><p>item-a</p></div>
-            <div class="item"><img src="/b.jpg"><p>item-b</p></div>
-        </body></html>"#;
-        let selector = ItemSelector::Css {
-            selector: ".item".into(),
-        };
-        let fields = vec![];
-        let changed = std::collections::HashSet::from(["item-1".to_string()]);
-        let urls = collect_changed_element_images(&doc(html), &selector, &fields, &changed);
-        // 只应包含变更元素 item-1 的 /b.jpg，而非全部图片。
-        assert_eq!(urls, vec!["/b.jpg"]);
+        assert_eq!(out.image_urls, vec!["/1.jpg"]);
     }
 
     #[test]

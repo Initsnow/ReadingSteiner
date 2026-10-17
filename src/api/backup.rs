@@ -19,9 +19,10 @@ pub struct BackupInfo {
 ///
 /// 仅在取快照期间持有 DB 锁；zip 打包在释放锁之后进行，避免大库打包阻塞 daemon。
 pub async fn backup_create(state: &AppState) -> Result<BackupInfo> {
+    let cfg = state.config_snapshot();
     let dir = {
         let db = state.db.lock().await;
-        backup::backup(db.connection(), &state.cfg, state.config_path.as_deref())?
+        backup::backup(db.connection(), &cfg, state.config_path.as_deref())?
     };
     // 释放锁后再打包（阻塞 I/O 走 spawn_blocking，不占着 async 执行器）。
     let dir_for_zip = dir.clone();
@@ -53,8 +54,9 @@ pub async fn backup_restore(state: &AppState, name: &str) -> Result<()> {
         return Err(Error::other("invalid backup name"));
     }
     let dir = backup_dir(state, name)?;
+    let cfg = state.config_snapshot();
     let mut db = state.db.lock().await;
-    backup::restore(&dir, &state.cfg, Some(db.connection_mut()))?;
+    backup::restore(&dir, &cfg, Some(db.connection_mut()))?;
     // 先同步读库（Db 不同步，不能把 &Db 带到 await 点之后），再写回内存。
     let sources = load_sources(&db);
     drop(db);
@@ -68,7 +70,8 @@ pub async fn backup_restore(state: &AppState, name: &str) -> Result<()> {
 pub async fn backup_restore_upload(state: &AppState, path: &Path) -> Result<String> {
     let file =
         std::fs::File::open(path).map_err(|e| Error::other(format!("无法读取上传文件: {e}")))?;
-    let restored_dir = match backup::extract_zip(file, &state.cfg) {
+    let cfg = state.config_snapshot();
+    let restored_dir = match backup::extract_zip(file, &cfg) {
         Ok(dir) => dir,
         Err(e) => {
             let _ = std::fs::remove_file(path);
@@ -78,7 +81,7 @@ pub async fn backup_restore_upload(state: &AppState, path: &Path) -> Result<Stri
 
     let result: Result<()> = async {
         let mut db = state.db.lock().await;
-        backup::restore(&restored_dir, &state.cfg, Some(db.connection_mut()))?;
+        backup::restore(&restored_dir, &cfg, Some(db.connection_mut()))?;
         let sources = load_sources(&db);
         drop(db);
         *state.sources.lock().await = sources;

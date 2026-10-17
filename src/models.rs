@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use crate::config::{ChangeType, ExtractConfig, SourceConfig};
+use crate::config::{ChangeType, SourceConfig};
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
 pub struct Item {
@@ -189,24 +189,7 @@ pub struct NotificationRecord {
     pub next_retry_at: Option<DateTime<Utc>>,
 }
 
-/// 分组（标签）级设置。分组下未单独覆盖的监控源会继承这里的配置。
-/// `history_limit` 控制该分组内每个监控源最多保留的变更历史条数
-/// （0 表示不限制，跟随全局）。监控 / 通知开关由监控源自身控制，分组不参与。
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-#[serde(default)]
-pub struct TagConfig {
-    pub name: String,
-    /// 该分组下每个监控源最多保留的变更历史条数（0 表示不限制，使用全局设置）。
-    pub history_limit: usize,
-    /// 分组默认的内容提取配置。监控源开启「跟随分组」且分组此处有配置时，
-    /// 该分组下的监控源沿用此提取设置；None 表示不覆盖，使用监控源自身 / 全局默认。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub extract: Option<ExtractConfig>,
-    /// 分组的 Telegram 通知目标（`tgram://bottoken/ChatID1/ChatID2`）。
-    /// 空表示沿用全局通知设置。
-    #[serde(default)]
-    pub notify_url: String,
-}
+pub use crate::config::GroupConfig;
 
 /// 解析后的 Telegram 通知目标：一个 bot token + 一个或多个 chat id。
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]

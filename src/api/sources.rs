@@ -21,9 +21,6 @@ pub async fn sources_list(state: &AppState) -> Result<Vec<SourceMeta>> {
 
 /// 新增监控源。ID / 名称留空时自动生成。
 pub async fn source_add(state: &AppState, mut source: SourceConfig) -> Result<AddedSource> {
-    // 存在性检查、DB 写入、内存 push 放在同一次 sources 锁内完成，避免并发添加
-    // 相同 id 时因检查与 push 分处两次锁而产生重复条目（TOCTOU）。
-    // 锁获取顺序统一为 db → sources，与调度器主循环保持一致以避免死锁。
     let db = state.db.lock().await;
     let mut sources = state.sources.lock().await;
 
@@ -36,8 +33,6 @@ pub async fn source_add(state: &AppState, mut source: SourceConfig) -> Result<Ad
     if sources.iter().any(|s| s.id == source.id) {
         return Err(Error::other(format!("source {} already exists", source.id)));
     }
-    // 自动登记新标签到分组表，使分组出现在「分组管理」中供配置。
-    db.ensure_tags(&source.tags)?;
     db.upsert_source(&source)?;
     sources.push(source.clone());
     Ok(AddedSource {
@@ -52,7 +47,6 @@ pub async fn source_update(state: &AppState, source: SourceConfig) -> Result<()>
     if !sources.iter().any(|s| s.id == source.id) {
         return Err(Error::other(format!("source {} not found", source.id)));
     }
-    db.ensure_tags(&source.tags)?;
     db.upsert_source(&source)?;
     if let Some(slot) = sources.iter_mut().find(|s| s.id == source.id) {
         *slot = source;
@@ -76,7 +70,6 @@ pub async fn sources_set_flags(
     enabled: Option<bool>,
     notify_enabled: Option<bool>,
 ) -> Result<usize> {
-    // 空列表或两个开关均未指定时直接返回（幂等，避免前端空选误报错）。
     if source_ids.is_empty() || (enabled.is_none() && notify_enabled.is_none()) {
         return Ok(0);
     }
@@ -89,7 +82,6 @@ pub async fn sources_set_flags(
     let db = state.db.lock().await;
     let mut sources = state.sources.lock().await;
 
-    // 先收集全部修改后的快照并统一写库：中途失败则不改内存，保持内存与 DB 一致。
     let mut updated = Vec::with_capacity(source_ids.len());
     for id in source_ids {
         let Some(current) = sources.iter().find(|s| s.id == *id) else {
@@ -120,20 +112,23 @@ pub async fn check_source(state: &Arc<AppState>, source_id: &str) -> Result<()> 
     scheduler::check_source(state, source_id).await
 }
 
-/// 测试监控源：抓取并按配置提取，返回摘要，**不落库**（不写快照 / 不产生事件）。
+/// 测试已有监控源：抓取并按配置提取，返回摘要，不落库。
 pub async fn test_source(state: &Arc<AppState>, source_id: &str) -> Result<Value> {
     scheduler::test_source(state, source_id).await
 }
 
+/// 实时测试抓取（直接传入源配置）：无需保存即可一键模拟抓取与提取，返回耗时、状态码、提取结果与截图。
+pub async fn test_source_dry_run(state: &Arc<AppState>, source: &SourceConfig) -> Result<Value> {
+    scheduler::test_source_config(state, source).await
+}
+
 /// 预览 URL 标题：抓取页面并提取 `<title>` / `<h1>` / JSON 的 title|name 字段。
-/// 用于添加监控源时自动填充名称。
 pub async fn preview_source_title(
     state: &AppState,
     url: &str,
     engine: &str,
 ) -> Result<PreviewedTitle> {
     let url = url.trim();
-    // SSRF 防护：仅允许 http/https 的公网地址。
     crate::net_guard::assert_public_http_url(url)?;
     let engine = if engine.is_empty() { "http" } else { engine };
     let fetch = config::FetchConfig {
@@ -141,7 +136,7 @@ pub async fn preview_source_title(
         url: url.to_string(),
         ..Default::default()
     };
-    let fetcher = create_fetcher(engine, &state.cfg, &state.settings_snapshot())?;
+    let fetcher = create_fetcher(engine, &state.config_snapshot())?;
     let doc = fetcher
         .fetch(&FetchSpec {
             fetch,

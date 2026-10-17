@@ -1,4 +1,4 @@
-pub mod camofox;
+pub mod browser;
 pub mod http;
 
 use async_trait::async_trait;
@@ -20,24 +20,26 @@ pub struct FetchSpec {
     pub source_id: String,
 }
 
-/// 创建抓取器。UA / 超时取自 SQLite 设置（`settings`），配置不再从 config.yaml 读取。
+/// 创建抓取器。UA、超时与引擎配置 100% 取自权威 Config（config.yaml）。
 pub fn create_fetcher(
     engine: &str,
     cfg: &crate::config::Config,
-    settings: &crate::config::EditableSettings,
 ) -> Result<Box<dyn Fetcher>> {
     match engine {
         "http" => Ok(Box::new(http::HttpFetcher::new(
-            &settings.default_user_agent,
-            settings.default_timeout_secs,
+            &cfg.daemon.default_user_agent,
+            cfg.daemon.default_timeout_secs,
         )?)),
-        "camofox" => {
-            if !cfg.camofox.enabled {
+        "browser" => {
+            if !cfg.browser.enabled || cfg.browser.cdp_url.trim().is_empty() {
                 return Err(crate::error::Error::config(
-                    "camofox engine requested but camofox.enabled=false",
+                    "browser engine requested but browser.enabled=false or cdp_url is empty in config.yaml",
                 ));
             }
-            Ok(Box::new(camofox::CamofoxFetcher::new(&cfg.camofox)?))
+            Ok(Box::new(browser::BrowserFetcher::new(
+                &cfg.browser,
+                &cfg.daemon.default_user_agent,
+            )))
         }
         other => Err(crate::error::Error::config(format!(
             "unknown fetch engine: {other}"

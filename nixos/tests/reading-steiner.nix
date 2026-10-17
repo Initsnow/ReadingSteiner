@@ -10,13 +10,14 @@ let
     id: test-source
     name: Test Source
     enabled: true
-    tags: []
     fetch:
       engine: http
       url: http://127.0.0.1:${toString pagePort}/page
       timeout_secs: 5
     schedule:
       cron: "* * * * *"
+    extract:
+      type: text
   '';
 in
 pkgs.testers.runNixOSTest {
@@ -69,14 +70,10 @@ pkgs.testers.runNixOSTest {
             "test \"$(stat -c %U /var/lib/reading-steiner)\" = reading-steiner"
         )
 
-    with subtest("control socket exists"):
-        machine.wait_for_file("/run/reading-steiner/daemon.sock")
-        machine.succeed("test -S /run/reading-steiner/daemon.sock")
+    with subtest("web console REST API responds (loopback)"):
+        machine.succeed("curl -sf http://127.0.0.1:8901/api/status | jq -e '.ok == true'")
 
-    with subtest("web console responds without token (loopback)"):
-        machine.succeed("curl -sf http://127.0.0.1:8901/api/status")
-
-    with subtest("CLI talks to daemon over socket"):
+    with subtest("CLI talks to daemon over HTTP"):
         machine.succeed("reading-steiner status --config /run/reading-steiner/config.yaml")
 
     with subtest("add a source and scheduler detects change"):

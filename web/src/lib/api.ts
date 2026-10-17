@@ -8,16 +8,21 @@ export interface ApiEnvelope<T = unknown> {
   error: string | null
 }
 
+export interface BrowserConfig {
+  enabled: boolean
+  cdp_url: string
+  timeout_secs: number
+}
+
 export interface SourceConfig {
   id: string
   name: string
+  /** 所属分组 ID（可选）。继承分组的预设规则与通知目标。 */
+  group_id?: string
   /** 是否启用监控（调度检查）。false 时该源不会被调度器抓取检测。 */
   enabled: boolean
   /** 是否发送变更通知。false 时仍正常监控检测，但变更不推送 Telegram 通知。 */
   notify_enabled: boolean
-  /** 是否跟随所属分组（标签）的设置；false 时使用自身开关（自覆盖）。 */
-  follow_group?: boolean
-  tags: string[]
   fetch: {
     engine: string
     url: string
@@ -34,7 +39,7 @@ export interface SourceConfig {
     /** cron 表达式（标准 5 段：分 时 日 月 周）。 */
     cron?: string
   }
-  // 内容提取：决定「把抓到的内容变成什么拿来比对」
+  /** 内容提取：决定「把抓到的内容变成什么拿来比对」 */
   extract: ExtractConfig
 }
 
@@ -55,13 +60,14 @@ export interface SourceMeta extends SourceConfig {
 // 图片选择器：如何挑选要随变更通知附带的图片。
 export type ImageSelector =
   | { kind: "none" }
-  | { kind: "items" }
+  | { kind: "first_item" }
   | { kind: "css"; selector: string }
-  | { kind: "changed" }
+  | { kind: "screenshot" }
 
-// 内容提取方式
+// 内容提取方式：3 种模式
 export type ExtractConfig =
-  | { type: "text"; images?: ImageSelector }
+  | { type: "text"; selector?: string; images?: ImageSelector }
+  | { type: "json"; json_path?: string; images?: ImageSelector }
   | {
       type: "items"
       selector: ItemSelector
@@ -82,7 +88,7 @@ export interface ItemField {
 }
 
 export interface TestSourceResult {
-  source_id: string
+  source_id?: string
   status?: number
   final_url?: string
   duration_ms?: number
@@ -91,6 +97,8 @@ export interface TestSourceResult {
   fingerprint?: string
   text_len?: number
   items?: Array<{ stable_id: string; fields: Record<string, string>; image_urls: string[]; text: string }>
+  image_urls?: string[]
+  screenshot_base64?: string
   not_modified?: boolean
 }
 
@@ -106,7 +114,7 @@ export interface ChangeEvent {
   detected_at: string
   /** 是否已读。 */
   read: boolean
-  /** camofox 截图路径（相对 media_dir）。 */
+  /** 截图文件路径（相对 media_dir）。 */
   screenshot_path: string | null
 }
 
@@ -123,15 +131,23 @@ export interface DaemonStatus {
   server_time_local: string
 }
 
-export interface TagConfig {
-  /** 分组（标签）名称。 */
+export interface GroupConfig {
+  /** 分组唯一标识 ID（只读/新建时指定，如 news、github-releases）。 */
+  id: string
+  /** 分组展示名称。 */
   name: string
-  /** 该分组下每个监控源最多保留的变更历史条数（0 表示不限制，跟随全局）。 */
-  history_limit: number
-  /** 分组默认的内容提取配置；未配置则不覆盖，监控源沿用自身/全局设置。 */
-  extract?: ExtractConfig | null
+  /** 分组默认 cron 表达式。 */
+  default_cron?: string
+  /** 分组默认请求头。 */
+  default_headers?: Record<string, string>
+  /** 分组默认浏览器引擎参数。 */
+  default_browser_config?: BrowserConfig
+  /** 分组默认提取模式。 */
+  default_extract?: ExtractConfig
   /** 分组的 Telegram 通知目标（tgram://bottoken/ChatID1/ChatID2）；留空沿用全局。 */
-  notify_url: string
+  default_notify_url?: string
+  created_at?: string
+  updated_at?: string
 }
 
 export interface EditableSettings {
@@ -146,13 +162,20 @@ export interface EditableSettings {
   template: string
   /** 全局 Telegram 通知目标：tgram://bottoken/ChatID1/ChatID2 */
   telegram_url: string
+  /** 外部密钥文件路径（如通过 sops-nix 挂载） */
+  telegram_url_file?: string
   max_images_per_event: number
+  /** 是否启用 Chrome CDP 渲染引擎 */
+  browser_enabled: boolean
+  /** Chrome CDP 远程调试地址（如 http://127.0.0.1:9222 或 ws://127.0.0.1:9222/...） */
+  browser_cdp_url: string
+  browser_timeout_secs: number
+  /** 配置文件是否只读（如部署在 NixOS /nix/store 或只读文件系统） */
+  readonly: boolean
+  config_path?: string
 }
 
 // ---- Web 控制台鉴权（Bearer Token）----
-// token 存在 localStorage；`web.auth_token` 未配置时后端不校验，携带与否均可用。
-// 401 时清除 token 并通知 UI 展示解锁界面。
-
 const TOKEN_KEY = "reading-steiner.auth-token"
 
 export function getAuthToken(): string | null {
@@ -171,7 +194,6 @@ export function clearAuthToken(): void {
   localStorage.removeItem(TOKEN_KEY)
 }
 
-/** 401 订阅：后端启用鉴权且未授权时触发，由 UI 展示解锁界面。 */
 type AuthSubscriber = () => void
 const authSubscribers = new Set<AuthSubscriber>()
 
@@ -210,17 +232,11 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   return body.result as T
 }
 
-/** 探测后端是否需要鉴权。
- * 不带 token 请求 /api/status：返回 401 说明需要鉴权；其他状态码说明无需鉴权。
- * 网络异常时抛出错误，由调用方处理。 */
 export async function checkAuthRequired(): Promise<boolean> {
   const res = await fetch("/api/status")
   return res.status === 401
 }
 
-/** 校验 token 是否有效：调用一个轻量只读接口（/api/status）。
- * 仅当后端明确返回 401 视为无效；其余错误（5xx / 网络异常等）由调用方区分，
- * 避免把服务端故障误判为“token 错误”而阻塞用户。 */
 export async function verifyToken(token: string): Promise<boolean> {
   try {
     const res = await fetch("/api/status", {
@@ -228,16 +244,10 @@ export async function verifyToken(token: string): Promise<boolean> {
     })
     return res.status !== 401
   } catch {
-    // 网络不通（daemon 未启动等）：让调用方按“无法连接”处理。
     throw new Error("cannot reach daemon")
   }
 }
 
-/**
- * 带鉴权头拉取二进制资源并返回 objectURL。
- * 截图、备份下载等接口受 Bearer Token 保护，浏览器原生 `<img>`/`<a download>`
- * 无法附加 Authorization 头，必须经此 fetch 获取 blob。
- */
 export async function fetchBlobUrl(url: string): Promise<string> {
   const token = getAuthToken()
   const headers = new Headers()
@@ -281,9 +291,17 @@ export const api = {
       body: JSON.stringify({ source_ids: sourceIds, ...flags }),
     }),
 
+  /** 对已保存的监控源触发实时抓取测试。 */
   testSource: (id: string) =>
     request<TestSourceResult>(`/api/sources/${encodeURIComponent(id)}/test`, {
       method: "POST",
+    }),
+
+  /** 对未保存的监控源草稿进行 Live Dry-run 测试（Live Inspector）。 */
+  testSourceDryRun: (source: SourceConfig) =>
+    request<TestSourceResult>("/api/sources/test", {
+      method: "POST",
+      body: JSON.stringify(source),
     }),
 
   /** 预览：抓取 URL 并返回页面标题，用于添加监控源时自动填充名称。 */
@@ -301,23 +319,26 @@ export const api = {
       method: "POST",
     }),
 
-  listTags: () => request<TagConfig[]>("/api/tags"),
+  // ---- 分组预设 (Groups) ----
+  listGroups: () => request<GroupConfig[]>("/api/groups"),
 
-  updateTag: (name: string, tag: TagConfig) =>
-    request<{ name: string; updated: boolean }>(`/api/tags/${encodeURIComponent(name)}`, {
-      method: "PUT",
-      body: JSON.stringify(tag),
+  getGroup: (id: string) => request<GroupConfig>(`/api/groups/${encodeURIComponent(id)}`),
+
+  upsertGroup: (group: GroupConfig) =>
+    request<{ source_id: string }>("/api/groups", {
+      method: "POST",
+      body: JSON.stringify(group),
     }),
 
-  deleteTag: (name: string) =>
-    request<{ name: string; deleted: boolean }>(`/api/tags/${encodeURIComponent(name)}`, {
+  deleteGroup: (id: string) =>
+    request<{ source_id: string }>(`/api/groups/${encodeURIComponent(id)}`, {
       method: "DELETE",
     }),
 
+  // 立即触发检查
   check: (sourceId: string) =>
-    request<{ source_id: string; checked: boolean }>("/api/check", {
+    request<{ source_id: string }>(`/api/sources/${encodeURIComponent(sourceId)}/check`, {
       method: "POST",
-      body: JSON.stringify({ source_id: sourceId }),
     }),
 
   history: (sourceId?: string, limit = 50) => {
@@ -326,6 +347,14 @@ export const api = {
     qs.set("limit", String(limit))
     return request<ChangeEvent[]>(`/api/history?${qs.toString()}`)
   },
+
+  listEvents: (limit = 50) => {
+    const qs = new URLSearchParams()
+    qs.set("limit", String(limit))
+    return request<ChangeEvent[]>(`/api/events?${qs.toString()}`)
+  },
+
+  getEvent: (id: number) => request<ChangeEvent>(`/api/events/${id}`),
 
   notifyTest: (chatId?: string) =>
     request<{ message_id?: number }>("/api/notify-test", {
@@ -370,7 +399,6 @@ export const api = {
       { method: "DELETE" },
     ),
 
-  // 上传 zip 备份并恢复。multipart 字段名为 file，不能走默认 JSON 头。
   restoreFromZip: async (file: File) => {
     const form = new FormData()
     form.append("file", file)

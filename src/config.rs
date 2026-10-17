@@ -2,10 +2,11 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::error::{Error, Result};
-use crate::models::{TagConfig, TelegramTarget};
+use crate::models::TelegramTarget;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(default)]
@@ -15,14 +16,16 @@ pub struct Config {
     pub daemon: DaemonConfig,
     pub web: WebConfig,
     pub telegram: TelegramConfig,
-    pub camofox: CamofoxConfig,
+    pub browser: BrowserConfig,
 }
 
 impl Config {
     pub fn load(path: impl AsRef<Path>) -> Result<Self> {
         let text = std::fs::read_to_string(path.as_ref())
             .map_err(|e| Error::config(format!("read {}: {e}", path.as_ref().display())))?;
-        Self::from_yaml(&text)
+        let mut cfg = Self::from_yaml(&text)?;
+        cfg.resolve_secrets()?;
+        Ok(cfg)
     }
 
     pub fn from_yaml(text: &str) -> Result<Self> {
@@ -36,18 +39,74 @@ impl Config {
         Ok(cfg)
     }
 
-    pub fn save(&self, path: impl AsRef<Path>) -> Result<()> {
-        let yaml = serde_yaml::to_string(self)?;
-        std::fs::write(path, yaml)?;
+    pub fn resolve_secrets(&mut self) -> Result<()> {
+        if self.telegram.url.trim().is_empty() {
+            if let Some(path) = &self.telegram.url_file {
+                let text = std::fs::read_to_string(path)
+                    .map_err(|e| Error::config(format!("read telegram.url_file {}: {e}", path.display())))?;
+                self.telegram.url = text.trim().to_string();
+            }
+        }
+        if self.web.auth_token.trim().is_empty() {
+            if let Some(path) = &self.web.auth_token_file {
+                let text = std::fs::read_to_string(path)
+                    .map_err(|e| Error::config(format!("read web.auth_token_file {}: {e}", path.display())))?;
+                self.web.auth_token = text.trim().to_string();
+            }
+        }
         Ok(())
     }
 
-    pub fn socket_path(&self) -> PathBuf {
-        if self.daemon.socket_path.as_os_str().is_empty() {
-            self.state_dir.join("daemon.sock")
-        } else {
-            self.daemon.socket_path.clone()
+    pub fn save(&self, path: impl AsRef<Path>) -> Result<()> {
+        if is_path_readonly(path.as_ref()) {
+            return Err(Error::config(format!(
+                "配置文件 {} 处于只读模式（由 NixOS 或外部只读挂载管理），无法写回修改",
+                path.as_ref().display()
+            )));
         }
+        let yaml = serde_yaml::to_string(self)?;
+        let tmp_path = format!("{}.tmp.{}", path.as_ref().display(), std::process::id());
+        std::fs::write(&tmp_path, yaml)?;
+        std::fs::rename(&tmp_path, path.as_ref())?;
+        Ok(())
+    }
+}
+
+pub fn is_path_readonly(path: &Path) -> bool {
+    if path.is_dir() {
+        let probe = path.join(format!(".write_probe_{}", std::process::id()));
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(&probe)
+        {
+            Ok(file) => {
+                drop(file);
+                let _ = std::fs::remove_file(probe);
+                false
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => true,
+            Err(_) => false,
+        }
+    } else if path.exists() {
+        if let Ok(metadata) = std::fs::metadata(path) {
+            if metadata.permissions().readonly() {
+                return true;
+            }
+        }
+        match std::fs::OpenOptions::new().write(true).open(path) {
+            Ok(_) => false,
+            Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => true,
+            Err(_) => false,
+        }
+    } else {
+        if let Some(parent) = path.parent() {
+            if parent.exists() {
+                return is_path_readonly(parent);
+            }
+        }
+        false
     }
 }
 
@@ -57,9 +116,11 @@ pub struct WebConfig {
     pub listen: String,
     pub static_dir: PathBuf,
     /// Web 控制台 API 的鉴权 Token（Bearer）。留空表示不启用鉴权（默认仅本地访问）。
-    /// 建议在把 `listen` 绑定到非回环地址时务必设置。
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub auth_token: String,
+    /// Web 控制台 API 鉴权 Token 的外部文件路径（便于 sops-nix 注入，敏感信息不入 config.yaml）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth_token_file: Option<PathBuf>,
 }
 
 impl WebConfig {
@@ -79,25 +140,89 @@ impl WebConfig {
     }
 }
 
-/// `config.yaml` 的 `daemon` 段：只保留启动所需的引导项。
-/// 可编辑的运行参数（并发、队列、超时、cron、UA、历史保留、失败阈值、时区）
-/// 已迁移到 SQLite `settings` 表，见 [`EditableSettings`]。
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct DaemonConfig {
-    pub socket_path: PathBuf,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub socket_path: Option<PathBuf>,
     pub log_level: String,
+    pub concurrency: usize,
+    pub queue_capacity: usize,
+    pub default_timeout_secs: u64,
+    pub default_cron: String,
+    pub default_user_agent: String,
+    pub history_limit_per_source: usize,
+    pub failure_notify_threshold: u32,
+    pub timezone: String,
 }
 
-/// Telegram 通知器运行配置。`config.yaml` 的 `telegram` 段只提供启动引导项
-/// （`api_base` 等）；可编辑项 `url` / `max_images_per_event` / `template`
-/// 已迁移到 SQLite `settings` 表，通过 [`EditableSettings`] 覆盖注入。
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+impl Default for DaemonConfig {
+    fn default() -> Self {
+        Self {
+            socket_path: None,
+            log_level: "info".to_string(),
+            concurrency: 16,
+            queue_capacity: 1024,
+            default_timeout_secs: 30,
+            default_cron: DEFAULT_CRON.to_string(),
+            default_user_agent: DEFAULT_USER_AGENT.to_string(),
+            history_limit_per_source: 0,
+            failure_notify_threshold: 0,
+            timezone: system_local_timezone(),
+        }
+    }
+}
+
+/// 浏览器引擎运行配置（通过 CDP 连接外部无头 Chrome）。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct BrowserConfig {
+    pub enabled: bool,
+    pub cdp_url: String,
+    pub timeout_secs: u64,
+}
+
+impl Default for BrowserConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            cdp_url: "http://127.0.0.1:9222".to_string(),
+            timeout_secs: 30,
+        }
+    }
+}
+
+/// 站点分组（预设/模板）。
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+#[serde(default)]
+pub struct GroupConfig {
+    pub id: String,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_cron: Option<String>,
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub default_headers: HashMap<String, String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_browser_config: Option<BrowserConfig>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_extract: Option<ExtractConfig>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub default_notify_url: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_at: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub updated_at: Option<DateTime<Utc>>,
+}
+
+/// Telegram 通知器运行配置。统一在 `config.yaml` 配置，为唯一真相源。
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct TelegramConfig {
     /// 全局通知目标，格式：`tgram://bottoken/ChatID1/ChatID2`。
-    /// 编码了 bot token 与一个或多个 chat id。通常由 SQLite 设置注入。
     pub url: String,
+    /// 外部密钥文件路径（便于配合 sops-nix，敏感 Token 不写入 config.yaml）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url_file: Option<PathBuf>,
     pub api_base: String,
     pub max_images_per_event: usize,
     pub image_bytes_budget: u64,
@@ -105,6 +230,20 @@ pub struct TelegramConfig {
     /// 变更通知文案模板。支持占位符：{label}、{watch}、{time}、{tz}、{summary}、{items}。
     /// 留空则使用内置默认模板。
     pub template: String,
+}
+
+impl Default for TelegramConfig {
+    fn default() -> Self {
+        Self {
+            url: String::new(),
+            url_file: None,
+            api_base: "https://api.telegram.org".to_string(),
+            max_images_per_event: 10,
+            image_bytes_budget: 10485760,
+            digest_window_secs: 30,
+            template: String::new(),
+        }
+    }
 }
 
 impl TelegramConfig {
@@ -115,16 +254,6 @@ impl TelegramConfig {
         } else {
             self.template.clone()
         }
-    }
-
-    /// 以 SQLite 设置覆盖 `url` / `template` / `max_images_per_event`，
-    /// 保留 `api_base` 等启动项。这是设置进入 notifier 的唯一入口。
-    pub fn with_overrides(&self, settings: &EditableSettings) -> Self {
-        let mut c = self.clone();
-        c.url = settings.telegram_url.clone();
-        c.template = settings.template.clone();
-        c.max_images_per_event = settings.max_images_per_event;
-        c
     }
 }
 
@@ -141,40 +270,35 @@ pub const DEFAULT_CRON: &str = "0 * * * *";
 /// 默认 User-Agent：模拟 Chrome/Edge 浏览器，避免被站点按 UA 拦截。
 pub const DEFAULT_USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36 Edg/151.0.0.0";
 
-/// 全局可编辑设置，存于 SQLite `settings` 表，是这些运行参数的唯一来源。
-/// 通过 Web 控制台「设置」页或 CLI 读写；不再与 config.yaml 双向绑定。
-/// 通知目标以 tgram:// url 形式管理，不在此暴露 token 明文。
-///
-/// 默认值见 [`Default`]：新建数据库/升级时由 v11 迁移 seed 一条 `global` 记录，
-/// 因此 `get_settings()` 恒有值，运行时不再做「缺失→默认」兜底。
+/// 全局可编辑设置的传输与视图模型，用于 Web 控制台与 REST API。
+/// 权威数据直接持久化到 `config.yaml`。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
-pub struct EditableSettings {
-    /// 抓取工作线程数（并发数）。
+pub struct SettingsView {
     pub concurrency: usize,
-    /// 队列容量。
     pub queue_capacity: usize,
-    /// 默认请求超时秒数。
     pub default_timeout_secs: u64,
-    /// 默认 cron 表达式（新建监控源未单独配置时使用）。
     pub default_cron: String,
-    /// 默认 User-Agent。
     pub default_user_agent: String,
-    /// 每个监控源保留历史条数（0 不限制）。
     pub history_limit_per_source: usize,
-    /// 连续失败达到多少次发送失败通知（0 禁用）。
     pub failure_notify_threshold: u32,
-    /// 调度器时区（IANA 名称）。
     pub timezone: String,
-    /// 通知模板。
     pub template: String,
-    /// 全局 Telegram 通知目标（`tgram://bottoken/ChatID1/ChatID2`）。
     pub telegram_url: String,
-    /// 单事件最多附带图片数。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub telegram_url_file: Option<String>,
     pub max_images_per_event: usize,
+    pub browser_enabled: bool,
+    pub browser_cdp_url: String,
+    pub browser_timeout_secs: u64,
+    pub readonly: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub config_path: Option<String>,
 }
 
-impl Default for EditableSettings {
+pub type EditableSettings = SettingsView;
+
+impl Default for SettingsView {
     fn default() -> Self {
         Self {
             concurrency: 16,
@@ -187,45 +311,79 @@ impl Default for EditableSettings {
             timezone: system_local_timezone(),
             template: DEFAULT_EVENT_TEMPLATE.to_string(),
             telegram_url: String::new(),
+            telegram_url_file: None,
             max_images_per_event: 10,
+            browser_enabled: false,
+            browser_cdp_url: "http://127.0.0.1:9222".to_string(),
+            browser_timeout_secs: 30,
+            readonly: false,
+            config_path: None,
         }
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-#[serde(default)]
-pub struct CamofoxConfig {
-    pub enabled: bool,
-    pub base_url: String,
-    pub access_key_file: PathBuf,
-    pub api_key_file: PathBuf,
-    pub user_id: String,
-    pub session_key: String,
-    pub health_check_interval_secs: u64,
-    pub pool_size: usize,
+impl SettingsView {
+    pub fn from_config(cfg: &Config, config_path: Option<&Path>) -> Self {
+        let readonly = config_path.map_or(false, is_path_readonly);
+        Self {
+            concurrency: cfg.daemon.concurrency,
+            queue_capacity: cfg.daemon.queue_capacity,
+            default_timeout_secs: cfg.daemon.default_timeout_secs,
+            default_cron: cfg.daemon.default_cron.clone(),
+            default_user_agent: cfg.daemon.default_user_agent.clone(),
+            history_limit_per_source: cfg.daemon.history_limit_per_source,
+            failure_notify_threshold: cfg.daemon.failure_notify_threshold,
+            timezone: cfg.daemon.timezone.clone(),
+            template: cfg.telegram.template.clone(),
+            telegram_url: if cfg.telegram.url_file.is_some() {
+                String::new()
+            } else {
+                cfg.telegram.url.clone()
+            },
+            telegram_url_file: cfg.telegram.url_file.as_ref().map(|p| p.display().to_string()),
+            max_images_per_event: cfg.telegram.max_images_per_event,
+            browser_enabled: cfg.browser.enabled,
+            browser_cdp_url: cfg.browser.cdp_url.clone(),
+            browser_timeout_secs: cfg.browser.timeout_secs,
+            readonly,
+            config_path: config_path.map(|p| p.display().to_string()),
+        }
+    }
+
+    pub fn apply_to_config(&self, cfg: &mut Config) {
+        cfg.daemon.concurrency = self.concurrency.max(1);
+        cfg.daemon.queue_capacity = self.queue_capacity.max(1);
+        cfg.daemon.default_timeout_secs = self.default_timeout_secs.max(1);
+        cfg.daemon.default_cron = self.default_cron.clone();
+        cfg.daemon.default_user_agent = self.default_user_agent.clone();
+        cfg.daemon.history_limit_per_source = self.history_limit_per_source;
+        cfg.daemon.failure_notify_threshold = self.failure_notify_threshold;
+        cfg.daemon.timezone = self.timezone.clone();
+        if cfg.telegram.url_file.is_none() || !self.telegram_url.trim().is_empty() {
+            cfg.telegram.url = self.telegram_url.clone();
+        }
+        cfg.telegram.max_images_per_event = self.max_images_per_event;
+        cfg.telegram.template = self.template.clone();
+        cfg.browser.enabled = self.browser_enabled;
+        cfg.browser.cdp_url = self.browser_cdp_url.clone();
+        cfg.browser.timeout_secs = self.browser_timeout_secs;
+    }
 }
 
-/// 一个监控源。核心只有三件事：抓什么（fetch）、提取什么（extract）、
-/// 何时检测（schedule）。不再有「流水线 / 比较模式 / 稳定字段」这些复杂概念，
-/// 变更检测完全由提取结果驱动。
+/// 一个监控源。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct SourceConfig {
     pub id: String,
     pub name: String,
+    /// 所属分组 ID（可选）。指定分组后可继承分组的预设规则与通知目标。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group_id: Option<String>,
     /// 是否启用监控（调度检查）。false 时该源不会被调度器抓取检测。
     pub enabled: bool,
     /// 是否发送变更通知。false 时仍正常监控检测，但检测到的变更不会推送 Telegram 通知。
     #[serde(default = "default_true")]
     pub notify_enabled: bool,
-    /// 是否跟随所属分组（标签）的设置。true 时，若监控源带有已配置的分组，
-    /// 则其历史保留条数、通知目标与内容提取配置继承分组的设置；
-    /// false 时完全使用本监控源自身的设置（自覆盖）。
-    /// 监控 / 通知开关始终由监控源自身控制，分组不参与叠加。
-    #[serde(default = "default_true")]
-    pub follow_group: bool,
-    #[serde(default)]
-    pub tags: Vec<String>,
     pub fetch: FetchConfig,
     pub schedule: ScheduleConfig,
     /// 内容提取方式。决定「把抓到的内容变成什么拿来比对」。
@@ -233,8 +391,7 @@ pub struct SourceConfig {
     pub extract: ExtractConfig,
 }
 
-/// serde 默认值辅助：返回 `true`，用于新增布尔字段（如 `notify_enabled`）
-/// 反序列化旧配置时自动补齐默认值。
+/// serde 默认值辅助：返回 `true`。
 fn default_true() -> bool {
     true
 }
@@ -244,10 +401,9 @@ impl Default for SourceConfig {
         Self {
             id: String::new(),
             name: String::new(),
+            group_id: None,
             enabled: true,
             notify_enabled: true,
-            follow_group: true,
-            tags: Vec::new(),
             fetch: FetchConfig::default(),
             schedule: ScheduleConfig::default(),
             extract: ExtractConfig::default(),
@@ -256,42 +412,14 @@ impl Default for SourceConfig {
 }
 
 /// 解析监控源的「生效」开关与历史保留条数。
-///
-/// 监控 / 通知开关由监控源自身 `enabled` / `notify_enabled` 独立控制，分组不参与叠加。
-/// 历史保留条数若监控源开启 `follow_group` 且带有已配置的分组，则取各分组中的
-/// 最小值（最严格的保留策略）；否则使用全局设置。
 pub fn resolve_effective_source(
     source: &SourceConfig,
-    tags: &[crate::models::TagConfig],
     global_history_limit: usize,
 ) -> (bool, bool, usize) {
-    let history = if !source.follow_group || source.tags.is_empty() {
-        global_history_limit
-    } else {
-        let group_tags: Vec<&crate::models::TagConfig> = tags
-            .iter()
-            .filter(|t| source.tags.iter().any(|tag| tag == &t.name))
-            .collect();
-        if group_tags.is_empty() {
-            // 有标签但没有对应分组配置：不改变行为，使用全局设置。
-            global_history_limit
-        } else {
-            group_tags
-                .iter()
-                .map(|t| t.history_limit)
-                .filter(|&h| h > 0)
-                .min()
-                .unwrap_or(global_history_limit)
-        }
-    };
-    (source.enabled, source.notify_enabled, history)
+    (source.enabled, source.notify_enabled, global_history_limit)
 }
 
 /// 解析 `tgram://bottoken/ChatID1/ChatID2` 形式的 Telegram 通知目标。
-///
-/// 格式：`tgram://<token>/<chat_id1>/<chat_id2>/...`，其中 token 为
-/// Bot API 的完整 token（如 `123456:ABC`），chat id 为接收者 ID，可多个。
-/// 解析失败（非 tgram:// 前缀、缺少 token 或 chat id）时返回错误。
 pub fn parse_telegram_url(url: &str) -> Result<TelegramTarget> {
     let s = url.trim();
     if s.is_empty() {
@@ -317,52 +445,76 @@ pub fn parse_telegram_url(url: &str) -> Result<TelegramTarget> {
 }
 
 /// 解析监控源的生效通知目标（token + chat ids）。
-///
-/// 若监控源「跟随分组」且所属分组配置了 `notify_url`，则使用分组的通知目标；
-/// 多个分组配置冲突时按分组名升序取第一个非空的分组。否则沿用全局通知目标。
-/// 返回 `None` 表示全局也未配置可用的通知目标。
+/// 若所属分组配置了 `default_notify_url`，则优先使用分组的通知目标；
+/// 否则沿用全局通知目标。返回 `None` 表示全局也未配置可用的通知目标。
 pub fn resolve_notify_target(
-    source: &SourceConfig,
-    tags: &[TagConfig],
+    _source: &SourceConfig,
+    group: Option<&GroupConfig>,
     global_url: &str,
 ) -> Option<TelegramTarget> {
-    let fallback = || parse_telegram_url(global_url).ok().filter(|t| t.is_valid());
-    if !source.follow_group || source.tags.is_empty() {
-        return fallback();
+    if let Some(g) = group {
+        if !g.default_notify_url.trim().is_empty() {
+            if let Ok(target) = parse_telegram_url(&g.default_notify_url) {
+                if target.is_valid() {
+                    return Some(target);
+                }
+            }
+        }
     }
-    let mut group_urls: Vec<&TagConfig> = tags
-        .iter()
-        .filter(|t| source.tags.contains(&t.name) && !t.notify_url.trim().is_empty())
-        .collect();
-    group_urls.sort_by_key(|t| t.name.clone());
-    if let Some(t) = group_urls.first()
-        && let Ok(target) = parse_telegram_url(&t.notify_url)
-        && target.is_valid()
-    {
-        return Some(target);
-    }
-    fallback()
+    parse_telegram_url(global_url).ok().filter(|t| t.is_valid())
 }
 
 /// 解析监控源的生效内容提取配置。
-///
-/// 若监控源「跟随分组」且所属分组配置了 `extract`，则使用分组的提取设置；
-/// 否则使用监控源自身的提取设置。多个分组都配置了提取时按分组名升序取第一个。
-pub fn resolve_effective_extract(source: &SourceConfig, tags: &[TagConfig]) -> ExtractConfig {
-    if !source.follow_group || source.tags.is_empty() {
-        return source.extract.clone();
-    }
-    let mut group_extracts: Vec<&TagConfig> = tags
-        .iter()
-        .filter(|t| source.tags.contains(&t.name) && t.extract.is_some())
-        .collect();
-    group_extracts.sort_by_key(|t| t.name.clone());
-    if let Some(t) = group_extracts.first()
-        && let Some(extract) = &t.extract
-    {
-        return extract.clone();
+/// 若监控源未自定义（为默认 Text 且无 selector）且所属分组配置了 `default_extract`，
+/// 则使用分组的提取设置；否则使用监控源自身的提取设置。
+pub fn resolve_effective_extract(
+    source: &SourceConfig,
+    group: Option<&GroupConfig>,
+) -> ExtractConfig {
+    if let Some(g) = group {
+        if let Some(ref ext) = g.default_extract {
+            // 如果 source 是默认 Text 提取且无特定配置，则继承 group 的提取规则
+            if source.extract == ExtractConfig::default() {
+                return ext.clone();
+            }
+        }
     }
     source.extract.clone()
+}
+
+/// 解析监控源的生效 cron 表达式。
+pub fn resolve_effective_cron(
+    source: &SourceConfig,
+    group: Option<&GroupConfig>,
+    default_cron: &str,
+) -> String {
+    if let Some(ref cron) = source.schedule.cron {
+        if !cron.trim().is_empty() {
+            return cron.clone();
+        }
+    }
+    if let Some(g) = group {
+        if let Some(ref cron) = g.default_cron {
+            if !cron.trim().is_empty() {
+                return cron.clone();
+            }
+        }
+    }
+    default_cron.to_string()
+}
+
+/// 解析监控源的生效 HTTP headers。
+pub fn resolve_effective_headers(
+    source: &SourceConfig,
+    group: Option<&GroupConfig>,
+) -> HashMap<String, String> {
+    if !source.fetch.headers.is_empty() {
+        return source.fetch.headers.clone();
+    }
+    if let Some(g) = group {
+        return g.default_headers.clone();
+    }
+    HashMap::new()
 }
 
 /// 自动生成监控源 ID：优先从名称生成可读 slug，否则从 URL 主机名生成，
@@ -477,25 +629,27 @@ pub struct ScheduleConfig {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ExtractConfig {
-    /// 整页文本监控（默认）。直接把页面（或接口返回的文本）作为比对内容，
-    /// 有任何变化即视为变更。适合文章、纯文本页面、整页指纹监控。
+    /// 文本提取模式：可指定可选 CSS selector；未指定时监控整页纯文本
     Text {
-        /// 可选图片选择器：从页面中挑选要随通知附带的图片。
-        /// 缺省时不附带图片。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        selector: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         images: Option<ImageSelector>,
     },
-    /// 结构化条目监控。从页面 / JSON 中按规则提取出若干「条目」，
-    /// 自动对比条目的新增 / 更新 / 移除，无需配置稳定字段。
+    /// JSON 接口提取模式：可指定可选 json_path（如 $.data.version）；未指定时监控整个格式化 JSON
+    Json {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        json_path: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        images: Option<ImageSelector>,
+    },
+    /// 结构化条目列表模式：多条目列表提取，自动比对条目增删改
     Items {
         selector: ItemSelector,
         #[serde(default)]
         fields: Vec<ItemField>,
-        /// 条目排序前的去重键模板（可选）。可用 {{字段}} 占位符。
         #[serde(default, skip_serializing_if = "Option::is_none")]
         dedupe_key: Option<String>,
-        /// 可选图片选择器：控制如何挑选随通知附带的图片。
-        /// 缺省时沿用条目提取时自动收集的图片（等价于 items）。
         #[serde(default, skip_serializing_if = "Option::is_none")]
         images: Option<ImageSelector>,
     },
@@ -504,27 +658,35 @@ pub enum ExtractConfig {
 /// 图片通知链路：如何从页面 / 条目中挑选要随变更通知附带的图片。
 ///
 /// - `none`（默认）：不附带图片。
-/// - `items`：收集结构化条目提取时自动带出的 `image_urls`。
-/// - `css { selector }`：用 CSS 选择器从整页匹配 `<img>`，取其 `src`/`data-src`。
-/// - `changed`：只收集**发生变更的元素**相关（其自身子树与父容器）的 `<img>`，
-///   避免把整页全部图片都发出去。仅对结构化条目（Items 提取）生效。
+/// - `first_item`：附带条目列表提取到的首张图片。
+/// - `css { selector }`：用 CSS 选择器从页面匹配 `<img>`，取其 `src`/`data-src`。
+/// - `screenshot`：浏览器引擎检测到变更时全屏/指定元素截图并推送。
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ImageSelector {
-    /// 不附带图片（默认）。
     #[default]
     None,
-    /// 收集结构化条目提取时自动带出的图片。
-    Items,
-    /// 用 CSS 选择器从页面匹配图片元素，取其 `src`/`data-src` 等属性。
+    FirstItem,
     Css { selector: String },
-    /// 只收集发生变更的元素相关的图片（其自身子树 + 父容器的 img）。
-    Changed,
+    Screenshot,
+}
+
+impl ExtractConfig {
+    pub fn images(&self) -> Option<&ImageSelector> {
+        match self {
+            ExtractConfig::Text { images, .. } => images.as_ref(),
+            ExtractConfig::Json { images, .. } => images.as_ref(),
+            ExtractConfig::Items { images, .. } => images.as_ref(),
+        }
+    }
 }
 
 impl Default for ExtractConfig {
     fn default() -> Self {
-        ExtractConfig::Text { images: None }
+        ExtractConfig::Text {
+            selector: None,
+            images: None,
+        }
     }
 }
 
@@ -560,7 +722,6 @@ pub enum ChangeType {
 pub struct RuntimeConfig {
     pub state_dir: PathBuf,
     pub media_dir: PathBuf,
-    pub socket_path: PathBuf,
     pub concurrency: usize,
     pub queue_capacity: usize,
     pub default_timeout_secs: u64,
@@ -573,23 +734,26 @@ pub struct RuntimeConfig {
 }
 
 impl RuntimeConfig {
-    /// 由启动配置（boot）+ SQLite 设置（settings）合成运行时配置。
-    /// settings 是这些运行参数的唯一来源，其值已在数据库 seed/保存时保证非空，直接透传。
-    pub fn from_parts(cfg: &Config, settings: &EditableSettings) -> Self {
+    /// 由权威 Config 合成运行时配置。
+    pub fn from_config(cfg: &Config) -> Self {
         Self {
             state_dir: cfg.state_dir.clone(),
             media_dir: cfg.media_dir.clone(),
-            socket_path: cfg.socket_path(),
-            concurrency: settings.concurrency,
-            queue_capacity: settings.queue_capacity,
-            default_timeout_secs: settings.default_timeout_secs,
-            default_cron: settings.default_cron.clone(),
-            default_user_agent: settings.default_user_agent.clone(),
-            history_limit_per_source: settings.history_limit_per_source,
-            failure_notify_threshold: settings.failure_notify_threshold,
-            timezone: settings.timezone.clone(),
-            template: settings.template.clone(),
+            concurrency: cfg.daemon.concurrency.max(1),
+            queue_capacity: cfg.daemon.queue_capacity.max(1),
+            default_timeout_secs: cfg.daemon.default_timeout_secs.max(1),
+            default_cron: cfg.daemon.default_cron.clone(),
+            default_user_agent: cfg.daemon.default_user_agent.clone(),
+            history_limit_per_source: cfg.daemon.history_limit_per_source,
+            failure_notify_threshold: cfg.daemon.failure_notify_threshold,
+            timezone: cfg.daemon.timezone.clone(),
+            template: cfg.telegram.template.clone(),
         }
+    }
+
+    /// 由启动配置（boot）+ 设置合成运行时配置。
+    pub fn from_parts(cfg: &Config, _settings: &EditableSettings) -> Self {
+        Self::from_config(cfg)
     }
 }
 

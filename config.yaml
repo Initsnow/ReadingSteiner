@@ -1,39 +1,26 @@
-# ReadingSteiner 启动配置
-#
-# 这里只保留「启动所需的引导项」：state_dir、media_dir、daemon.socket_path、
-# daemon.log_level、web 监听、camofox 浏览器引擎、telegram.api_base 等。
-#
-# 可编辑的全局运行参数（并发数、默认超时、cron、UA、历史保留、失败通知阈值、
-# 时区、通知模板、通知目标 tgram://、单事件图片数等）统一存于 SQLite
-# （`state/reading-steiner.db` 的 `settings` 表），通过 Web 控制台「设置」页或
-# `reading-steiner settings` 命令读写，**不在本文件配置**。重启 daemon 后以
-# SQLite 中的值为准。
-
 state_dir: state
 media_dir: state/media
-
 daemon:
-  socket_path: state/daemon.sock
   log_level: info
-
+  concurrency: 16
+  queue_capacity: 1024
+  default_timeout_secs: 30
+  default_cron: 0 * * * *
+  default_user_agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36 Edg/151.0.0.0
+  history_limit_per_source: 0
+  failure_notify_threshold: 0
+  timezone: Asia/Shanghai
 web:
   listen: 127.0.0.1:8901
   static_dir: web/dist
-  # 可选：Web 控制台 API 的 Bearer 鉴权 Token。
-  # 留空则不启用鉴权（仅建议在本机访问时）；把 listen 绑定到非回环地址时必须设置。
-  # auth_token: change-me
-
 telegram:
+  url: ''
   api_base: https://api.telegram.org
+  max_images_per_event: 10
   image_bytes_budget: 10485760
   digest_window_secs: 30
-
-camofox:
+  template: ''
+browser:
   enabled: false
-  base_url: http://127.0.0.1:9377
-  access_key_file: state/camofox_access_key
-  api_key_file: state/camofox_api_key
-  user_id: readingsteiner
-  session_key: readingsteiner
-  health_check_interval_secs: 30
-  pool_size: 4
+  cdp_url: http://127.0.0.1:9222
+  timeout_secs: 30

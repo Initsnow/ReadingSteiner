@@ -5,14 +5,14 @@ use chrono::{DateTime, Utc};
 use rusqlite::{Connection, OptionalExtension, params};
 use tracing::info;
 
-use crate::config::{EditableSettings, SourceConfig};
+use crate::config::{BrowserConfig, ExtractConfig, GroupConfig, SourceConfig};
 use crate::error::Result;
 use crate::models::{
     ChangeEvent, MediaCacheEntry, NotificationRecord, ScheduleState, SnapshotRecord,
-    SystemNotification, TagConfig,
+    SystemNotification,
 };
 
-const SCHEMA_VERSION: i64 = 11;
+const SCHEMA_VERSION: i64 = 1;
 
 pub struct Db {
     conn: Connection,
@@ -53,7 +53,7 @@ impl Db {
     }
 
     fn migrate(&self) -> Result<()> {
-        let mut v: i64 = self
+        let v: i64 = self
             .conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))?;
         if v < 1 {
@@ -61,10 +61,27 @@ impl Db {
                 r#"
                 CREATE TABLE IF NOT EXISTS sources (
                     id TEXT PRIMARY KEY,
-                    config_json TEXT NOT NULL,
+                    name TEXT NOT NULL,
+                    group_id TEXT,
                     enabled INTEGER NOT NULL DEFAULT 1,
+                    notify_enabled INTEGER NOT NULL DEFAULT 1,
+                    config_json TEXT NOT NULL,
                     updated_at TEXT NOT NULL
                 );
+                CREATE INDEX IF NOT EXISTS idx_sources_group ON sources(group_id);
+
+                CREATE TABLE IF NOT EXISTS groups (
+                    id TEXT PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    default_cron TEXT,
+                    default_headers TEXT,
+                    default_browser_config TEXT,
+                    default_extract TEXT,
+                    default_notify_url TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+
                 CREATE TABLE IF NOT EXISTS snapshots (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     watchpoint_id TEXT NOT NULL,
@@ -79,6 +96,7 @@ impl Db {
                     engine TEXT NOT NULL DEFAULT 'http'
                 );
                 CREATE INDEX IF NOT EXISTS idx_snapshots_watchpoint ON snapshots(watchpoint_id, id DESC);
+
                 CREATE TABLE IF NOT EXISTS change_events (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     watchpoint_id TEXT NOT NULL,
@@ -94,6 +112,7 @@ impl Db {
                     screenshot_path TEXT
                 );
                 CREATE INDEX IF NOT EXISTS idx_events_watchpoint ON change_events(watchpoint_id, id DESC);
+
                 CREATE TABLE IF NOT EXISTS media_cache (
                     canonical_url TEXT PRIMARY KEY,
                     sha256 TEXT NOT NULL,
@@ -104,6 +123,7 @@ impl Db {
                     phash TEXT,
                     fetched_at TEXT NOT NULL
                 );
+
                 CREATE TABLE IF NOT EXISTS notifications (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     event_id INTEGER NOT NULL,
@@ -114,6 +134,7 @@ impl Db {
                     attempts INTEGER NOT NULL DEFAULT 0,
                     next_retry_at TEXT
                 );
+
                 CREATE TABLE IF NOT EXISTS schedule_state (
                     source_id TEXT PRIMARY KEY,
                     next_due_at TEXT NOT NULL,
@@ -126,6 +147,7 @@ impl Db {
                     last_notified_at TEXT,
                     failure_notified INTEGER NOT NULL DEFAULT 0
                 );
+
                 CREATE TABLE IF NOT EXISTS system_notifications (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     chat_id TEXT NOT NULL,
@@ -136,133 +158,62 @@ impl Db {
                     next_retry_at TEXT,
                     created_at TEXT NOT NULL
                 );
-                CREATE TABLE IF NOT EXISTS tags (
-                    name TEXT PRIMARY KEY,
-                    history_limit INTEGER NOT NULL DEFAULT 0,
-                    notify_url TEXT NOT NULL DEFAULT '',
-                    extract TEXT
-                );
-                CREATE TABLE IF NOT EXISTS settings (
-                    key TEXT PRIMARY KEY,
-                    value TEXT NOT NULL
-                );
+                DROP TABLE IF EXISTS settings;
                 "#,
             )?;
             self.conn
                 .pragma_update(None, "user_version", SCHEMA_VERSION)?;
-            v = SCHEMA_VERSION;
-            info!(version = SCHEMA_VERSION, "database schema initialized");
-        }
-        if (1..3).contains(&v) {
-            let mut sql = String::new();
-            if v < 2 {
-                sql.push_str(
-                    "ALTER TABLE schedule_state ADD COLUMN consecutive_changes INTEGER NOT NULL DEFAULT 0;",
+            info!(version = SCHEMA_VERSION, "fresh database schema v1 initialized");
+        } else {
+            // 如果是从旧版本迁移过来的库，确保新表 groups 和新字段存在，并清理废弃的 tags 和 settings 表
+            self.conn.execute_batch(
+                r#"
+                CREATE TABLE IF NOT EXISTS groups (
+                    id TEXT PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    default_cron TEXT,
+                    default_headers TEXT,
+                    default_browser_config TEXT,
+                    default_extract TEXT,
+                    default_notify_url TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
                 );
-            }
-            sql.push_str("ALTER TABLE schedule_state ADD COLUMN last_notified_fingerprint TEXT;");
-            sql.push_str("ALTER TABLE schedule_state ADD COLUMN last_notified_at TEXT;");
-            self.conn.execute_batch(&sql)?;
-            self.conn.pragma_update(None, "user_version", 3)?;
-            v = 3;
-            info!("database schema migrated to v3");
-        }
-        if v < 4 {
-            self.conn.execute_batch(
-                "ALTER TABLE change_events ADD COLUMN image_urls_json TEXT NOT NULL DEFAULT '[]';",
+                DROP TABLE IF EXISTS tags;
+                DROP TABLE IF EXISTS settings;
+                "#,
             )?;
-            self.conn.pragma_update(None, "user_version", 4)?;
-            info!("database schema migrated to v4");
         }
-        if v < 5 {
-            self.conn.execute_batch(
-                "ALTER TABLE schedule_state ADD COLUMN failure_notified INTEGER NOT NULL DEFAULT 0;",
-            )?;
-            self.conn.pragma_update(None, "user_version", 5)?;
-            info!("database schema migrated to v5");
-        }
-        if v < 6 {
-            self.conn.execute_batch(
-                "ALTER TABLE change_events ADD COLUMN read INTEGER NOT NULL DEFAULT 0;\n\
-                 ALTER TABLE change_events ADD COLUMN screenshot_path TEXT;",
-            )?;
-            self.conn.pragma_update(None, "user_version", 6)?;
-            info!("database schema migrated to v6");
-        }
-        if v < 7 {
-            self.conn.execute_batch(
-                "CREATE TABLE IF NOT EXISTS tags (\n\
-                     name TEXT PRIMARY KEY,\n\
-                     history_limit INTEGER NOT NULL DEFAULT 0\n\
-                 );",
-            )?;
-            self.conn.pragma_update(None, "user_version", 7)?;
-            info!("database schema migrated to v7");
-        }
-        if v < 8 {
-            // v8：分组（标签）新增通知 URL 与默认内容提取；通知记录新增目标信息。
-            self.conn.execute_batch(
-                "ALTER TABLE tags ADD COLUMN notify_url TEXT NOT NULL DEFAULT '';\n\
-                 ALTER TABLE tags ADD COLUMN extract TEXT;\n\
-                 ALTER TABLE notifications ADD COLUMN target_json TEXT NOT NULL DEFAULT '';\n\
-                 ALTER TABLE system_notifications ADD COLUMN target_json TEXT NOT NULL DEFAULT '';",
-            )?;
-            self.conn.pragma_update(None, "user_version", 8)?;
-            info!("database schema migrated to v8");
-        }
-        if v < 9 {
-            // v9：移除分组遗留的监控/通知开关（由监控源自身控制），从 schema 中彻底删除。
-            self.conn.execute_batch(
-                "ALTER TABLE tags DROP COLUMN enabled;\n\
-                 ALTER TABLE tags DROP COLUMN notify_enabled;",
-            )?;
-            self.conn.pragma_update(None, "user_version", 9)?;
-            info!("database schema migrated to v9");
-        }
-        if v < 10 {
-            // v10：schedule_state 记录最近一次错误信息，供 Web 控制台展示错误原因。
-            self.conn
-                .execute_batch("ALTER TABLE schedule_state ADD COLUMN last_error TEXT;")?;
-            self.conn.pragma_update(None, "user_version", 10)?;
-            info!("database schema migrated to v10");
-        }
-        if v < 11 {
-            // v11：全局可编辑设置改存 SQLite（settings 表），webui 直接读写，不再依赖 config.yaml。
-            self.conn.execute_batch(
-                "CREATE TABLE IF NOT EXISTS settings (
-                     key TEXT PRIMARY KEY,
-                     value TEXT NOT NULL
-                 );",
-            )?;
-            self.conn.pragma_update(None, "user_version", 11)?;
-            info!("database schema migrated to v11");
-        }
-        // 确保 settings 表存在一条全局默认记录。无论是新建库（v<1 直建表后跳到
-        // SCHEMA_VERSION）还是老库升级，settings 都可能为空；这里用 INSERT OR IGNORE
-        // 统一 seed 一条带合理默认值的 global 记录，`get_settings()` 恒有值，
-        // 运行时不再做「缺失→默认」兜底。
-        self.seed_default_settings()?;
+
         Ok(())
     }
 
-    /// 若 settings 表没有 global 行，写入一条默认设置（`EditableSettings::default()`）。
-    fn seed_default_settings(&self) -> Result<()> {
-        let value = serde_json::to_string(&EditableSettings::default())?;
-        self.conn.execute(
-            "INSERT OR IGNORE INTO settings(key, value) VALUES('global', ?1)",
-            [value],
-        )?;
-        Ok(())
-    }
+    // ---- 监控源 CRUD ----
 
     pub fn upsert_source(&self, source: &SourceConfig) -> Result<()> {
         let config_json = serde_json::to_string(source)?;
         let enabled = if source.enabled { 1 } else { 0 };
+        let notify_enabled = if source.notify_enabled { 1 } else { 0 };
         let now = Utc::now().to_rfc3339();
         self.conn.execute(
-            "INSERT INTO sources(id, config_json, enabled, updated_at) VALUES (?1, ?2, ?3, ?4)
-             ON CONFLICT(id) DO UPDATE SET config_json=excluded.config_json, enabled=excluded.enabled, updated_at=excluded.updated_at",
-            params![source.id, config_json, enabled, now],
+            "INSERT INTO sources(id, name, group_id, enabled, notify_enabled, config_json, updated_at) 
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+             ON CONFLICT(id) DO UPDATE SET 
+                name=excluded.name, 
+                group_id=excluded.group_id, 
+                enabled=excluded.enabled, 
+                notify_enabled=excluded.notify_enabled, 
+                config_json=excluded.config_json, 
+                updated_at=excluded.updated_at",
+            params![
+                source.id,
+                source.name,
+                source.group_id,
+                enabled,
+                notify_enabled,
+                config_json,
+                now
+            ],
         )?;
         Ok(())
     }
@@ -280,13 +231,23 @@ impl Db {
         Ok(out)
     }
 
+    pub fn list_sources_by_group(&self, group_id: &str) -> Result<Vec<SourceConfig>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT config_json FROM sources WHERE group_id=?1 ORDER BY id")?;
+        let rows = stmt.query_map([group_id], |r| r.get::<_, String>(0))?;
+        let mut out = Vec::new();
+        for row in rows {
+            let json = row?;
+            out.push(serde_json::from_str(&json)?);
+        }
+        Ok(out)
+    }
+
     pub fn delete_source(&self, id: &str) -> Result<()> {
         let conn = &self.conn;
         let deleted = conn.execute("DELETE FROM sources WHERE id=?1", [id])?;
         if deleted > 0 {
-            // 级联清理该监控源的所有关联数据（watchpoint_id == source id），
-            // 避免 schedule_state / snapshots / change_events 成为孤儿数据，
-            // 防止同 id 重新添加时旧快照指纹导致首次检测被误判为“无变化”。
             conn.execute("DELETE FROM schedule_state WHERE source_id=?1", [id])?;
             conn.execute("DELETE FROM snapshots WHERE watchpoint_id=?1", [id])?;
             conn.execute("DELETE FROM change_events WHERE watchpoint_id=?1", [id])?;
@@ -305,6 +266,134 @@ impl Db {
             .transpose()
             .map_err(Into::into)
     }
+
+    // ---- 站点分组 (Group / Presets) CRUD ----
+
+    pub fn list_groups(&self) -> Result<Vec<GroupConfig>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, name, default_cron, default_headers, default_browser_config, default_extract, default_notify_url, created_at, updated_at 
+             FROM groups ORDER BY name ASC",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            let headers_str: Option<String> = r.get(3)?;
+            let default_headers = headers_str
+                .and_then(|s| serde_json::from_str::<HashMap<String, String>>(&s).ok())
+                .unwrap_or_default();
+
+            let browser_str: Option<String> = r.get(4)?;
+            let default_browser_config = browser_str
+                .and_then(|s| serde_json::from_str::<BrowserConfig>(&s).ok());
+
+            let extract_str: Option<String> = r.get(5)?;
+            let default_extract = extract_str
+                .and_then(|s| serde_json::from_str::<ExtractConfig>(&s).ok());
+
+            let created_at: String = r.get(7)?;
+            let updated_at: String = r.get(8)?;
+
+            Ok(GroupConfig {
+                id: r.get(0)?,
+                name: r.get(1)?,
+                default_cron: r.get(2)?,
+                default_headers,
+                default_browser_config,
+                default_extract,
+                default_notify_url: r.get::<_, Option<String>>(6)?.unwrap_or_default(),
+                created_at: Some(parse_ts(&created_at)),
+                updated_at: Some(parse_ts(&updated_at)),
+            })
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
+    pub fn get_group(&self, id: &str) -> Result<Option<GroupConfig>> {
+        let res = self.conn.query_row(
+            "SELECT id, name, default_cron, default_headers, default_browser_config, default_extract, default_notify_url, created_at, updated_at 
+             FROM groups WHERE id=?1",
+            [id],
+            |r| {
+                let headers_str: Option<String> = r.get(3)?;
+                let default_headers = headers_str
+                    .and_then(|s| serde_json::from_str::<HashMap<String, String>>(&s).ok())
+                    .unwrap_or_default();
+
+                let browser_str: Option<String> = r.get(4)?;
+                let default_browser_config = browser_str
+                    .and_then(|s| serde_json::from_str::<BrowserConfig>(&s).ok());
+
+                let extract_str: Option<String> = r.get(5)?;
+                let default_extract = extract_str
+                    .and_then(|s| serde_json::from_str::<ExtractConfig>(&s).ok());
+
+                let created_at: String = r.get(7)?;
+                let updated_at: String = r.get(8)?;
+
+                Ok(GroupConfig {
+                    id: r.get(0)?,
+                    name: r.get(1)?,
+                    default_cron: r.get(2)?,
+                    default_headers,
+                    default_browser_config,
+                    default_extract,
+                    default_notify_url: r.get::<_, Option<String>>(6)?.unwrap_or_default(),
+                    created_at: Some(parse_ts(&created_at)),
+                    updated_at: Some(parse_ts(&updated_at)),
+                })
+            },
+        ).optional()?;
+        Ok(res)
+    }
+
+    pub fn upsert_group(&self, group: &GroupConfig) -> Result<()> {
+        let headers_json = serde_json::to_string(&group.default_headers)?;
+        let browser_json = group
+            .default_browser_config
+            .as_ref()
+            .map(serde_json::to_string)
+            .transpose()?;
+        let extract_json = group
+            .default_extract
+            .as_ref()
+            .map(serde_json::to_string)
+            .transpose()?;
+        let now = Utc::now().to_rfc3339();
+        self.conn.execute(
+            "INSERT INTO groups(id, name, default_cron, default_headers, default_browser_config, default_extract, default_notify_url, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+             ON CONFLICT(id) DO UPDATE SET
+                name=excluded.name,
+                default_cron=excluded.default_cron,
+                default_headers=excluded.default_headers,
+                default_browser_config=excluded.default_browser_config,
+                default_extract=excluded.default_extract,
+                default_notify_url=excluded.default_notify_url,
+                updated_at=excluded.updated_at",
+            params![
+                group.id,
+                group.name,
+                group.default_cron,
+                headers_json,
+                browser_json,
+                extract_json,
+                group.default_notify_url,
+                now,
+                now
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn delete_group(&self, id: &str) -> Result<usize> {
+        // 解除该分组下所有源的分组关联
+        self.conn.execute("UPDATE sources SET group_id=NULL WHERE group_id=?1", [id])?;
+        Ok(self.conn.execute("DELETE FROM groups WHERE id=?1", [id])?)
+    }
+
+    // ---- 快照与事件 ----
 
     pub fn save_snapshot(&self, snap: &SnapshotRecord) -> Result<i64> {
         self.conn.execute(
@@ -426,120 +515,14 @@ impl Db {
             .execute("UPDATE change_events SET read=1 WHERE id=?1", [event_id])?)
     }
 
-    /// 列出全部分组（标签）设置。
-    pub fn list_tags(&self) -> Result<Vec<TagConfig>> {
-        let mut stmt = self
-            .conn
-            .prepare("SELECT name, history_limit, notify_url, extract FROM tags ORDER BY name")?;
-        let rows = stmt.query_map([], |r| {
-            Ok(TagConfig {
-                name: r.get(0)?,
-                history_limit: r.get::<_, i64>(1)? as usize,
-                notify_url: r.get::<_, Option<String>>(2)?.unwrap_or_default(),
-                extract: r
-                    .get::<_, Option<String>>(3)?
-                    .and_then(|s| serde_json::from_str(&s).ok()),
-            })
-        })?;
-        let mut out = Vec::new();
-        for row in rows {
-            out.push(row?);
-        }
-        Ok(out)
-    }
+    // ---- 展示元信息 ----
 
-    /// 新增 / 更新一个分组（标签）设置。
-    pub fn upsert_tag(&self, tag: &TagConfig) -> Result<()> {
-        let extract_json = tag
-            .extract
-            .as_ref()
-            .map(serde_json::to_string)
-            .transpose()?;
-        self.conn.execute(
-            "INSERT INTO tags(name, history_limit, notify_url, extract) VALUES (?1,?2,?3,?4)\n\
-             ON CONFLICT(name) DO UPDATE SET history_limit=excluded.history_limit,\
-                 notify_url=excluded.notify_url, extract=excluded.extract",
-            params![
-                tag.name,
-                tag.history_limit as i64,
-                tag.notify_url,
-                extract_json
-            ],
-        )?;
-        Ok(())
-    }
-
-    /// 删除一个分组（标签）设置。
-    pub fn delete_tag(&self, name: &str) -> Result<usize> {
-        Ok(self
-            .conn
-            .execute("DELETE FROM tags WHERE name=?1", [name])?)
-    }
-
-    /// 确保给定标签名以默认值存在于 tags 表中（缺失则插入，已存在保持不变）。
-    /// 用于在监控源保存标签时自动登记分组，使新标签能出现在「分组管理」列表供配置。
-    pub fn ensure_tags(&self, names: &[String]) -> Result<()> {
-        for name in names {
-            let trimmed = name.trim();
-            if trimmed.is_empty() {
-                continue;
-            }
-            self.conn.execute(
-                "INSERT OR IGNORE INTO tags(name, history_limit, notify_url, extract) \
-                 VALUES (?1, 0, '', NULL)",
-                [trimmed],
-            )?;
-        }
-        Ok(())
-    }
-
-    /// 读取全局可编辑设置（存于 SQLite `settings` 表）。
-    /// 未配置时返回 `None`。若 global 存值损坏（无法解析），则用默认值自愈
-    /// 该记录后返回默认值，避免 daemon 因数据损坏而无法启动。
-    pub fn get_settings(&self) -> Result<Option<EditableSettings>> {
-        let row: Option<String> = self
-            .conn
-            .query_row("SELECT value FROM settings WHERE key='global'", [], |r| {
-                r.get::<_, String>(0)
-            })
-            .optional()?;
-        match row {
-            None => Ok(None),
-            Some(v) => match serde_json::from_str(&v) {
-                Ok(s) => Ok(Some(s)),
-                Err(_) => {
-                    info!("settings 记录损坏，重置为默认值");
-                    let value = serde_json::to_string(&EditableSettings::default())?;
-                    self.conn.execute(
-                        "INSERT INTO settings(key, value) VALUES('global', ?1)\n\
-                         ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-                        [value],
-                    )?;
-                    Ok(Some(EditableSettings::default()))
-                }
-            },
-        }
-    }
-
-    /// 写入全局可编辑设置（存于 SQLite `settings` 表），作为 Web/CLI 改配置的唯一落点。
-    pub fn set_settings(&self, settings: &EditableSettings) -> Result<()> {
-        let value = serde_json::to_string(settings)?;
-        self.conn.execute(
-            "INSERT INTO settings(key, value) VALUES('global', ?1)\n\
-             ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-            [value],
-        )?;
-        Ok(())
-    }
-
-    /// 获取所有监控源的展示用元信息。
     pub fn list_source_meta(
         &self,
         sources: &[SourceConfig],
     ) -> Result<Vec<crate::models::SourceMeta>> {
         use crate::models::SourceMeta;
 
-        // 最近检查时间：每个源取最新快照的 fetched_at。
         let mut last_check_at: HashMap<String, DateTime<Utc>> = HashMap::new();
         {
             let mut stmt = self.conn.prepare(
@@ -554,7 +537,6 @@ impl Db {
             }
         }
 
-        // 最近变更时间：每个源取最新事件的 detected_at。
         let mut last_change_at: HashMap<String, DateTime<Utc>> = HashMap::new();
         {
             let mut stmt = self.conn.prepare(
@@ -569,7 +551,6 @@ impl Db {
             }
         }
 
-        // 未读事件数：每个源统计 read=0 的事件。
         let mut unread_count: HashMap<String, u32> = HashMap::new();
         {
             let mut stmt = self.conn.prepare(
@@ -582,7 +563,6 @@ impl Db {
             }
         }
 
-        // 错误状态：schedule_state 中连续失败次数 > 0 时记录具体错误信息。
         let mut has_error: HashMap<String, bool> = HashMap::new();
         let mut last_error: HashMap<String, String> = HashMap::new();
         {
@@ -615,7 +595,6 @@ impl Db {
         Ok(out)
     }
 
-    /// 更新变更事件的截图路径。传 `None` 时清空截图路径。
     pub fn update_event_screenshot(&self, event_id: i64, path: Option<&str>) -> Result<()> {
         self.conn.execute(
             "UPDATE change_events SET screenshot_path=?1 WHERE id=?2",
@@ -623,6 +602,8 @@ impl Db {
         )?;
         Ok(())
     }
+
+    // ---- 调度状态 ----
 
     pub fn get_schedule_state(&self, source_id: &str) -> Result<Option<ScheduleState>> {
         self.conn
@@ -650,9 +631,6 @@ impl Db {
             .map_err(Into::into)
     }
 
-    /// 批量加载全部监控源的调度状态，用于 scheduler 主循环按轮扫描。
-    /// 相比逐源调用 `get_schedule_state`，一次查询即可获取全部状态，避免每 500ms 的
-    /// 循环对每个源发起一次 SQLite 查询（N+1 查询）。
     pub fn list_schedule_states(&self) -> Result<HashMap<String, ScheduleState>> {
         let mut stmt = self.conn.prepare(
             "SELECT source_id, next_due_at, consecutive_failures, consecutive_changes, backoff_until, last_success_at, last_error, last_notified_fingerprint, last_notified_at, failure_notified FROM schedule_state",
@@ -704,14 +682,11 @@ impl Db {
         Ok(())
     }
 
-    /// 清理每个监控源多余的旧快照与变更事件，使其数量不超过 `per_source` 条。
-    /// `0` 表示不限制。
     pub fn prune_history(&self, per_source: usize) -> Result<()> {
         if per_source == 0 {
             return Ok(());
         }
         let limit = per_source as i64;
-        // 每个监控源（watchpoint）仅保留最新 per_source 条，其余删除。
         self.conn.execute(
             "DELETE FROM change_events WHERE id NOT IN (
                 SELECT id FROM (
@@ -733,8 +708,6 @@ impl Db {
         Ok(())
     }
 
-    /// 清理单个监控源多余的旧快照与变更事件，使其数量不超过 `limit` 条。
-    /// `0` 表示不限制。
     pub fn prune_history_for_source(&self, watchpoint_id: &str, limit: usize) -> Result<()> {
         if limit == 0 {
             return Ok(());
@@ -761,8 +734,6 @@ impl Db {
         Ok(())
     }
 
-    /// 插入一条系统级（非事件关联）通知，用于连续失败告警等场景。
-    /// `target_json` 为发送目标（token + chat ids）的 JSON；为空时发送方回退到全局目标。
     pub fn insert_system_notification(
         &self,
         chat_id: &str,
@@ -843,8 +814,6 @@ impl Db {
     }
 
     pub fn pending_notifications(&self, limit: usize) -> Result<Vec<NotificationRecord>> {
-        // 只取出到期的待发送通知：`next_retry_at` 为空表示首次/立即可发，
-        // 非空则需等到重试时间点之后才允许再次尝试，避免失败通知每 500ms 疯狂重试。
         let now = Utc::now().to_rfc3339();
         let mut stmt = self.conn.prepare(
             "SELECT id, event_id, chat_id, target_json, message_ids_json, status, attempts, next_retry_at FROM notifications WHERE status='pending' AND (next_retry_at IS NULL OR next_retry_at <= ?1) ORDER BY id ASC LIMIT ?2",
@@ -894,7 +863,6 @@ impl Db {
         Ok(())
     }
 
-    /// 取出到期的待发送系统通知（连续失败告警等）。
     pub fn pending_system_notifications(&self, limit: usize) -> Result<Vec<SystemNotification>> {
         let now = Utc::now().to_rfc3339();
         let mut stmt = self.conn.prepare(

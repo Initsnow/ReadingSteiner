@@ -2,14 +2,14 @@ use std::collections::HashMap;
 
 use chrono::Utc;
 use reading_steiner::config::{
-    CamofoxConfig, ChangeType, Config, EditableSettings, ExtractConfig, FetchConfig, ItemField,
-    ItemSelector, SourceConfig, parse_telegram_url, resolve_effective_extract,
-    resolve_effective_source, resolve_notify_target,
+    BrowserConfig, ChangeType, Config, DaemonConfig, EditableSettings, ExtractConfig, FetchConfig,
+    GroupConfig, ItemField, ItemSelector, SourceConfig, TelegramConfig, parse_telegram_url,
+    resolve_effective_extract, resolve_effective_source, resolve_notify_target,
 };
 use reading_steiner::db::Db;
 use reading_steiner::differ;
 use reading_steiner::fetcher::FetchSpec;
-use reading_steiner::models::{Item, SnapshotRecord, TagConfig};
+use reading_steiner::models::{Item, SnapshotRecord};
 use reading_steiner::pipeline;
 
 #[test]
@@ -122,7 +122,7 @@ async fn test_http_fetcher_and_pipeline() {
 
     let cfg = Config::default();
     let fetcher =
-        reading_steiner::fetcher::create_fetcher("http", &cfg, &EditableSettings::default())
+        reading_steiner::fetcher::create_fetcher("http", &cfg)
             .unwrap();
     let doc = fetcher
         .fetch(&FetchSpec {
@@ -163,97 +163,21 @@ async fn test_http_fetcher_and_pipeline() {
     assert_eq!(out.items[0].stable_id, "1");
 }
 
-#[tokio::test]
-async fn test_camofox_contract_with_mock() {
-    let server = wiremock::MockServer::start().await;
-    use wiremock::{Match, Mock, ResponseTemplate};
-    struct ExactPath(String);
-    impl Match for ExactPath {
-        fn matches(&self, request: &wiremock::Request) -> bool {
-            request.url.path() == self.0
-        }
-    }
-
-    Mock::given(ExactPath("/health".into()))
-        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-            "ok": true,
-            "browserConnected": true,
-            "browserRunning": true,
-            "activeTabs": 0,
-            "activeSessions": 0,
-            "consecutiveFailures": 0
-        })))
-        .mount(&server)
-        .await;
-    Mock::given(ExactPath("/tabs".into()))
-        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-            "tabId": "tab-1",
-            "url": "https://example.com"
-        })))
-        .mount(&server)
-        .await;
-    Mock::given(ExactPath("/tabs/tab-1/navigate".into()))
-        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
-        .mount(&server)
-        .await;
-    Mock::given(ExactPath("/tabs/tab-1/snapshot".into()))
-        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-            "url": "https://example.com",
-            "snapshot": "Hello snapshot",
-            "hasMore": false,
-            "nextOffset": null,
-            "totalChars": 14
-        })))
-        .mount(&server)
-        .await;
-    Mock::given(ExactPath("/tabs/tab-1/images".into()))
-        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-            "images": [{"src": "https://example.com/a.jpg", "alt": "A", "width": 10, "height": 10}]
-        })))
-        .mount(&server)
-        .await;
-    Mock::given(ExactPath("/tabs/tab-1".into()))
-        .and(wiremock::matchers::method("DELETE"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"ok": true})))
-        .mount(&server)
-        .await;
-
-    let dir = tempfile::tempdir().unwrap();
-    let key_file = dir.path().join("access.key");
-    std::fs::write(&key_file, "secret").unwrap();
-    let camofox = CamofoxConfig {
-        enabled: true,
-        base_url: server.uri(),
-        access_key_file: key_file,
-        api_key_file: Default::default(),
-        user_id: "user".into(),
-        session_key: "session".into(),
-        health_check_interval_secs: 1,
-        pool_size: 2,
-    };
+#[test]
+fn test_browser_disabled_error() {
     let cfg = Config {
-        camofox: camofox.clone(),
+        browser: BrowserConfig {
+            enabled: false,
+            cdp_url: "http://127.0.0.1:9222".into(),
+            timeout_secs: 30,
+        },
         ..Config::default()
     };
-    let fetcher =
-        reading_steiner::fetcher::create_fetcher("camofox", &cfg, &EditableSettings::default())
-            .unwrap();
-    let doc = fetcher
-        .fetch(&FetchSpec {
-            fetch: FetchConfig {
-                engine: "camofox".into(),
-                url: "https://example.com".into(),
-                tab_policy: "per_check".into(),
-                ..FetchConfig::default()
-            },
-            etag: None,
-            last_modified: None,
-            source_id: "cam".into(),
-        })
-        .await
-        .unwrap();
-    assert!(doc.text.contains("Hello snapshot"));
-    assert_eq!(doc.images.len(), 1);
+    let res = reading_steiner::fetcher::create_fetcher("browser", &cfg);
+    match res {
+        Err(e) => assert!(e.to_string().contains("browser.enabled=false")),
+        Ok(_) => panic!("expected error when browser.enabled=false"),
+    }
 }
 
 #[test]
@@ -298,7 +222,13 @@ extract:
     .unwrap();
     assert_eq!(src.id, "s1");
     assert_eq!(src.schedule.cron.as_deref(), Some("*/30 * * * *"));
-    assert_eq!(src.extract, ExtractConfig::Text { images: None });
+    assert_eq!(
+        src.extract,
+        ExtractConfig::Text {
+            selector: None,
+            images: None
+        }
+    );
 }
 
 #[test]
@@ -418,6 +348,7 @@ fn test_css_image_selector_ignores_non_html() {
         r#"{"html":"<img src=\"/x.jpg\">"}"#,
     );
     let extract = ExtractConfig::Text {
+        selector: None,
         images: Some(ImageSelector::Css {
             selector: "img".into(),
         }),
@@ -600,85 +531,17 @@ fn test_backup_delete_and_zip_restore_roundtrip() {
 
 #[test]
 fn test_resolve_effective_source_with_groups() {
-    // 基础源：跟随分组，带标签 news。
-    let mut source = SourceConfig {
+    let source = SourceConfig {
         id: "s1".into(),
         name: "s1".into(),
         enabled: true,
         notify_enabled: true,
-        follow_group: true,
-        tags: vec!["news".into()],
+        group_id: Some("news".into()),
         ..SourceConfig::default()
     };
 
-    // 未配置分组时，使用自身设置与全局历史保留。
-    let tags = vec![];
-    assert_eq!(
-        resolve_effective_source(&source, &tags, 100),
-        (true, true, 100)
-    );
-
-    // 分组配置历史保留条数，则历史取分组值；开关不受分组影响。
-    let group_tags = vec![TagConfig {
-        name: "news".into(),
-        history_limit: 50,
-        extract: None,
-        notify_url: String::new(),
-    }];
-    assert_eq!(
-        resolve_effective_source(&source, &group_tags, 100),
-        (true, true, 50)
-    );
-
-    // 分组历史保留为 0（不限制）时使用全局。
-    let group_tags_zero = vec![TagConfig {
-        name: "news".into(),
-        history_limit: 0,
-        extract: None,
-        notify_url: String::new(),
-    }];
-    assert_eq!(
-        resolve_effective_source(&source, &group_tags_zero, 100),
-        (true, true, 100)
-    );
-
-    // 关闭“跟随分组”后历史使用全局设置。
-    source.follow_group = false;
-    assert_eq!(
-        resolve_effective_source(&source, &group_tags, 100),
-        (true, true, 100)
-    );
-    source.follow_group = true;
-
-    // 多个分组取历史最小值（最严格的保留策略）。
-    source.tags = vec!["news".into(), "alert".into()];
-    let multi = vec![
-        TagConfig {
-            name: "news".into(),
-            history_limit: 50,
-            extract: None,
-            notify_url: String::new(),
-        },
-        TagConfig {
-            name: "alert".into(),
-            history_limit: 20,
-            extract: None,
-            notify_url: String::new(),
-        },
-    ];
-    assert_eq!(
-        resolve_effective_source(&source, &multi, 100),
-        (true, true, 20)
-    );
-
-    // 开关始终由监控源自身控制，不受分组影响。
-    let mut src_off = source.clone();
-    src_off.enabled = false;
-    src_off.notify_enabled = false;
-    assert_eq!(
-        resolve_effective_source(&src_off, &group_tags, 100),
-        (false, false, 50)
-    );
+    let (enabled, notify, limit) = resolve_effective_source(&source, 100);
+    assert_eq!((enabled, notify, limit), (true, true, 100));
 }
 
 #[test]
@@ -707,73 +570,66 @@ fn test_parse_telegram_url() {
 #[test]
 fn test_resolve_notify_target() {
     let source = SourceConfig {
-        tags: vec!["news".into()],
+        id: "s1".into(),
+        group_id: Some("news".into()),
         ..SourceConfig::default()
     };
 
     // 分组未配置通知 URL 时回退到全局。
-    let tags = vec![TagConfig {
-        name: "news".into(),
-        history_limit: 0,
-        extract: None,
-        notify_url: String::new(),
-    }];
-    let t = resolve_notify_target(&source, &tags, "tgram://G/C9").unwrap();
+    let group = GroupConfig {
+        id: "news".into(),
+        name: "News Group".into(),
+        default_notify_url: String::new(),
+        ..GroupConfig::default()
+    };
+    let t = resolve_notify_target(&source, Some(&group), "tgram://G/C9").unwrap();
     assert_eq!(t.token, "G");
     assert_eq!(t.chat_ids, vec!["C9".to_string()]);
 
     // 分组配置了通知 URL 时优先使用分组的。
-    let tags = vec![TagConfig {
-        name: "news".into(),
-        history_limit: 0,
-        extract: None,
-        notify_url: "tgram://P/1/2".into(),
-    }];
-    let t = resolve_notify_target(&source, &tags, "tgram://G/C9").unwrap();
+    let group_with_url = GroupConfig {
+        id: "news".into(),
+        name: "News Group".into(),
+        default_notify_url: "tgram://P/1/2".into(),
+        ..GroupConfig::default()
+    };
+    let t = resolve_notify_target(&source, Some(&group_with_url), "tgram://G/C9").unwrap();
     assert_eq!(t.token, "P");
     assert_eq!(t.chat_ids, vec!["1".to_string(), "2".to_string()]);
 
-    // 关闭跟随分组时用全局。
-    let mut src_no_follow = source.clone();
-    src_no_follow.follow_group = false;
-    let t = resolve_notify_target(&src_no_follow, &tags, "tgram://G/C9").unwrap();
-    assert_eq!(t.token, "G");
-
     // 分组与全局均未配置时返回 None。
-    let no_url_tags = vec![TagConfig {
-        name: "news".into(),
-        history_limit: 0,
-        extract: None,
-        notify_url: String::new(),
-    }];
-    assert!(resolve_notify_target(&source, &no_url_tags, "").is_none());
+    assert!(resolve_notify_target(&source, Some(&group), "").is_none());
 }
 
 #[test]
 fn test_resolve_effective_extract() {
     let source = SourceConfig {
-        tags: vec!["news".into()],
-        extract: ExtractConfig::Text { images: None },
+        id: "s1".into(),
+        group_id: Some("news".into()),
+        extract: ExtractConfig::Text {
+            selector: None,
+            images: None,
+        },
         ..SourceConfig::default()
     };
 
     // 分组未配置提取时使用源自身。
-    let tags = vec![TagConfig {
-        name: "news".into(),
-        history_limit: 0,
-        extract: None,
-        notify_url: String::new(),
-    }];
+    let group = GroupConfig {
+        id: "news".into(),
+        name: "News Group".into(),
+        default_extract: None,
+        ..GroupConfig::default()
+    };
     assert!(matches!(
-        resolve_effective_extract(&source, &tags),
+        resolve_effective_extract(&source, Some(&group)),
         ExtractConfig::Text { .. }
     ));
 
-    // 分组配置了提取时，源「跟随分组」则用分组的提取。
-    let tags = vec![TagConfig {
-        name: "news".into(),
-        history_limit: 0,
-        extract: Some(ExtractConfig::Items {
+    // 分组配置了提取时，继承分组提取。
+    let group_with_extract = GroupConfig {
+        id: "news".into(),
+        name: "News Group".into(),
+        default_extract: Some(ExtractConfig::Items {
             selector: ItemSelector::Css {
                 selector: ".item".into(),
             },
@@ -781,99 +637,112 @@ fn test_resolve_effective_extract() {
             dedupe_key: None,
             images: None,
         }),
-        notify_url: String::new(),
-    }];
+        ..GroupConfig::default()
+    };
     assert!(matches!(
-        resolve_effective_extract(&source, &tags),
+        resolve_effective_extract(&source, Some(&group_with_extract)),
         ExtractConfig::Items { .. }
     ));
-
-    // 关闭「跟随分组」时使用源自身，即使分组配置了提取。
-    let mut src_no_follow = source.clone();
-    src_no_follow.follow_group = false;
-    assert!(matches!(
-        resolve_effective_extract(&src_no_follow, &tags),
-        ExtractConfig::Text { .. }
-    ));
 }
 
 #[test]
-fn test_tag_db_roundtrip() {
+fn test_group_db_roundtrip() {
     let db = Db::open_in_memory().unwrap();
     // 初始为空。
-    assert!(db.list_tags().unwrap().is_empty());
-    assert!(find_tag(&db, "news").is_none());
+    assert!(db.list_groups().unwrap().is_empty());
+    assert!(db.get_group("news").unwrap().is_none());
 
     // 新增。
-    let tag = TagConfig {
-        name: "news".into(),
-        history_limit: 30,
-        extract: None,
-        notify_url: String::new(),
+    let group = GroupConfig {
+        id: "news".into(),
+        name: "News Group".into(),
+        default_cron: Some("*/10 * * * *".into()),
+        default_headers: HashMap::from([("User-Agent".into(), "CustomUA".into())]),
+        default_browser_config: None,
+        default_extract: None,
+        default_notify_url: "tgram://tok/C1".into(),
+        created_at: None,
+        updated_at: None,
     };
-    db.upsert_tag(&tag).unwrap();
-    assert_eq!(db.list_tags().unwrap().len(), 1);
-    let loaded = find_tag(&db, "news").unwrap();
-    assert_eq!(loaded.history_limit, 30);
+    db.upsert_group(&group).unwrap();
+    assert_eq!(db.list_groups().unwrap().len(), 1);
+    let loaded = db.get_group("news").unwrap().unwrap();
+    assert_eq!(loaded.name, "News Group");
+    assert_eq!(loaded.default_cron.as_deref(), Some("*/10 * * * *"));
+    assert_eq!(
+        loaded.default_headers.get("User-Agent").map(|s| s.as_str()),
+        Some("CustomUA")
+    );
 
     // 更新。
-    db.upsert_tag(&TagConfig {
-        name: "news".into(),
-        history_limit: 0,
-        extract: None,
-        notify_url: "tgram://tok/C1".into(),
-    })
-    .unwrap();
-    let loaded = find_tag(&db, "news").unwrap();
-    assert_eq!(loaded.history_limit, 0);
-    assert_eq!(loaded.notify_url, "tgram://tok/C1");
+    let mut updated = loaded.clone();
+    updated.name = "Renamed News".into();
+    db.upsert_group(&updated).unwrap();
+    let loaded = db.get_group("news").unwrap().unwrap();
+    assert_eq!(loaded.name, "Renamed News");
 
     // 删除。
-    assert_eq!(db.delete_tag("news").unwrap(), 1);
-    assert!(find_tag(&db, "news").is_none());
+    assert_eq!(db.delete_group("news").unwrap(), 1);
+    assert!(db.get_group("news").unwrap().is_none());
 }
 
 #[test]
-fn test_settings_db_roundtrip() {
-    let db = Db::open_in_memory().unwrap();
-    // 数据库迁移时会 seed 一条全局默认设置，未手动配置前返回默认值。
-    let seeded = db.get_settings().unwrap().unwrap();
-    assert_eq!(seeded.concurrency, 16);
-    assert_eq!(seeded.queue_capacity, 1024);
-    assert_eq!(seeded.default_timeout_secs, 30);
-
-    let s = EditableSettings {
-        concurrency: 8,
-        queue_capacity: 512,
-        default_timeout_secs: 15,
-        default_cron: "*/5 * * * *".into(),
-        default_user_agent: "test-agent".into(),
-        history_limit_per_source: 100,
-        failure_notify_threshold: 3,
-        timezone: "Asia/Shanghai".into(),
-        template: "{label}".into(),
-        telegram_url: "tgram://token/C1".into(),
-        max_images_per_event: 5,
+fn test_settings_yaml_roundtrip() {
+    let tmp = std::env::temp_dir().join(format!("test_config_{}.yaml", std::process::id()));
+    let cfg = Config {
+        daemon: DaemonConfig {
+            concurrency: 8,
+            queue_capacity: 512,
+            default_timeout_secs: 15,
+            default_cron: "*/5 * * * *".into(),
+            default_user_agent: "test-agent".into(),
+            history_limit_per_source: 100,
+            failure_notify_threshold: 3,
+            timezone: "Asia/Shanghai".into(),
+            ..Default::default()
+        },
+        telegram: TelegramConfig {
+            url: "tgram://token/C1".into(),
+            ..Default::default()
+        },
+        browser: BrowserConfig {
+            enabled: true,
+            cdp_url: "ws://127.0.0.1:9222".into(),
+            timeout_secs: 30,
+        },
+        ..Default::default()
     };
-    db.set_settings(&s).unwrap();
-    let loaded = db.get_settings().unwrap().unwrap();
-    assert_eq!(loaded.concurrency, 8);
-    assert_eq!(loaded.queue_capacity, 512);
-    assert_eq!(loaded.default_cron, "*/5 * * * *");
-    assert_eq!(loaded.timezone, "Asia/Shanghai");
-    assert_eq!(loaded.telegram_url, "tgram://token/C1");
+    cfg.save(&tmp).unwrap();
+    let loaded = Config::load(&tmp).unwrap();
+    assert_eq!(loaded.daemon.concurrency, 8);
+    assert_eq!(loaded.daemon.queue_capacity, 512);
+    assert_eq!(loaded.daemon.default_cron, "*/5 * * * *");
+    assert_eq!(loaded.daemon.timezone, "Asia/Shanghai");
+    assert_eq!(loaded.telegram.url, "tgram://token/C1");
+    assert!(loaded.browser.enabled);
+    assert_eq!(loaded.browser.cdp_url, "ws://127.0.0.1:9222");
+    let _ = std::fs::remove_file(tmp);
+}
 
-    // 覆盖更新。
-    let mut s2 = s;
-    s2.concurrency = 16;
-    db.set_settings(&s2).unwrap();
-    assert_eq!(db.get_settings().unwrap().unwrap().concurrency, 16);
+#[test]
+fn test_secrets_file_resolution() {
+    let tmp_secret = std::env::temp_dir().join(format!("secret_{}.txt", std::process::id()));
+    std::fs::write(&tmp_secret, "  tgram://secret-bot-token/12345  \n").unwrap();
+    let mut cfg = Config {
+        telegram: TelegramConfig {
+            url: String::new(),
+            url_file: Some(tmp_secret.clone()),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    cfg.resolve_secrets().unwrap();
+    assert_eq!(cfg.telegram.url, "tgram://secret-bot-token/12345");
+    let _ = std::fs::remove_file(tmp_secret);
 }
 
 #[test]
 fn test_reload_settings_hot_update() {
-    // reload_settings 应把全部字段（含并发 / 队列容量）刷新到 runtime / settings，
-    // 全部即时生效。
     use reading_steiner::scheduler::AppState;
 
     let dir = std::env::temp_dir().join(format!("rst-reload-{}", std::process::id()));
@@ -901,7 +770,13 @@ fn test_reload_settings_hot_update() {
         timezone: "Asia/Shanghai".into(),
         template: "{label}".into(),
         telegram_url: "tgram://hot/C1".into(),
+        telegram_url_file: None,
         max_images_per_event: 7,
+        browser_enabled: true,
+        browser_cdp_url: "http://127.0.0.1:9222".into(),
+        browser_timeout_secs: 30,
+        readonly: false,
+        config_path: None,
     };
     state.reload_settings(&s);
 
@@ -913,50 +788,10 @@ fn test_reload_settings_hot_update() {
     assert_eq!(state.runtime.read().unwrap().history_limit_per_source, 200);
     assert_eq!(state.runtime.read().unwrap().timezone, "Asia/Shanghai");
     assert_eq!(state.runtime.read().unwrap().default_cron, "*/10 * * * *");
-    // settings 内存视图已更新（fetcher 的 UA / 超时来源）。
-    assert_eq!(
-        state.settings.read().unwrap().default_user_agent,
-        "hot-agent"
-    );
-    assert_eq!(state.settings.read().unwrap().default_timeout_secs, 30);
-    // notifier 重建后全局目标指向热更新的 url。
-    let n = state.notifier.read().unwrap().clone().unwrap();
-    assert!(n.global_target().is_some());
+    assert_eq!(state.config.read().unwrap().telegram.url, "tgram://hot/C1");
+    assert!(state.config.read().unwrap().browser.enabled);
+    assert_eq!(state.config.read().unwrap().browser.cdp_url, "http://127.0.0.1:9222");
 
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-#[test]
-fn test_ensure_tags_registers_new_tags() {
-    let db = Db::open_in_memory().unwrap();
-    // 自动登记：新标签以默认值插入，已存在标签不覆盖其配置。
-    db.ensure_tags(&["news".into(), "alert".into()]).unwrap();
-    assert_eq!(db.list_tags().unwrap().len(), 2);
-
-    let news = find_tag(&db, "news").unwrap();
-    assert_eq!(news.history_limit, 0);
-
-    // 更新 news 的分组配置后再次登记，不应覆盖。
-    db.upsert_tag(&TagConfig {
-        name: "news".into(),
-        history_limit: 10,
-        extract: None,
-        notify_url: String::new(),
-    })
-    .unwrap();
-    db.ensure_tags(&["news".into()]).unwrap();
-    let news = find_tag(&db, "news").unwrap();
-    assert_eq!(news.history_limit, 10);
-
-    // 空标签 / 空白标签被忽略。
-    db.ensure_tags(&["".into(), "   ".into()]).unwrap();
-    assert_eq!(db.list_tags().unwrap().len(), 2);
-}
-
-/// 按名称取分组设置（走 `list_tags`，与生产代码同一路径）。
-fn find_tag(db: &Db, name: &str) -> Option<TagConfig> {
-    db.list_tags()
-        .unwrap_or_default()
-        .into_iter()
-        .find(|t| t.name == name)
-}

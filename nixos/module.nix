@@ -4,43 +4,47 @@ let
 
   settingsFormat = (pkgs.formats.yaml { });
 
-  # 生成 config.yaml。authTokenFile 不落 /nix/store，
-  # 由 preStart 用 replace-secret 从 credential 渲染到运行时配置。
+  # 生成权威 config.yaml。
+  # 敏感 token 可通过 urlFile / authTokenFile 传入文件路径（如 /run/secrets/...），
+  # 配置文件中仅记录安全的文件路径，密钥本身绝不写入 /nix/store。
   generatedConfigFile = settingsFormat.generate "reading-steiner-config.yaml" {
     state_dir = cfg.stateDir;
     media_dir = cfg.mediaDir;
     daemon = {
-      socket_path = cfg.socketPath;
       log_level = cfg.logLevel;
+      concurrency = cfg.daemon.concurrency;
+      queue_capacity = cfg.daemon.queueCapacity;
+      default_timeout_secs = cfg.daemon.defaultTimeoutSecs;
+      default_cron = cfg.daemon.defaultCron;
+      default_user_agent = cfg.daemon.defaultUserAgent;
+      history_limit_per_source = cfg.daemon.historyLimitPerSource;
+      failure_notify_threshold = cfg.daemon.failureNotifyThreshold;
+      timezone = cfg.daemon.timezone;
     };
     web = {
       listen = "${cfg.web.listenAddress}:${toString cfg.web.port}";
       static_dir = cfg.web.staticDir;
     } // lib.optionalAttrs (cfg.web.authTokenFile != null) {
-      auth_token = "@auth-token@";
+      auth_token_file = toString cfg.web.authTokenFile;
     };
     telegram = {
+      url = cfg.telegram.url;
       api_base = cfg.telegram.apiBase;
+      max_images_per_event = cfg.telegram.maxImagesPerEvent;
       image_bytes_budget = cfg.telegram.imageBytesBudget;
       digest_window_secs = cfg.telegram.digestWindowSecs;
+      template = cfg.telegram.template;
+    } // lib.optionalAttrs (cfg.telegram.urlFile != null) {
+      url_file = toString cfg.telegram.urlFile;
     };
-    camofox = {
-      enabled = cfg.camofox.enabled;
-      base_url = cfg.camofox.baseUrl;
-      access_key_file =
-        if cfg.camofox.accessKeyFile != null then "/run/credentials/reading-steiner-daemon.service/camofox_access_key" else "";
-      api_key_file =
-        if cfg.camofox.apiKeyFile != null then "/run/credentials/reading-steiner-daemon.service/camofox_api_key" else "";
-      user_id = cfg.camofox.userId;
-      session_key = cfg.camofox.sessionKey;
-      health_check_interval_secs = cfg.camofox.healthCheckIntervalSecs;
-      pool_size = cfg.camofox.poolSize;
+    browser = {
+      enabled = cfg.browser.enabled;
+      cdp_url = cfg.browser.cdpUrl;
+      timeout_secs = cfg.browser.timeoutSecs;
     };
   };
 
   runtimeConfigFile = "/run/reading-steiner/config.yaml";
-
-  hasToken = cfg.web.authTokenFile != null;
 
   execStart = "${lib.getExe cfg.package} serve --config ${runtimeConfigFile}";
 in
@@ -78,16 +82,53 @@ in
       description = "Media directory for downloaded images.";
     };
 
-    socketPath = lib.mkOption {
-      type = lib.types.str;
-      default = "/run/reading-steiner/daemon.sock";
-      description = "Control socket path used by the CLI to talk to the daemon.";
-    };
-
     logLevel = lib.mkOption {
       type = lib.types.enum [ "trace" "debug" "info" "warn" "error" ];
       default = "info";
       description = "Log level for the daemon.";
+    };
+
+    daemon = {
+      concurrency = lib.mkOption {
+        type = lib.types.ints.positive;
+        default = 16;
+        description = "Max concurrent fetch tasks executed in parallel.";
+      };
+      queueCapacity = lib.mkOption {
+        type = lib.types.ints.positive;
+        default = 1024;
+        description = "Scheduler queue buffer capacity.";
+      };
+      defaultTimeoutSecs = lib.mkOption {
+        type = lib.types.ints.positive;
+        default = 30;
+        description = "Default fetch timeout in seconds.";
+      };
+      defaultCron = lib.mkOption {
+        type = lib.types.str;
+        default = "0 * * * *";
+        description = "Default cron schedule expression for sources.";
+      };
+      defaultUserAgent = lib.mkOption {
+        type = lib.types.str;
+        default = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36 Edg/151.0.0.0";
+        description = "Default HTTP User-Agent.";
+      };
+      historyLimitPerSource = lib.mkOption {
+        type = lib.types.ints.unsigned;
+        default = 0;
+        description = "Max snapshot records kept per source (0 for unlimited).";
+      };
+      failureNotifyThreshold = lib.mkOption {
+        type = lib.types.ints.unsigned;
+        default = 0;
+        description = "Consecutive failures before sending failure alert (0 to disable).";
+      };
+      timezone = lib.mkOption {
+        type = lib.types.str;
+        default = "Asia/Shanghai";
+        description = "IANA timezone name used by the scheduler.";
+      };
     };
 
     user = lib.mkOption {
@@ -127,9 +168,6 @@ in
       };
       staticDir = lib.mkOption {
         type = lib.types.str;
-        # 默认接线 flake 的 packages.web（前端构建产物）；无该包时留空 = 仅 API。
-        # 注意留空时 Rust 端会回退到相对路径 web/dist，而非「仅 API」，
-        # 因此显式设为指向 flake web 包的绝对路径。
         default = lib.mkDefault (
           if (self.packages.${pkgs.system} or { }) ? web
           then "${self.packages.${pkgs.system}.web}"
@@ -146,14 +184,32 @@ in
         type = lib.types.nullOr lib.types.path;
         default = null;
         description = ''
-          File containing the web console Bearer token. Read via systemd
-          credentials and rendered into the runtime config; never copied to
-          the nix store. Required when listening on a non-loopback address.
+          File containing the web console Bearer token (e.g. sops-nix secret).
         '';
       };
     };
 
     telegram = {
+      url = lib.mkOption {
+        type = lib.types.str;
+        default = "";
+        description = "Global Telegram notification target: tgram://bottoken/ChatID1/ChatID2.";
+      };
+      urlFile = lib.mkOption {
+        type = lib.types.nullOr lib.types.path;
+        default = null;
+        description = "Path to file containing the Telegram URL (ideal for sops-nix secrets).";
+      };
+      template = lib.mkOption {
+        type = lib.types.str;
+        default = "";
+        description = "Custom message template for change events.";
+      };
+      maxImagesPerEvent = lib.mkOption {
+        type = lib.types.ints.positive;
+        default = 10;
+        description = "Max images attached per change event.";
+      };
       apiBase = lib.mkOption {
         type = lib.types.str;
         default = "https://api.telegram.org";
@@ -171,46 +227,21 @@ in
       };
     };
 
-    camofox = {
+    browser = {
       enabled = lib.mkOption {
         type = lib.types.bool;
         default = false;
-        description = "Enable the Camofox browser engine for dynamic pages.";
+        description = "Enable the external CDP browser engine (Chrome/Chromium) for dynamic pages.";
       };
-      baseUrl = lib.mkOption {
+      cdpUrl = lib.mkOption {
         type = lib.types.str;
-        default = "http://127.0.0.1:9377";
-        description = "Camofox engine base URL.";
+        default = "http://127.0.0.1:9222";
+        description = "CDP endpoint URL (e.g. http://127.0.0.1:9222 or ws://127.0.0.1:9222/...).";
       };
-      accessKeyFile = lib.mkOption {
-        type = lib.types.nullOr lib.types.path;
-        default = null;
-        description = "File containing the Camofox access key (passed as a credential).";
-      };
-      apiKeyFile = lib.mkOption {
-        type = lib.types.nullOr lib.types.path;
-        default = null;
-        description = "File containing the Camofox API key (passed as a credential).";
-      };
-      userId = lib.mkOption {
-        type = lib.types.str;
-        default = "readingsteiner";
-        description = "Camofox user id.";
-      };
-      sessionKey = lib.mkOption {
-        type = lib.types.str;
-        default = "readingsteiner";
-        description = "Camofox session key.";
-      };
-      healthCheckIntervalSecs = lib.mkOption {
+      timeoutSecs = lib.mkOption {
         type = lib.types.ints.positive;
         default = 30;
-        description = "Camofox health check interval, in seconds.";
-      };
-      poolSize = lib.mkOption {
-        type = lib.types.ints.positive;
-        default = 4;
-        description = "Camofox browser pool size.";
+        description = "Browser fetch and render timeout in seconds.";
       };
     };
   };
@@ -271,23 +302,10 @@ in
           MemoryDenyWriteExecute = true;
           RestrictRealtime = true;
           RestrictSUIDSGID = true;
-          LoadCredential = lib.optional hasToken "auth_token:${cfg.web.authTokenFile}"
-            ++ lib.optional (cfg.camofox.accessKeyFile != null) "camofox_access_key:${cfg.camofox.accessKeyFile}"
-            ++ lib.optional (cfg.camofox.apiKeyFile != null) "camofox_api_key:${cfg.camofox.apiKeyFile}";
         };
 
-        # 把配置（含 token 占位符）渲染到 RuntimeDirectory。
-        # 注意：不使用 $USER/$GROUP —— 服务无 DynamicUser，目录由 systemd 创建。
         preStart = ''
-          tmp=$(mktemp)
-          trap 'rm -f "$tmp"' EXIT
-          cp ${if cfg.configFile != null then cfg.configFile else generatedConfigFile} "$tmp"
-          ${lib.optionalString hasToken ''
-            ${lib.getExe pkgs.replace-secret} '@auth-token@' "$CREDENTIALS_DIRECTORY/auth_token" "$tmp"
-          ''}
-          # ExecStartPre 默认以 User=/Group= 身份运行（非 root），无需也不能 chown：
-          # install 创建的文件自然归服务用户所有，服务进程 0640 可读。
-          install -m 0640 "$tmp" ${runtimeConfigFile}
+          install -m 0640 ${if cfg.configFile != null then cfg.configFile else generatedConfigFile} ${runtimeConfigFile}
         '';
       };
 

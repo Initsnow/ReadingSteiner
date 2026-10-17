@@ -49,7 +49,6 @@ export function SourceCard({
   onDelete: () => void
 }) {
   const unread = source.unread_count ?? 0
-  const hasScreenshot = source.fetch.engine === "camofox" && source.fetch.screenshot
 
   return (
     <div
@@ -110,16 +109,16 @@ export function SourceCard({
               >
                 {source.notify_enabled ? "通知开" : "已暂停通知"}
               </Badge>
-              {hasScreenshot && (
+              {source.fetch.screenshot && (
                 <Badge variant="outline" className="px-1.5 py-0 text-[10px]">
                   <Eye className="h-2.5 w-2.5" /> 截图
                 </Badge>
               )}
-              {source.tags.map((t) => (
-                <Badge key={t} variant="outline" className="px-1.5 py-0 text-[10px]">
-                  {t}
+              {source.group_id && (
+                <Badge variant="outline" className="px-1.5 py-0 text-[10px]">
+                  {source.group_id}
                 </Badge>
-              ))}
+              )}
             </div>
 
             <div className="mt-0.5 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted-foreground">

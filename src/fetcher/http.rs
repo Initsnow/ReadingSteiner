@@ -39,7 +39,7 @@ impl HttpFetcher {
         let mut headers = HeaderMap::new();
         for (k, v) in &spec.fetch.headers {
             if let (Ok(name), Ok(v)) = (
-                reqwest::header::HeaderName::from_bytes(k.as_bytes()),
+                reqwest::header::HeaderName::try_from(k.as_str()),
                 HeaderValue::from_str(v),
             ) {
                 headers.insert(name, v);

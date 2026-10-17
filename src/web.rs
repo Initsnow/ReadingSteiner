@@ -22,7 +22,7 @@ use tracing::info;
 use crate::api;
 use crate::config::{Config, EditableSettings, SourceConfig};
 use crate::error::{Error, Result};
-use crate::models::TagConfig;
+use crate::models::GroupConfig;
 use crate::scheduler::AppState;
 
 /// 上传 zip 备份的最大允许体积（默认 4 GiB）。
@@ -101,14 +101,16 @@ fn is_not_found(e: &Error) -> bool {
 
 /// 启动 Web 控制台 HTTP 服务（阻塞直至监听器结束）。
 pub async fn serve_web(state: Arc<AppState>) -> Result<()> {
-    let app = build_router(state.clone());
-    let listen = state.cfg.web.effective_listen();
+    let cfg = state.config_snapshot();
+    let listen = cfg.web.effective_listen();
+    let static_dir = cfg.web.static_dir();
     let listener = tokio::net::TcpListener::bind(&listen).await?;
     info!(
         addr = %listen,
-        static_dir = %state.cfg.web.static_dir().display(),
+        static_dir = %static_dir.display(),
         "web console listening"
     );
+    let app = build_router(state.clone());
     axum::serve(listener, app)
         .await
         .map_err(|e| Error::other(format!("web server error: {e}")))?;
@@ -156,17 +158,22 @@ fn build_router(state: Arc<AppState>) -> Router {
     let api = Router::new()
         .route("/status", get(status))
         .route("/sources", get(sources_list).post(source_add))
+        .route("/sources/test", post(source_dry_run_test))
         .route("/sources/preview", post(source_preview))
         .route("/sources/batch", post(sources_batch))
         .route("/sources/{id}", put(source_update).delete(source_delete))
         .route("/sources/{id}/test", post(source_test))
+        .route("/sources/{id}/check", post(source_check_by_id))
         .route("/sources/{id}/read", post(source_mark_read))
         .route("/events", get(events_list))
         .route("/events/{id}", get(event_get))
         .route("/events/{id}/read", post(event_mark_read))
         .route("/events/{id}/screenshot", get(event_screenshot))
-        .route("/tags", get(tags_list))
-        .route("/tags/{name}", put(tag_update).delete(tag_delete))
+        .route("/groups", get(groups_list).post(group_upsert))
+        .route(
+            "/groups/{id}",
+            get(group_get).put(group_upsert_by_id).delete(group_delete),
+        )
         .route("/check", post(check))
         .route("/history", get(history))
         .route("/notify-test", post(notify_test))
@@ -180,9 +187,9 @@ fn build_router(state: Arc<AppState>) -> Router {
         // 放行上传体积限制到 MAX_UPLOAD_BYTES（默认 body 上限过小）。
         .layer(DefaultBodyLimit::max(MAX_UPLOAD_BYTES));
 
-    let static_dir = state.cfg.web.static_dir();
-    // 鉴权中间件只需一份只读 Config（读 web.auth_token）。
-    let auth_cfg = state.cfg.clone();
+    let cfg = state.config_snapshot();
+    let static_dir = cfg.web.static_dir();
+    let auth_cfg = cfg;
 
     Router::new()
         .nest(
@@ -284,6 +291,21 @@ async fn source_test(
     Ok(Envelope::ok(api::test_source(&state, &id).await?))
 }
 
+async fn source_dry_run_test(
+    State(state): State<Arc<AppState>>,
+    Json(source): Json<SourceConfig>,
+) -> std::result::Result<Json<Envelope<serde_json::Value>>, ApiError> {
+    Ok(Envelope::ok(api::test_source_dry_run(&state, &source).await?))
+}
+
+async fn source_check_by_id(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> std::result::Result<Json<Envelope<UpdatedId>>, ApiError> {
+    api::check_source(&state, &id).await?;
+    Ok(Envelope::ok(UpdatedId { source_id: id }))
+}
+
 /// 预览请求体：抓取 URL 并返回页面标题，用于添加监控源时自动填充名称。
 #[derive(Deserialize)]
 struct PreviewBody {
@@ -380,36 +402,49 @@ struct ListQuery {
     limit: Option<usize>,
 }
 
-// ---- 分组 ----
+// ---- 预设模板 / 分组 (Groups) ----
 
-async fn tags_list(
+async fn groups_list(
     State(state): State<Arc<AppState>>,
-) -> std::result::Result<Json<Envelope<Vec<TagConfig>>>, ApiError> {
-    Ok(Envelope::ok(api::tags_list(&state).await?))
+) -> std::result::Result<Json<Envelope<Vec<GroupConfig>>>, ApiError> {
+    Ok(Envelope::ok(api::groups_list(&state).await?))
 }
 
-async fn tag_update(
+async fn group_get(
     State(state): State<Arc<AppState>>,
-    Path(name): Path<String>,
-    Json(mut tag): Json<TagConfig>,
-) -> std::result::Result<Json<Envelope<UpdatedName>>, ApiError> {
-    // URL 路径中的分组名权威，避免重命名造成分组漂移。
-    tag.name = name.clone();
-    api::tag_update(&state, tag).await?;
-    Ok(Envelope::ok(UpdatedName { name }))
+    Path(id): Path<String>,
+) -> std::result::Result<Json<Envelope<GroupConfig>>, ApiError> {
+    let group = api::group_get(&state, &id)
+        .await?
+        .ok_or_else(|| ApiError::not_found(format!("group {id} not found")))?;
+    Ok(Envelope::ok(group))
 }
 
-async fn tag_delete(
+async fn group_upsert(
     State(state): State<Arc<AppState>>,
-    Path(name): Path<String>,
-) -> std::result::Result<Json<Envelope<UpdatedName>>, ApiError> {
-    api::tag_delete(&state, &name).await?;
-    Ok(Envelope::ok(UpdatedName { name }))
+    Json(group): Json<GroupConfig>,
+) -> std::result::Result<Json<Envelope<UpdatedId>>, ApiError> {
+    let id = group.id.clone();
+    api::group_upsert(&state, group).await?;
+    Ok(Envelope::ok(UpdatedId { source_id: id }))
 }
 
-#[derive(Debug, Serialize)]
-struct UpdatedName {
-    name: String,
+async fn group_upsert_by_id(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(mut group): Json<GroupConfig>,
+) -> std::result::Result<Json<Envelope<UpdatedId>>, ApiError> {
+    group.id = id.clone();
+    api::group_upsert(&state, group).await?;
+    Ok(Envelope::ok(UpdatedId { source_id: id }))
+}
+
+async fn group_delete(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> std::result::Result<Json<Envelope<UpdatedId>>, ApiError> {
+    api::group_delete(&state, &id).await?;
+    Ok(Envelope::ok(UpdatedId { source_id: id }))
 }
 
 // ---- 检测 / 历史 / 通知测试 ----
@@ -503,7 +538,7 @@ async fn settings_update(
         applied: true,
         immediate: true,
         restart_required: false,
-        config: "SQLite (settings 表)",
+        config: "config.yaml",
     }))
 }
 
