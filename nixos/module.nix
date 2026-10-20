@@ -45,6 +45,8 @@ let
   };
 
   runtimeConfigFile = "/run/reading-steiner/config.yaml";
+  runtimeConfigSource =
+    if cfg.configFile != null then cfg.configFile else generatedConfigFile;
 
   execStart = "${lib.getExe cfg.package} serve --config ${runtimeConfigFile}";
 in
@@ -106,7 +108,7 @@ in
       };
       defaultCron = lib.mkOption {
         type = lib.types.str;
-        default = "0 * * * *";
+        default = "0 12 * * *";
         description = "Default cron schedule expression for sources.";
       };
       defaultUserAgent = lib.mkOption {
@@ -287,7 +289,7 @@ in
           ExecStart = execStart;
           User = cfg.user;
           Group = cfg.group;
-          # 目录交给 systemd 创建并设好属主，preStart 不再依赖 $USER/$GROUP
+          # 目录交给 systemd 创建并设好属主。
           StateDirectory = lib.removePrefix "/var/lib/" cfg.stateDir;
           RuntimeDirectory = "reading-steiner";
           RuntimeDirectoryMode = "0750";
@@ -302,11 +304,12 @@ in
           MemoryDenyWriteExecute = true;
           RestrictRealtime = true;
           RestrictSUIDSGID = true;
+          # 声明式配置对 daemon 用户保持只读，避免 WebUI 修改后
+          # 在服务重启时被 NixOS 配置覆盖。
+          ExecStartPre = [
+            "+${pkgs.coreutils}/bin/install -o root -g ${cfg.group} -m 0440 ${runtimeConfigSource} ${runtimeConfigFile}"
+          ];
         };
-
-        preStart = ''
-          install -m 0640 ${if cfg.configFile != null then cfg.configFile else generatedConfigFile} ${runtimeConfigFile}
-        '';
       };
 
       networking.firewall.allowedTCPPorts = lib.mkIf cfg.openFirewall [ cfg.web.port ];

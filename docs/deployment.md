@@ -4,6 +4,8 @@
 
 仓库提供 NixOS flake 模块，模块会**自动生成 config.yaml**（渲染到 `/run/reading-steiner/config.yaml`），无需自备配置文件：
 
+运行时配置由 root 持有并以 `0440` 安装，daemon 用户只能读取。Web 控制台中的全局运行参数会显示为只读，修改应落在 NixOS 声明式配置中。
+
 ```nix
 {
   inputs.reading-steiner.url = "github:you/ReadingSteiner";
@@ -37,13 +39,12 @@
 
 ### 重要说明
 
-- **`settings.telegram.url` 不是有效选项**。Telegram 通知目标（`tgram://bottoken/ChatID`）
-  只存 SQLite `settings` 表，通过 Web 控制台「设置」页或 `reading-steiner settings` 命令读写，
-  不在 config.yaml / NixOS 模块里配置。模块只提供 `telegram.apiBase` 等启动引导项。
-- 配置里的可编辑运行参数（并发数、默认超时、cron、UA、通知模板等）同样只存 SQLite，
-  见 [configuration.md](configuration.md)。
+- Telegram 通知目标可通过模块的 `telegram.url` 或 `telegram.urlFile` 声明；后者适合
+  sops-nix 等外部密钥文件，避免 token 进入 `/nix/store`。
+- 并发数、默认超时、cron、UA、通知模板等运行参数由模块声明并生成到运行时
+  `config.yaml`，见 [configuration.md](configuration.md)。
 - 目录创建由 systemd 的 `StateDirectory` / `RuntimeDirectory` 完成，服务以静态
-  `User`/`Group`（默认 `reading-steiner`）运行，CLI 通过 socket 与 daemon 通信。
+  `User`/`Group`（默认 `reading-steiner`）运行，CLI 通过 Web API 与 daemon 通信。
 
 ### 主要选项
 

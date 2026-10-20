@@ -26,6 +26,11 @@ pub async fn event_mark_read(state: &AppState, event_id: i64) -> Result<usize> {
     state.db.lock().await.mark_event_read(event_id)
 }
 
+/// 标记全部事件为已读，返回受影响行数。
+pub async fn events_mark_all_read(state: &AppState) -> Result<usize> {
+    state.db.lock().await.mark_all_events_read()
+}
+
 /// 标记某个监控源的全部事件为已读，返回受影响行数。
 pub async fn source_mark_read(state: &AppState, source_id: &str) -> Result<usize> {
     state.db.lock().await.mark_source_events_read(source_id)

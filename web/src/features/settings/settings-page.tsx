@@ -47,7 +47,7 @@ export function SettingsPage() {
 
   async function handleSave() {
     if (!settings) return
-    // 全局默认 cron 留空回退到每小时；非空时校验格式。
+    // 全局默认 cron 留空时使用内置默认值；非空时校验格式。
     if (settings.default_cron.trim()) {
       const cronErr = validateCron(settings.default_cron)
       if (cronErr) {

@@ -2,9 +2,11 @@ import { useEffect, useState } from "react"
 import {
   Activity,
   Check,
+  CheckCheck,
   Clock,
   Filter,
   Image as ImageIcon,
+  Loader2,
   RefreshCw,
   ZoomIn,
 } from "lucide-react"
@@ -20,6 +22,7 @@ import { AuthImage } from "@/components/auth-image"
 export function EventsPage() {
   const [events, setEvents] = useState<ChangeEvent[]>([])
   const [loading, setLoading] = useState(true)
+  const [markingAll, setMarkingAll] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [filterSource, setFilterSource] = useState<string>("")
   const [filterUnread, setFilterUnread] = useState(false)
@@ -54,6 +57,21 @@ export function EventsPage() {
     }
   }
 
+  async function markAllRead() {
+    setMarkingAll(true)
+    try {
+      await api.markAllEventsRead()
+      setEvents((prev) => prev.map((e) => ({ ...e, read: true })))
+      setError(null)
+    } catch (e) {
+      setError((e as Error).message)
+    } finally {
+      setMarkingAll(false)
+    }
+  }
+
+  const unreadCount = events.filter((e) => !e.read).length
+
   const filtered = events.filter((e) => {
     if (filterUnread && e.read) return false
     if (
@@ -78,6 +96,20 @@ export function EventsPage() {
         </div>
 
         <div className="flex items-center gap-2">
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={markAllRead}
+            disabled={markingAll || unreadCount === 0}
+            className="gap-2 h-9 text-xs border-zinc-800 bg-zinc-900"
+          >
+            {markingAll ? (
+              <Loader2 className="h-3.5 w-3.5 animate-spin" />
+            ) : (
+              <CheckCheck className="h-3.5 w-3.5" />
+            )}
+            全部标为已读
+          </Button>
           <Button
             variant="outline"
             size="sm"
@@ -114,7 +146,7 @@ export function EventsPage() {
               : "border-zinc-800 bg-zinc-950 text-zinc-400 hover:text-zinc-200"
           }`}
         >
-          仅看未读 ({events.filter((e) => !e.read).length})
+          仅看未读 ({unreadCount})
         </button>
       </div>
 

@@ -113,11 +113,11 @@ export function GlobalSettingsCard({
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
             <Field
               label="默认 cron 表达式"
-              hint="新建监控源未单独配置时使用；留空回退到每小时（0 * * * *）"
+              hint="新建监控源未单独配置时使用；留空回退到每天 12:00"
             >
               <Input
                 value={settings.default_cron}
-                placeholder="0 * * * *"
+                placeholder="0 12 * * *"
                 className="font-mono text-xs"
                 disabled={isReadonly}
                 onChange={(e) => onChange({ default_cron: e.target.value })}

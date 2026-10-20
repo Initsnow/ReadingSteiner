@@ -264,8 +264,8 @@ pub const DEFAULT_EVENT_TEMPLATE: &str = r#"<b>ReadingSteiner</b> — {label}
 {summary}
 {items}"#;
 
-/// 默认全局抓取频率：每小时。
-pub const DEFAULT_CRON: &str = "0 * * * *";
+/// 默认全局抓取频率：每天中午 12 点。
+pub const DEFAULT_CRON: &str = "0 12 * * *";
 
 /// 默认 User-Agent：模拟 Chrome/Edge 浏览器，避免被站点按 UA 拦截。
 pub const DEFAULT_USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36 Edg/151.0.0.0";
@@ -500,7 +500,11 @@ pub fn resolve_effective_cron(
             }
         }
     }
-    default_cron.to_string()
+    if default_cron.trim().is_empty() {
+        DEFAULT_CRON.to_string()
+    } else {
+        default_cron.to_string()
+    }
 }
 
 /// 解析监控源的生效 HTTP headers。

@@ -5,7 +5,7 @@ daemon:
   concurrency: 16
   queue_capacity: 1024
   default_timeout_secs: 120
-  default_cron: 0 * * * *
+  default_cron: 0 12 * * *
   default_user_agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36 Edg/151.0.0.0
   history_limit_per_source: 0
   failure_notify_threshold: 0

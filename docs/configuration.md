@@ -1,80 +1,97 @@
 # 配置
 
-ReadingSteiner 的配置分两层，职责清晰、无重叠：
-
-1. **`config.yaml`（启动引导）**——只放 daemon 启动时所需的引导项（目录、监听、socket、camofox、telegram api_base 等）。
-2. **SQLite `settings` 表（全局可编辑设置）**——运行时并发数、默认超时、cron、UA、历史保留、失败通知阈值、时区、通知模板、通知目标、单事件图片数等，通过 **Web 控制台「设置」页**或 `reading-steiner settings` 命令直接读写，**不在 `config.yaml` 中配置**。
+`config.yaml` 是 ReadingSteiner 的单一真理源（SSOT）。daemon 启动时读取该文件，Web 控制台和
+`reading-steiner settings` 也在允许写入时直接修改它并即时热更新。
 
 ## config.yaml
 
-见仓库根目录 [`config.yaml`](../config.yaml)。只包含启动引导项：
+仓库根目录的 [`config.yaml`](../config.yaml) 提供完整示例：
 
 ```yaml
-state_dir: state          # 状态与数据库目录
-media_dir: state/media    # 图片等媒体缓存目录
+state_dir: state
+media_dir: state/media
 
 daemon:
-  socket_path: state/daemon.sock   # CLI 与 daemon 通信的 socket
-  log_level: info                  # 日志级别（实际以 RUST_LOG 环境变量优先）
+  log_level: info
+  concurrency: 16
+  queue_capacity: 1024
+  default_timeout_secs: 120
+  default_cron: 0 12 * * *
+  default_user_agent: Mozilla/5.0 ...
+  history_limit_per_source: 0
+  failure_notify_threshold: 0
+  timezone: Asia/Shanghai
 
 web:
-  listen: 127.0.0.1:8901   # Web 控制台监听地址
-  static_dir: web/dist     # 前端构建产物目录
+  listen: 127.0.0.1:8901
+  static_dir: web/dist
 
 telegram:
+  url: ''
   api_base: https://api.telegram.org
+  max_images_per_event: 10
   image_bytes_budget: 10485760
   digest_window_secs: 30
+  template: ''
 
-camofox:
-  enabled: false
-  base_url: http://127.0.0.1:9377
-  ...
+browser:
+  enabled: true
+  cdp_url: ws://127.0.0.1:9222/devtools/browser
+  timeout_secs: 120
 ```
 
-`daemon` / `telegram` 段的**可编辑运行参数**（并发、队列、超时、cron、UA、历史保留、失败阈值、时区、通知目标、模板、图片数）**只存在于 SQLite**，config.yaml 中配置无效。保存后全部**即时生效**。
+敏感值可使用文件路径间接加载：
 
-## 全局设置（SQLite）
+- `telegram.url_file` 指向 Telegram URL 密钥文件。
+- `web.auth_token_file` 指向 Web 控制台 Bearer Token 文件。
 
-全局设置存于 `state/reading-steiner.db` 的 `settings` 表，可通过 Web 控制台「设置」页或 `reading-steiner settings` 命令查看。
+文件路径会保留在 `config.yaml` 中，密钥内容本身无需写入配置。
+
+## 运行参数
 
 | 设置 | 说明 |
 |---|---|
-| `concurrency` | 抓取工作线程数（默认 16） |
-| `queue_capacity` | 队列容量（默认 1024） |
-| `default_timeout_secs` | 全局默认请求超时（秒，默认 30） |
-| `default_cron` | 全局默认 cron（新建源未配置时使用，默认每小时） |
-| `default_user_agent` | 默认 User-Agent（默认 Edge） |
-| `history_limit_per_source` | 每源保留历史条数（0 不限制） |
-| `failure_notify_threshold` | 连续失败告警阈值（0 禁用） |
-| `timezone` | 时区（IANA 名称，默认系统本地时区） |
-| `template` | 变更通知模板（默认内置模板） |
-| `telegram_url` | 全局通知目标（`tgram://`） |
-| `max_images_per_event` | 单事件最多附带图片数（默认 10） |
-
-首次启动（或老库升级）时，数据库会 seed 一条带上述默认值的 `global` 记录；此后所有设置均以该记录为准，不再做「缺失→默认」的运行时兜底。
+| `daemon.concurrency` | 最大并发抓取任务数（默认 16） |
+| `daemon.queue_capacity` | 调度队列容量（默认 1024） |
+| `daemon.default_timeout_secs` | 默认请求超时秒数（默认 120） |
+| `daemon.default_cron` | 新建源未指定周期时使用的 cron（默认每天 12:00；留空也回退到该值） |
+| `daemon.default_user_agent` | 默认 User-Agent |
+| `daemon.history_limit_per_source` | 每源快照保留上限，0 表示不限制 |
+| `daemon.failure_notify_threshold` | 连续失败告警阈值，0 表示禁用 |
+| `daemon.timezone` | 调度与通知使用的 IANA 时区 |
+| `telegram.template` | 变更通知模板，空值使用内置模板 |
+| `telegram.url` | 全局通知目标（`tgram://`） |
+| `telegram.max_images_per_event` | 单事件最多附带图片数（默认 10） |
+| `browser.enabled` | 是否启用 CDP 浏览器引擎 |
+| `browser.cdp_url` | Chrome/Chromium CDP 地址 |
 
 ### 热更新
 
-所有全局设置保存后**即时生效**。
+通过 Web 控制台保存后，配置会原子写回 `config.yaml` 并即时应用到运行时：
 
-其中：
+- `concurrency` 和 `queue_capacity` 由调度循环在下一轮读取。
+- `timezone`、`default_cron`、`default_timeout_secs`、`default_user_agent` 等字段在后续任务中即时使用。
+- Telegram 目标和模板变更后会重建 notifier，无需重启 daemon。
 
-- `concurrency`（并发数）由 daemon 调度循环在每轮动态调整信号量许可数，即时生效。
-- `queue_capacity`（队列容量）在每轮入队时读取，即时生效。
-- 其余字段（`timezone`、`default_cron`、`default_user_agent`、`default_timeout_secs`、
-  `telegram_url`、`template`、`max_images_per_event`、`failure_notify_threshold`、
-  `history_limit_per_source`）由 runtime / notifier 在每次使用时读取，保存即生效。
+### 只读部署
 
-### 通知目标（tgram://）
+ReadingSteiner 会根据配置文件的实际写权限返回 `readonly`。只读模式下：
 
-通知配置统一使用 `tgram://` 形式，一个 URL 同时携带 bot token 与接收者 chat id：
+- Web 控制台禁用可编辑字段并隐藏保存按钮。
+- `PUT /api/settings` 和服务端 `Config::save` 都会拒绝写入。
 
-```
+NixOS 模块将声明式配置安装为 `root:<service-group> 0440`，daemon 用户只能读取。因此参数应通过
+`services.reading-steiner` 修改，而不是在 WebUI 中编辑。
+
+## 通知目标（tgram://）
+
+一个 URL 同时携带 bot token 与接收者 chat id：
+
+```text
 tgram://bottoken/ChatID
 tgram://bottoken/ChatID1/ChatID2/ChatIDN
 ```
 
-- 全局在 Web「设置」页的「Telegram 通知目标」中配置。
-- **分组**可在「分组管理」里为某个分组单独配置 `notify_url`；留空则沿用全局。
-- 多 chat id 会把同一条通知推送到所有列出的 chat。
+- 全局目标通过 `telegram.url` 或 Web「系统设置」配置。
+- 分组可覆盖 `notify_url`；留空时沿用全局目标。
+- 多个 chat id 会把同一条通知推送到所有接收者。

@@ -17,7 +17,8 @@ pub use backup::{
     backup_zip_path,
 };
 pub use events::{
-    event_get, event_mark_read, event_screenshot_file, events_list, source_mark_read,
+    event_get, event_mark_read, event_screenshot_file, events_list, events_mark_all_read,
+    source_mark_read,
 };
 pub use groups::{group_delete, group_get, group_upsert, groups_list};
 pub use settings::{settings_get, settings_update};

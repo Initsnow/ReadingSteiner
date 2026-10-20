@@ -407,7 +407,7 @@ export function SourcesPage() {
                     className="rounded border-zinc-700 bg-zinc-950"
                   />
                 </th>
-                <th className="px-3 py-2.5">监控源 / ID</th>
+                <th className="px-3 py-2.5">监控源</th>
                 <th className="px-3 py-2.5">所属预设</th>
                 <th className="px-3 py-2.5">提取模式</th>
                 <th className="px-3 py-2.5">调度 Cron</th>
@@ -448,7 +448,7 @@ export function SourcesPage() {
                           }`}
                         />
                         <span className="font-sans font-semibold text-zinc-100 truncate">
-                          {s.name || s.id}
+                          {s.name || "未命名监控源"}
                         </span>
                         {s.unread_count > 0 && (
                           <Badge
@@ -460,8 +460,6 @@ export function SourcesPage() {
                         )}
                       </div>
                       <div className="text-[11px] text-zinc-500 truncate flex items-center gap-1.5 mt-0.5">
-                        <span className="text-zinc-400">{s.id}</span>
-                        <span>•</span>
                         <a
                           href={s.fetch.url}
                           target="_blank"
@@ -592,11 +590,8 @@ export function SourcesPage() {
                           }`}
                         />
                         <span className="font-semibold text-zinc-100 text-sm">
-                          {s.name || s.id}
+                          {s.name || "未命名监控源"}
                         </span>
-                      </div>
-                      <div className="text-[11px] font-mono text-zinc-500 mt-0.5">
-                        {s.id}
                       </div>
                     </div>
 

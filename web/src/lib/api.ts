@@ -314,6 +314,9 @@ export const api = {
   markEventRead: (id: number) =>
     request<{ updated: number }>(`/api/events/${id}/read`, { method: "POST" }),
 
+  markAllEventsRead: () =>
+    request<{ updated: number }>("/api/events/read-all", { method: "POST" }),
+
   markSourceRead: (sourceId: string) =>
     request<{ updated: number }>(`/api/sources/${encodeURIComponent(sourceId)}/read`, {
       method: "POST",

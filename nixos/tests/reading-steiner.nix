@@ -60,7 +60,7 @@ pkgs.testers.runNixOSTest {
     machine.wait_for_open_port(${toString pagePort})
     machine.wait_for_open_port(${toString tgPort})
 
-    with subtest("daemon starts (preStart works under declared User/Group)"):
+    with subtest("daemon starts with root-owned runtime config"):
         machine.wait_for_unit("reading-steiner-daemon.service")
         machine.wait_for_open_port(8901)
 
@@ -72,6 +72,14 @@ pkgs.testers.runNixOSTest {
 
     with subtest("web console REST API responds (loopback)"):
         machine.succeed("curl -sf http://127.0.0.1:8901/api/status | jq -e '.ok == true'")
+
+    with subtest("runtime config is read-only for the service"):
+        machine.succeed(
+            "test \"$(stat -c '%U:%G %a' /run/reading-steiner/config.yaml)\" = 'root:reading-steiner 440'"
+        )
+        machine.succeed(
+            "curl -sf http://127.0.0.1:8901/api/settings | jq -e '.result.readonly == true'"
+        )
 
     with subtest("CLI talks to daemon over HTTP"):
         machine.succeed("reading-steiner status --config /run/reading-steiner/config.yaml")

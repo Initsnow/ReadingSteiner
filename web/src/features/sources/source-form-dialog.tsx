@@ -660,7 +660,7 @@ export function SourceFormDialog({
                   <input
                     type="text"
                     value={form.cron}
-                    placeholder="0 * * * *"
+                    placeholder="0 12 * * *"
                     onChange={(e) => onChange({ cron: e.target.value })}
                     className="flex-1 min-w-44 rounded-md border border-zinc-800 bg-zinc-900 px-3 py-1.5 text-xs text-zinc-100 font-mono focus:border-zinc-700 focus:outline-none"
                   />

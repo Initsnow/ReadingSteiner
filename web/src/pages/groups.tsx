@@ -57,7 +57,7 @@ export function GroupsPage() {
     setEditingId(null)
     setId("")
     setName("")
-    setDefaultCron("0 * * * *")
+    setDefaultCron("0 12 * * *")
     setDefaultNotifyUrl("")
     setHeadersJson("{}")
     setExtractType("none")

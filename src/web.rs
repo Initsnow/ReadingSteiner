@@ -166,6 +166,7 @@ fn build_router(state: Arc<AppState>) -> Router {
         .route("/sources/{id}/check", post(source_check_by_id))
         .route("/sources/{id}/read", post(source_mark_read))
         .route("/events", get(events_list))
+        .route("/events/read-all", post(events_mark_all_read))
         .route("/events/{id}", get(event_get))
         .route("/events/{id}/read", post(event_mark_read))
         .route("/events/{id}/screenshot", get(event_screenshot))
@@ -360,6 +361,14 @@ async fn event_mark_read(
 ) -> std::result::Result<Json<Envelope<UpdatedCount>>, ApiError> {
     Ok(Envelope::ok(UpdatedCount {
         updated: api::event_mark_read(&state, id).await?,
+    }))
+}
+
+async fn events_mark_all_read(
+    State(state): State<Arc<AppState>>,
+) -> std::result::Result<Json<Envelope<UpdatedCount>>, ApiError> {
+    Ok(Envelope::ok(UpdatedCount {
+        updated: api::events_mark_all_read(&state).await?,
     }))
 }
 

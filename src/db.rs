@@ -508,6 +508,13 @@ impl Db {
         )?)
     }
 
+    /// 标记全部变更事件为已读。返回受影响的行数。
+    pub fn mark_all_events_read(&self) -> Result<usize> {
+        Ok(self
+            .conn
+            .execute("UPDATE change_events SET read=1 WHERE read=0", [])?)
+    }
+
     /// 标记指定变更事件为已读。返回受影响的行数。
     pub fn mark_event_read(&self, event_id: i64) -> Result<usize> {
         Ok(self
