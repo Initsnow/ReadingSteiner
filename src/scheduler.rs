@@ -463,18 +463,29 @@ pub async fn check_source(state: &Arc<AppState>, source_id: &str) -> Result<()> 
 
     // 指纹去重：同一内容指纹只通知一次。跨轮保留 last_notified_fingerprint，
     // 因此内容在多个指纹间振荡时也不会重复轰炸。
-    {
+    let duplicate_change = {
         let db = state.db.lock().await;
-        if let Some(sched) = db.get_schedule_state(&source.id)?
-            && sched
+        db.get_schedule_state(&source.id)?.is_some_and(|sched| {
+            sched
                 .last_notified_fingerprint
                 .as_deref()
                 .is_some_and(|fp| fp == diff.dedupe_key)
-        {
-            advance_schedule(state, &source, group.as_ref(), &tz, &default_cron, Some(Utc::now()), true).await?;
-            debug!(source = %source.id, "duplicate change, suppressed");
-            return Ok(());
-        }
+        })
+    };
+    if duplicate_change {
+        // advance_schedule 会重新获取数据库锁，必须先释放上面的锁作用域。
+        advance_schedule(
+            state,
+            &source,
+            group.as_ref(),
+            &tz,
+            &default_cron,
+            Some(Utc::now()),
+            true,
+        )
+        .await?;
+        debug!(source = %source.id, "duplicate change, suppressed");
+        return Ok(());
     }
 
     let image_urls = out.image_urls.clone();
