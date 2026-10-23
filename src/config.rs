@@ -40,19 +40,21 @@ impl Config {
     }
 
     pub fn resolve_secrets(&mut self) -> Result<()> {
-        if self.telegram.url.trim().is_empty() {
-            if let Some(path) = &self.telegram.url_file {
-                let text = std::fs::read_to_string(path)
-                    .map_err(|e| Error::config(format!("read telegram.url_file {}: {e}", path.display())))?;
-                self.telegram.url = text.trim().to_string();
-            }
+        if self.telegram.url.trim().is_empty()
+            && let Some(path) = &self.telegram.url_file
+        {
+            let text = std::fs::read_to_string(path).map_err(|e| {
+                Error::config(format!("read telegram.url_file {}: {e}", path.display()))
+            })?;
+            self.telegram.url = text.trim().to_string();
         }
-        if self.web.auth_token.trim().is_empty() {
-            if let Some(path) = &self.web.auth_token_file {
-                let text = std::fs::read_to_string(path)
-                    .map_err(|e| Error::config(format!("read web.auth_token_file {}: {e}", path.display())))?;
-                self.web.auth_token = text.trim().to_string();
-            }
+        if self.web.auth_token.trim().is_empty()
+            && let Some(path) = &self.web.auth_token_file
+        {
+            let text = std::fs::read_to_string(path).map_err(|e| {
+                Error::config(format!("read web.auth_token_file {}: {e}", path.display()))
+            })?;
+            self.web.auth_token = text.trim().to_string();
         }
         Ok(())
     }
@@ -90,10 +92,10 @@ pub fn is_path_readonly(path: &Path) -> bool {
             Err(_) => false,
         }
     } else if path.exists() {
-        if let Ok(metadata) = std::fs::metadata(path) {
-            if metadata.permissions().readonly() {
-                return true;
-            }
+        if let Ok(metadata) = std::fs::metadata(path)
+            && metadata.permissions().readonly()
+        {
+            return true;
         }
         match std::fs::OpenOptions::new().write(true).open(path) {
             Ok(_) => false,
@@ -101,10 +103,10 @@ pub fn is_path_readonly(path: &Path) -> bool {
             Err(_) => false,
         }
     } else {
-        if let Some(parent) = path.parent() {
-            if parent.exists() {
-                return is_path_readonly(parent);
-            }
+        if let Some(parent) = path.parent()
+            && parent.exists()
+        {
+            return is_path_readonly(parent);
         }
         false
     }
@@ -324,7 +326,7 @@ impl Default for SettingsView {
 
 impl SettingsView {
     pub fn from_config(cfg: &Config, config_path: Option<&Path>) -> Self {
-        let readonly = config_path.map_or(false, is_path_readonly);
+        let readonly = config_path.is_some_and(is_path_readonly);
         Self {
             concurrency: cfg.daemon.concurrency,
             queue_capacity: cfg.daemon.queue_capacity,
@@ -340,7 +342,11 @@ impl SettingsView {
             } else {
                 cfg.telegram.url.clone()
             },
-            telegram_url_file: cfg.telegram.url_file.as_ref().map(|p| p.display().to_string()),
+            telegram_url_file: cfg
+                .telegram
+                .url_file
+                .as_ref()
+                .map(|p| p.display().to_string()),
             max_images_per_event: cfg.telegram.max_images_per_event,
             browser_enabled: cfg.browser.enabled,
             browser_cdp_url: cfg.browser.cdp_url.clone(),
@@ -452,14 +458,12 @@ pub fn resolve_notify_target(
     group: Option<&GroupConfig>,
     global_url: &str,
 ) -> Option<TelegramTarget> {
-    if let Some(g) = group {
-        if !g.default_notify_url.trim().is_empty() {
-            if let Ok(target) = parse_telegram_url(&g.default_notify_url) {
-                if target.is_valid() {
-                    return Some(target);
-                }
-            }
-        }
+    if let Some(g) = group
+        && !g.default_notify_url.trim().is_empty()
+        && let Ok(target) = parse_telegram_url(&g.default_notify_url)
+        && target.is_valid()
+    {
+        return Some(target);
     }
     parse_telegram_url(global_url).ok().filter(|t| t.is_valid())
 }
@@ -471,12 +475,12 @@ pub fn resolve_effective_extract(
     source: &SourceConfig,
     group: Option<&GroupConfig>,
 ) -> ExtractConfig {
-    if let Some(g) = group {
-        if let Some(ref ext) = g.default_extract {
-            // 如果 source 是默认 Text 提取且无特定配置，则继承 group 的提取规则
-            if source.extract == ExtractConfig::default() {
-                return ext.clone();
-            }
+    if let Some(g) = group
+        && let Some(ref ext) = g.default_extract
+    {
+        // 如果 source 是默认 Text 提取且无特定配置，则继承 group 的提取规则
+        if source.extract == ExtractConfig::default() {
+            return ext.clone();
         }
     }
     source.extract.clone()
@@ -488,17 +492,16 @@ pub fn resolve_effective_cron(
     group: Option<&GroupConfig>,
     default_cron: &str,
 ) -> String {
-    if let Some(ref cron) = source.schedule.cron {
-        if !cron.trim().is_empty() {
-            return cron.clone();
-        }
+    if let Some(ref cron) = source.schedule.cron
+        && !cron.trim().is_empty()
+    {
+        return cron.clone();
     }
-    if let Some(g) = group {
-        if let Some(ref cron) = g.default_cron {
-            if !cron.trim().is_empty() {
-                return cron.clone();
-            }
-        }
+    if let Some(g) = group
+        && let Some(ref cron) = g.default_cron
+        && !cron.trim().is_empty()
+    {
+        return cron.clone();
     }
     if default_cron.trim().is_empty() {
         DEFAULT_CRON.to_string()
@@ -671,7 +674,9 @@ pub enum ImageSelector {
     #[default]
     None,
     FirstItem,
-    Css { selector: String },
+    Css {
+        selector: String,
+    },
     Screenshot,
 }
 

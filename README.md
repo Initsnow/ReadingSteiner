@@ -6,9 +6,24 @@
 - 可选外部 Chrome/Chromium 浏览器引擎（通过 CDP 远程调试协议驱动，不内置二进制、按需连接）。
 - 存储：SQLite（WAL 模式）+ 本地 media 目录。
 - 预设分组（Groups）：站点模板化配置，统一管理 cron 调度、请求头、提取模式与通知目标。
-- 部署：NixOS flake 直接引用与标准 systemd 部署。
+- 部署：NixOS flake 模块部署（支持直接下载 GitHub Release 二进制避免本地编译）与标准 systemd 部署。
 
 ## 快速开始
+
+### 方式一：通过 Nix 直接运行或部署（无需本地编译）
+
+```bash
+# 直接运行预编译二进制（免本地编译 Rust 与前端）
+nix run github:Initsnow/ReadingSteiner#reading-steiner-bin -- --help
+
+# 在 NixOS 配置中一键启用（支持 useBinary 免编译）
+services.reading-steiner = {
+  enable = true;
+  useBinary = true;
+};
+```
+
+### 方式二：本地源码构建
 
 ```bash
 # 构建 Rust 后端
@@ -38,7 +53,7 @@ cd web && pnpm install && pnpm build && cd ..
 | [监控源配置](./docs/sources.md) | fetch / extract / schedule 写法 |
 | [图片通知](./docs/sources.md#图片通知可选) | 变更通知附带图片 |
 | [备份与恢复](./docs/backup.md) | 备份 / 恢复 / zip 迁移 |
-| [部署](./docs/deployment.md) | NixOS flake 部署 |
+| [部署](./docs/deployment.md) | NixOS flake 部署（含二进制免编译指南） |
 | [测试](./docs/testing.md) | 单元 / 集成 / 压测 |
 
 ## 目录结构
@@ -51,6 +66,7 @@ src/fetcher/   抓取引擎（HTTP / 外部 CDP 浏览器）
 src/           scheduler / db / pipeline / differ / notifier / ...
 web/           现代化 Web 控制台（Vite + React + Tailwind + shadcn/ui）
 tests/         集成测试
+nix/           Nix 预编译二进制下载包定义
 nixos/         NixOS 模块与集成测试
 config.yaml    全局系统运行参数与基础设施配置的唯一权威来源（Single Source of Truth）
 ```

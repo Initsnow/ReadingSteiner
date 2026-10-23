@@ -1,4 +1,4 @@
-{ config, lib, pkgs, self, ... }:
+{ config, lib, pkgs, self ? null, ... }:
 let
   cfg = config.services.reading-steiner;
 
@@ -53,6 +53,34 @@ in
 {
   options.services.reading-steiner = {
     enable = lib.mkEnableOption "ReadingSteiner web/data change detection service";
+
+    useBinary = lib.mkOption {
+      type = lib.types.bool;
+      default = false;
+      description = ''
+        Whether to use the precompiled binary from GitHub Releases instead of
+        compiling locally from source.
+      '';
+    };
+
+    binaryVersion = lib.mkOption {
+      type = lib.types.str;
+      default = "0.1.0";
+      description = "Version of the precompiled binary to download from GitHub Releases.";
+    };
+
+    binaryHashes = lib.mkOption {
+      type = lib.types.attrsOf lib.types.str;
+      default = { };
+      example = lib.literalExpression ''
+        {
+          x86_64-linux = "sha256-...";
+        }
+      '';
+      description = ''
+        Optional SRI hashes override for precompiled binaries per architecture.
+      '';
+    };
 
     package = lib.mkOption {
       type = lib.types.package;
@@ -171,15 +199,18 @@ in
       staticDir = lib.mkOption {
         type = lib.types.str;
         default = lib.mkDefault (
-          if (self.packages.${pkgs.system} or { }) ? web
+          if (cfg.package.passthru or { }) ? hasWeb && cfg.package.passthru.hasWeb
+          then "${cfg.package}/share/reading-steiner/web"
+          else if self != null && (self.packages.${pkgs.system} or { }) ? web
           then "${self.packages.${pkgs.system}.web}"
           else ""
         );
-        defaultText = lib.literalExpression "flake `packages.web` outPath, or \"\"";
+        defaultText = lib.literalExpression "package web share dir, flake `packages.web` outPath, or \"\"";
         description = ''
-          Web console static assets directory. Empty means falling back to the
-          daemon's built-in relative `web/dist` lookup; prefer the flake's
-          `packages.web` for a fully declarative deployment.
+          Web console static assets directory. When using `useBinary = true`,
+          static assets bundled with the release binary are automatically used.
+          Empty means falling back to the daemon's built-in relative `web/dist` lookup;
+          prefer the flake's `packages.web` or bundled assets for a fully declarative deployment.
         '';
       };
       authTokenFile = lib.mkOption {
@@ -264,10 +295,26 @@ in
         }
       ];
 
-      # 优先 pkgs.reading-steiner（可用 overlay 提供），否则用 flake 自带包
+      # 优先使用配置的包；若启用 useBinary 则自动选用 reading-steiner-bin（并支持覆盖版本与 hash）；
+      # 否则优先 pkgs.reading-steiner（可用 overlay 提供），最后回退至 flake 源码构建包。
       services.reading-steiner.package = lib.mkDefault (
-        if pkgs ? reading-steiner then pkgs.reading-steiner
-        else if (self.packages.${pkgs.system} or { }) ? default then self.packages.${pkgs.system}.default
+        if cfg.useBinary then
+          let
+            baseBin =
+              if pkgs ? reading-steiner-bin then pkgs.reading-steiner-bin
+              else if self != null && (self.packages.${pkgs.system} or { }) ? reading-steiner-bin
+              then self.packages.${pkgs.system}.reading-steiner-bin
+              else throw "services.reading-steiner.useBinary is enabled, but reading-steiner-bin is not available for ${pkgs.system}.";
+          in
+          if cfg.binaryHashes != { } || cfg.binaryVersion != "0.1.0" then
+            baseBin.override {
+              version = cfg.binaryVersion;
+              hashes = cfg.binaryHashes;
+            }
+          else
+            baseBin
+        else if pkgs ? reading-steiner then pkgs.reading-steiner
+        else if self != null && (self.packages.${pkgs.system} or { }) ? default then self.packages.${pkgs.system}.default
         else throw "services.reading-steiner: no package found. Set `services.reading-steiner.package` or add this flake's overlay."
       );
 

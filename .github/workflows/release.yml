@@ -1,0 +1,114 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag name (e.g. v0.1.0)'
+        required: false
+        default: ''
+
+permissions:
+  contents: write
+
+jobs:
+  build-web:
+    name: Build Web Assets
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: web/pnpm-lock.yaml
+
+      - name: Build Web
+        run: |
+          cd web
+          pnpm install --frozen-lockfile
+          pnpm build
+
+      - name: Upload Web Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: web-dist
+          path: web/dist
+
+  build-release:
+    name: Build & Upload (${{ matrix.target }})
+    needs: [build-web]
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-latest
+          - target: aarch64-unknown-linux-musl
+            os: ubuntu-latest
+          - target: x86_64-apple-darwin
+            os: macos-13
+          - target: aarch64-apple-darwin
+            os: macos-latest
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download Web Dist
+        uses: actions/download-artifact@v4
+        with:
+          name: web-dist
+          path: web/dist
+
+      - name: Install musl-tools
+        if: matrix.target == 'x86_64-unknown-linux-musl'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y musl-tools
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Upload Rust binary
+        uses: taiki-e/upload-rust-binary-action@v1
+        with:
+          bin: reading-steiner
+          target: ${{ matrix.target }}
+          archive: reading-steiner-$tag-$target
+          include: web/dist, README.md, LICENSE
+          tar: unix
+          zip: windows
+          checksum: sha256
+          ref: ${{ github.event.inputs.tag || github.ref }}
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+  publish-summary:
+    name: Generate Nix SRI Hashes & Summary
+    needs: [build-release]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Print Nix SRI hashes
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.event.inputs.tag || github.ref_name }}
+        run: |
+          python3 scripts/generate-nix-hashes.py

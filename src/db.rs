@@ -163,7 +163,10 @@ impl Db {
             )?;
             self.conn
                 .pragma_update(None, "user_version", SCHEMA_VERSION)?;
-            info!(version = SCHEMA_VERSION, "fresh database schema v1 initialized");
+            info!(
+                version = SCHEMA_VERSION,
+                "fresh database schema v1 initialized"
+            );
         } else {
             // 如果是从旧版本迁移过来的库，确保新表 groups 和新字段存在，并清理废弃的 tags 和 settings 表
             self.conn.execute_batch(
@@ -281,12 +284,12 @@ impl Db {
                 .unwrap_or_default();
 
             let browser_str: Option<String> = r.get(4)?;
-            let default_browser_config = browser_str
-                .and_then(|s| serde_json::from_str::<BrowserConfig>(&s).ok());
+            let default_browser_config =
+                browser_str.and_then(|s| serde_json::from_str::<BrowserConfig>(&s).ok());
 
             let extract_str: Option<String> = r.get(5)?;
-            let default_extract = extract_str
-                .and_then(|s| serde_json::from_str::<ExtractConfig>(&s).ok());
+            let default_extract =
+                extract_str.and_then(|s| serde_json::from_str::<ExtractConfig>(&s).ok());
 
             let created_at: String = r.get(7)?;
             let updated_at: String = r.get(8)?;
@@ -389,7 +392,8 @@ impl Db {
 
     pub fn delete_group(&self, id: &str) -> Result<usize> {
         // 解除该分组下所有源的分组关联
-        self.conn.execute("UPDATE sources SET group_id=NULL WHERE group_id=?1", [id])?;
+        self.conn
+            .execute("UPDATE sources SET group_id=NULL WHERE group_id=?1", [id])?;
         Ok(self.conn.execute("DELETE FROM groups WHERE id=?1", [id])?)
     }
 

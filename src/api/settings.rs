@@ -9,7 +9,10 @@ use crate::scheduler::AppState;
 /// 读取全局设置视图（权威数据源为内存与磁盘中的 config.yaml）。
 pub async fn settings_get(state: &AppState) -> Result<SettingsView> {
     let cfg = state.config_snapshot();
-    Ok(SettingsView::from_config(&cfg, state.config_path.as_deref()))
+    Ok(SettingsView::from_config(
+        &cfg,
+        state.config_path.as_deref(),
+    ))
 }
 
 /// 保存全局设置并热更新。
@@ -86,7 +89,9 @@ fn validate(s: &SettingsView) -> Result<()> {
         )));
     }
     if s.browser_enabled && s.browser_cdp_url.trim().is_empty() {
-        return Err(Error::config("启用浏览器渲染引擎时必须填写 Chrome CDP 调试地址"));
+        return Err(Error::config(
+            "启用浏览器渲染引擎时必须填写 Chrome CDP 调试地址",
+        ));
     }
     Ok(())
 }

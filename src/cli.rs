@@ -167,19 +167,28 @@ impl ApiClient {
         self.request(reqwest::Method::GET, path, None).await
     }
 
-    pub async fn post<T: serde::Serialize>(&self, path: &str, body: Option<&T>) -> Result<serde_json::Value> {
+    pub async fn post<T: serde::Serialize>(
+        &self,
+        path: &str,
+        body: Option<&T>,
+    ) -> Result<serde_json::Value> {
         let body_val = body
-            .map(|b| serde_json::to_value(b))
+            .map(serde_json::to_value)
             .transpose()
             .map_err(|e| Error::other(e.to_string()))?;
-        self.request(reqwest::Method::POST, path, body_val.as_ref()).await
+        self.request(reqwest::Method::POST, path, body_val.as_ref())
+            .await
     }
 
     pub async fn delete(&self, path: &str) -> Result<serde_json::Value> {
         self.request(reqwest::Method::DELETE, path, None).await
     }
 
-    pub async fn upload_zip(&self, path: &str, file_path: &std::path::Path) -> Result<serde_json::Value> {
+    pub async fn upload_zip(
+        &self,
+        path: &str,
+        file_path: &std::path::Path,
+    ) -> Result<serde_json::Value> {
         let bytes = tokio::fs::read(file_path).await?;
         let file_part = reqwest::multipart::Part::bytes(bytes)
             .file_name("backup.zip")
@@ -201,9 +210,15 @@ impl ApiClient {
             .json()
             .await
             .map_err(|e| Error::other(format!("Failed to parse response JSON: {e}")))?;
-        let ok = envelope.get("ok").and_then(|v| v.as_bool()).unwrap_or(false);
+        let ok = envelope
+            .get("ok")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
         if ok {
-            Ok(envelope.get("result").cloned().unwrap_or(serde_json::Value::Null))
+            Ok(envelope
+                .get("result")
+                .cloned()
+                .unwrap_or(serde_json::Value::Null))
         } else {
             let err = envelope
                 .get("error")
@@ -236,9 +251,15 @@ impl ApiClient {
             .json()
             .await
             .map_err(|e| Error::other(format!("Failed to parse response JSON: {e}")))?;
-        let ok = envelope.get("ok").and_then(|v| v.as_bool()).unwrap_or(false);
+        let ok = envelope
+            .get("ok")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
         if ok {
-            Ok(envelope.get("result").cloned().unwrap_or(serde_json::Value::Null))
+            Ok(envelope
+                .get("result")
+                .cloned()
+                .unwrap_or(serde_json::Value::Null))
         } else {
             let err = envelope
                 .get("error")
@@ -308,7 +329,7 @@ pub async fn run(cli: Cli) -> Result<()> {
                 if json {
                     print_output(&res, true);
                 } else if let Some(arr) = res.as_array() {
-                    println!("{:<24} {:<12} {:<10} {}", "ID", "GROUP", "STATUS", "URL");
+                    println!("{:<24} {:<12} {:<10} URL", "ID", "GROUP", "STATUS");
                     println!("{}", "-".repeat(70));
                     for s in arr {
                         let id = s.get("id").and_then(|v| v.as_str()).unwrap_or("-");
@@ -391,10 +412,7 @@ pub async fn run(cli: Cli) -> Result<()> {
                     // daemon not running: offline fallback
                     let dir = crate::backup::backup_from_path(&cfg, Some(&config))?;
                     if json {
-                        println!(
-                            "{}",
-                            json!({ "backup_dir": dir.display().to_string() })
-                        );
+                        println!("{}", json!({ "backup_dir": dir.display().to_string() }));
                     } else {
                         println!("backup created offline: {}", dir.display());
                     }
@@ -415,8 +433,13 @@ pub async fn run(cli: Cli) -> Result<()> {
                         } else {
                             for b in backups {
                                 let name = b.get("name").and_then(|v| v.as_str()).unwrap_or("");
-                                let has_zip = b.get("has_zip").and_then(|v| v.as_bool()).unwrap_or(false);
-                                println!("{}\t{}", name, if has_zip { "(zip available)" } else { "" });
+                                let has_zip =
+                                    b.get("has_zip").and_then(|v| v.as_bool()).unwrap_or(false);
+                                println!(
+                                    "{}\t{}",
+                                    name,
+                                    if has_zip { "(zip available)" } else { "" }
+                                );
                             }
                         }
                     } else {
@@ -427,7 +450,10 @@ pub async fn run(cli: Cli) -> Result<()> {
                 Err(_) => {
                     let infos = crate::backup::list_backups(&cfg.state_dir)?;
                     if json {
-                        println!("{}", serde_json::to_string_pretty(&infos).unwrap_or_default());
+                        println!(
+                            "{}",
+                            serde_json::to_string_pretty(&infos).unwrap_or_default()
+                        );
                     } else if infos.is_empty() {
                         println!("no backups found");
                     } else {

@@ -121,9 +121,7 @@ async fn test_http_fetcher_and_pipeline() {
         .await;
 
     let cfg = Config::default();
-    let fetcher =
-        reading_steiner::fetcher::create_fetcher("http", &cfg)
-            .unwrap();
+    let fetcher = reading_steiner::fetcher::create_fetcher("http", &cfg).unwrap();
     let doc = fetcher
         .fetch(&FetchSpec {
             fetch: FetchConfig {
@@ -790,7 +788,10 @@ fn test_reload_settings_hot_update() {
     assert_eq!(state.runtime.read().unwrap().default_cron, "*/10 * * * *");
     assert_eq!(state.config.read().unwrap().telegram.url, "tgram://hot/C1");
     assert!(state.config.read().unwrap().browser.enabled);
-    assert_eq!(state.config.read().unwrap().browser.cdp_url, "http://127.0.0.1:9222");
+    assert_eq!(
+        state.config.read().unwrap().browser.cdp_url,
+        "http://127.0.0.1:9222"
+    );
 
     let _ = std::fs::remove_dir_all(&dir);
 }

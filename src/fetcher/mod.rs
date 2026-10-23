@@ -21,10 +21,7 @@ pub struct FetchSpec {
 }
 
 /// 创建抓取器。UA、超时与引擎配置 100% 取自权威 Config（config.yaml）。
-pub fn create_fetcher(
-    engine: &str,
-    cfg: &crate::config::Config,
-) -> Result<Box<dyn Fetcher>> {
+pub fn create_fetcher(engine: &str, cfg: &crate::config::Config) -> Result<Box<dyn Fetcher>> {
     match engine {
         "http" => Ok(Box::new(http::HttpFetcher::new(
             &cfg.daemon.default_user_agent,

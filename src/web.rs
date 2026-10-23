@@ -296,7 +296,9 @@ async fn source_dry_run_test(
     State(state): State<Arc<AppState>>,
     Json(source): Json<SourceConfig>,
 ) -> std::result::Result<Json<Envelope<serde_json::Value>>, ApiError> {
-    Ok(Envelope::ok(api::test_source_dry_run(&state, &source).await?))
+    Ok(Envelope::ok(
+        api::test_source_dry_run(&state, &source).await?,
+    ))
 }
 
 async fn source_check_by_id(

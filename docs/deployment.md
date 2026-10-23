@@ -8,7 +8,7 @@
 
 ```nix
 {
-  inputs.reading-steiner.url = "github:you/ReadingSteiner";
+  inputs.reading-steiner.url = "github:Initsnow/ReadingSteiner";
 
   outputs = { nixpkgs, reading-steiner, ... }: {
     nixosConfigurations.host = nixpkgs.lib.nixosSystem {
@@ -18,16 +18,18 @@
         {
           services.reading-steiner = {
             enable = true;
+            # 开启此项直接从 GitHub Releases 下载预编译二进制，免去本地耗时编译 Rust
+            useBinary = true;
             web = {
               port = 8901;
               # 非回环地址必须配置 token 文件（systemd credential 注入，不落 nix store）
               listenAddress = "0.0.0.0";
               authTokenFile = "/etc/reading-steiner/token";
             };
-            # Camofox 浏览器引擎（可选，动态页面抓取）
-            camofox = {
-              enabled = true;
-              baseUrl = "http://127.0.0.1:9377";
+            # 外部 CDP 浏览器引擎（可选，动态页面抓取）
+            browser = {
+              enabled = false;
+              cdpUrl = "http://127.0.0.1:9222";
             };
           };
         }
@@ -36,6 +38,36 @@
   };
 }
 ```
+
+### 预编译二进制包（免本地编译）
+
+Rust 项目包含大量依赖，在小内存 VPS 或嵌入式设备（如 1G/2G RAM 或 Raspberry Pi）上直接编译可能会耗尽内存或耗费数十分钟。
+
+为此，本项目 CI 会在发布 Release 时自动编译并打包发布跨平台独立二进制（静态 musl 链接），你可以通过以下方式免编译使用：
+
+1. **NixOS 模块开启 `useBinary`**：
+   ```nix
+   services.reading-steiner = {
+     enable = true;
+     useBinary = true; # 自动使用 GitHub Release 二进制及随包分发的前端静态资源
+   };
+   ```
+
+2. **使用 flake 的 prebuilt 包**：
+   ```bash
+   # 直接运行预编译二进制
+   nix run github:Initsnow/ReadingSteiner#reading-steiner-bin -- --help
+
+   # 或者安装到 profile
+   nix profile install github:Initsnow/ReadingSteiner#reading-steiner-bin
+   ```
+
+3. **使用二进制 Overlay**：
+   ```nix
+   nixpkgs.overlays = [
+     reading-steiner.overlays.binary
+   ];
+   ```
 
 ### 重要说明
 
@@ -50,29 +82,30 @@
 
 | 选项 | 默认值 | 说明 |
 | --- | --- | --- |
-| `package` | flake 包 | 使用的 ReadingSteiner 包 |
+| `useBinary` | `false` | 直接从 GitHub Release 下载预编译静态二进制（免去本地编译） |
+| `binaryVersion` | `"0.1.0"` | 预编译二进制版本号（进阶） |
+| `binaryHashes` | `{}` | 预编译二进制的 SRI hash 覆盖映射（进阶） |
+| `package` | flake 包 | 使用的 ReadingSteiner 包（未指定时根据 `useBinary` 自动选择） |
 | `configFile` | `null` | 自备 config.yaml（进阶）；设置后跳过自动生成 |
 | `stateDir` | `/var/lib/reading-steiner` | 状态目录（SQLite、监控源、历史） |
 | `mediaDir` | `/var/lib/reading-steiner/media` | 图片媒体目录 |
-| `socketPath` | `/run/reading-steiner/daemon.sock` | CLI 控制套接字 |
 | `logLevel` | `info` | 日志级别（trace/debug/info/warn/error） |
 | `user` / `group` | `reading-steiner` | 服务运行用户/组（自动创建） |
 | `openFirewall` | `false` | 防火墙放行 web 端口 |
 | `web.listenAddress` | `127.0.0.1` | Web 控制台监听地址 |
 | `web.port` | `8901` | Web 控制台端口 |
-| `web.staticDir` | flake `packages.web` | 前端静态资源目录（默认自动接线 flake 构建的前端产物；留空则回退 daemon 相对路径 `web/dist`） |
+| `web.staticDir` | 自动推导 | 前端静态资源目录（使用 `useBinary` 时自动接线随包分发的前端；源码模式使用 flake 的 `packages.web`；留空回退 daemon 相对路径 `web/dist`） |
 | `web.authTokenFile` | `null` | Web Bearer token 文件（credential 注入） |
 | `telegram.apiBase` | `https://api.telegram.org` | Bot API 地址 |
 | `telegram.imageBytesBudget` | `10485760` | 单事件图片字节预算 |
 | `telegram.digestWindowSecs` | `30` | 通知聚合窗口秒数 |
-| `camofox.enabled` | `false` | 启用 Camofox 引擎 |
-| `camofox.baseUrl` | `http://127.0.0.1:9377` | Camofox 地址 |
-| `camofox.accessKeyFile` / `apiKeyFile` | `null` | 密钥文件（credential 注入） |
-| `camofox.poolSize` | `4` | 浏览器池大小 |
+| `browser.enabled` | `false` | 启用外部 Chrome/Chromium 浏览器引擎（CDP 协议） |
+| `browser.cdpUrl` | `"http://127.0.0.1:9222"` | CDP 调试接口地址 |
+| `browser.timeoutSecs` | `30` | 浏览器抓取与渲染超时秒数 |
 
 ### 检查
 
-- `nix flake check` 会运行 fmt / clippy / unit 测试与模块求值检查；
+- `nix flake check` 会运行 fmt / clippy / unit 测试与模块求值检查（包括源码与预编译二进制求值冒烟测试）；
 - NixOS 集成测试（[`nixos/tests/reading-steiner.nix`](../nixos/tests/reading-steiner.nix)）
   需要 KVM，无 KVM 的机器上自动跳过。
 

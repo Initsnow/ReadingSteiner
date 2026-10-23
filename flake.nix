@@ -15,11 +15,19 @@
       hasKvm = builtins.pathExists "/dev/kvm";
     in
     {
-      nixosModules.default = import ./nixos/module.nix;
-      nixosModules.reading-steiner = import ./nixos/module.nix;
+      nixosModules.default = { ... }: {
+        imports = [ ./nixos/module.nix ];
+        _module.args.self = self;
+      };
+      nixosModules.reading-steiner = self.nixosModules.default;
 
       overlays.default = final: _prev: {
         reading-steiner = self.packages.${final.stdenv.hostPlatform.system}.default;
+        reading-steiner-bin = self.packages.${final.stdenv.hostPlatform.system}.reading-steiner-bin;
+      };
+
+      overlays.binary = final: _prev: {
+        reading-steiner = self.packages.${final.stdenv.hostPlatform.system}.reading-steiner-bin;
       };
 
       checks = forAllSystems (system:
@@ -87,6 +95,9 @@
             meta.mainProgram = "reading-steiner";
           });
 
+          # 从 GitHub Releases 下载预编译二进制（避免在小机器上耗时本地编译 Rust）
+          binPackage = pkgs.callPackage ./nix/binary.nix { };
+
           # Web 控制台前端（pnpm 构建），产物随包分发
           web = pkgs.stdenv.mkDerivation {
             pname = "reading-steiner-web";
@@ -109,6 +120,8 @@
         {
           default = package;
           reading-steiner = package;
+          reading-steiner-bin = binPackage;
+          bin = binPackage;
           inherit web;
         });
 
@@ -124,7 +137,7 @@
           };
         });
 
-      # 模块求值冒烟测试：接入模块并确认可求值（无需 KVM / 无构建）。
+      # 模块求值冒烟测试：源码构建与二进制下载两种模式
       # fileSystems/boot loader 为求值占位，不做实际构建。
       nixosConfigurations.smoke-test = nixpkgs.lib.nixosSystem {
         system = "x86_64-linux";
@@ -133,6 +146,22 @@
           ({ ... }: {
             services.reading-steiner.enable = true;
             services.reading-steiner.package = self.packages.x86_64-linux.default;
+            fileSystems."/" = {
+              device = "/dev/disk/by-label/nixos";
+              fsType = "ext4";
+            };
+            boot.loader.grub.devices = [ "/dev/vda" ];
+          })
+        ];
+      };
+
+      nixosConfigurations.smoke-test-binary = nixpkgs.lib.nixosSystem {
+        system = "x86_64-linux";
+        modules = [
+          self.nixosModules.default
+          ({ ... }: {
+            services.reading-steiner.enable = true;
+            services.reading-steiner.useBinary = true;
             fileSystems."/" = {
               device = "/dev/disk/by-label/nixos";
               fsType = "ext4";

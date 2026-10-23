@@ -9,7 +9,9 @@ use serde_json::{Value, json};
 use tokio::sync::{Mutex, Semaphore};
 use tracing::{debug, error, info, warn};
 
-use crate::config::{ChangeType, Config, EditableSettings, RuntimeConfig, SettingsView, SourceConfig};
+use crate::config::{
+    ChangeType, Config, EditableSettings, RuntimeConfig, SettingsView, SourceConfig,
+};
 use crate::db::Db;
 use crate::differ;
 use crate::error::{Error, Result};
@@ -85,7 +87,7 @@ impl AppState {
     pub fn is_readonly(&self) -> bool {
         self.config_path
             .as_deref()
-            .map_or(false, crate::config::is_path_readonly)
+            .is_some_and(crate::config::is_path_readonly)
     }
 
     /// 运行时配置快照（热更新后即时反映新值）。
@@ -398,10 +400,10 @@ async fn maybe_prune_history(state: &Arc<AppState>, last_prune: Instant) -> Inst
     }
     let db = state.db.lock().await;
     let global_limit = state.runtime_snapshot().history_limit_per_source;
-    if global_limit > 0 {
-        if let Err(e) = db.prune_history(global_limit) {
-            warn!(error = %e, "history pruning failed");
-        }
+    if global_limit > 0
+        && let Err(e) = db.prune_history(global_limit)
+    {
+        warn!(error = %e, "history pruning failed");
     }
     Instant::now()
 }
@@ -429,7 +431,16 @@ pub async fn check_source(state: &Arc<AppState>, source_id: &str) -> Result<()> 
     // 304：内容未变，仅推进调度时间，不做后续比对。
     if doc.not_modified {
         debug!(source = %source.id, "304 not modified");
-        advance_schedule(state, &source, group.as_ref(), &tz, &default_cron, None, false).await?;
+        advance_schedule(
+            state,
+            &source,
+            group.as_ref(),
+            &tz,
+            &default_cron,
+            None,
+            false,
+        )
+        .await?;
         return Ok(());
     }
 
@@ -456,7 +467,16 @@ pub async fn check_source(state: &Arc<AppState>, source_id: &str) -> Result<()> 
 
     // 无变化：推进调度并结束。
     if !diff.changed {
-        advance_schedule(state, &source, group.as_ref(), &tz, &default_cron, Some(Utc::now()), false).await?;
+        advance_schedule(
+            state,
+            &source,
+            group.as_ref(),
+            &tz,
+            &default_cron,
+            Some(Utc::now()),
+            false,
+        )
+        .await?;
         debug!(source = %source.id, "no change");
         return Ok(());
     }
@@ -540,17 +560,23 @@ async fn fetch_document(
         None
     };
     let extract = crate::config::resolve_effective_extract(source, group.as_ref());
-    if matches!(extract.images(), Some(crate::config::ImageSelector::Screenshot)) {
+    if matches!(
+        extract.images(),
+        Some(crate::config::ImageSelector::Screenshot)
+    ) {
         fetch.screenshot = true;
     }
     // 当 wait.selector 留空时，自动回退继承提取规则中的 CSS 选择器
-    if fetch.wait.selector.as_ref().map_or(true, |s| s.trim().is_empty()) {
-        if let Some(css_sel) = extract.css_selector() {
-            fetch.wait.selector = Some(css_sel.to_string());
-        }
+    if fetch
+        .wait
+        .selector
+        .as_ref()
+        .is_none_or(|s| s.trim().is_empty())
+        && let Some(css_sel) = extract.css_selector()
+    {
+        fetch.wait.selector = Some(css_sel.to_string());
     }
-    let fetcher =
-        fetcher::create_fetcher(&fetch.engine, &state.config_snapshot())?;
+    let fetcher = fetcher::create_fetcher(&fetch.engine, &state.config_snapshot())?;
     fetcher
         .fetch(&FetchSpec {
             fetch,
@@ -778,6 +804,7 @@ pub async fn test_source(state: &Arc<AppState>, source_id: &str) -> Result<Value
 }
 
 /// 计算下一轮调度状态。
+#[allow(clippy::too_many_arguments)]
 fn next_schedule(
     source: &SourceConfig,
     group: Option<&crate::config::GroupConfig>,

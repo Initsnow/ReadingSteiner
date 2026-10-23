@@ -42,12 +42,11 @@ impl BrowserFetcher {
         }
 
         let endpoint = format!("{}/json/version", raw.trim_end_matches('/'));
-        let resp = self
-            .http_client
-            .get(&endpoint)
-            .send()
-            .await
-            .map_err(|e| Error::other(format!("failed to connect to CDP endpoint at {endpoint}: {e}")))?;
+        let resp = self.http_client.get(&endpoint).send().await.map_err(|e| {
+            Error::other(format!(
+                "failed to connect to CDP endpoint at {endpoint}: {e}"
+            ))
+        })?;
 
         let val: Value = resp
             .json()
@@ -77,9 +76,9 @@ impl Fetcher for BrowserFetcher {
         };
 
         let fetch_future = async {
-            let (browser, mut handler) = Browser::connect(&ws_url)
-                .await
-                .map_err(|e| Error::other(format!("failed to connect to Chrome CDP via {ws_url}: {e}")))?;
+            let (browser, mut handler) = Browser::connect(&ws_url).await.map_err(|e| {
+                Error::other(format!("failed to connect to Chrome CDP via {ws_url}: {e}"))
+            })?;
 
             tokio::spawn(async move {
                 while let Some(res) = handler.next().await {
@@ -104,9 +103,9 @@ impl Fetcher for BrowserFetcher {
                 }
 
                 // 显式导航至目标 URL 并等待导航完成
-                page.goto(&spec.fetch.url)
-                    .await
-                    .map_err(|e| Error::other(format!("failed to navigate to {}: {e}", spec.fetch.url)))?;
+                page.goto(&spec.fetch.url).await.map_err(|e| {
+                    Error::other(format!("failed to navigate to {}: {e}", spec.fetch.url))
+                })?;
 
                 // 等待特定选择器（如果配置了 wait.selector）
                 if let Some(ref sel) = spec.fetch.wait.selector {
@@ -119,11 +118,11 @@ impl Fetcher for BrowserFetcher {
                             let eval_res = page
                                 .evaluate(format!("Boolean(document.querySelector({:?}))", trimmed))
                                 .await;
-                            if let Ok(val) = eval_res {
-                                if val.into_value::<bool>().unwrap_or(false) {
-                                    matched = true;
-                                    break;
-                                }
+                            if let Ok(val) = eval_res
+                                && val.into_value::<bool>().unwrap_or(false)
+                            {
+                                matched = true;
+                                break;
                             }
                             tokio::time::sleep(Duration::from_millis(200)).await;
                         }
@@ -134,10 +133,10 @@ impl Fetcher for BrowserFetcher {
                 }
 
                 // 执行自定义 JavaScript
-                if let Some(ref js) = spec.fetch.evaluate {
-                    if !js.trim().is_empty() {
-                        let _ = page.evaluate(js.as_str()).await;
-                    }
+                if let Some(ref js) = spec.fetch.evaluate
+                    && !js.trim().is_empty()
+                {
+                    let _ = page.evaluate(js.as_str()).await;
                 }
 
                 // 获取页面 HTML 内容
@@ -166,10 +165,12 @@ impl Fetcher for BrowserFetcher {
             fetch_result
         };
 
-        let (html, screenshot) = tokio::time::timeout(Duration::from_secs(timeout_secs), fetch_future)
-            .await
-            .map_err(|_| Error::other(format!("browser fetch timed out after {timeout_secs}s")))?
-            ?;
+        let (html, screenshot) =
+            tokio::time::timeout(Duration::from_secs(timeout_secs), fetch_future)
+                .await
+                .map_err(|_| {
+                    Error::other(format!("browser fetch timed out after {timeout_secs}s"))
+                })??;
 
         let duration_ms = started.elapsed().as_millis() as u64;
         let content_sha256 = blake3::hash(html.as_bytes()).to_hex().to_string();

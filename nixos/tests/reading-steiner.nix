@@ -24,7 +24,7 @@ pkgs.testers.runNixOSTest {
   name = "reading-steiner";
 
   nodes.machine = { pkgs, config, ... }: {
-    imports = [ ../../module.nix ];
+    imports = [ ../module.nix ];
     # module 期望 self 参数用于默认包回退，直接传入 flake 自身
     _module.args.self = reading-steiner;
 
